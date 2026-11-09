@@ -1,4 +1,4 @@
-# release-deploy
+# release-switch
 
 Zero-downtime deploys with release folders, for several PHP projects on one server.
 One script (`deploy`) does the parts every project shares. Each project keeps its own steps in a
@@ -56,9 +56,9 @@ The repos are private. A GitHub deploy key (read-only, under the repo's **Settin
 works for one repo only, so give each repo its own key and host name in `~/.ssh/config`:
 
 ```text
-Host github-release-deploy
+Host github-release-switch
     HostName github.com
-    IdentityFile ~/.ssh/release_deploy
+    IdentityFile ~/.ssh/release_switch_deploy
     IdentitiesOnly yes
 
 Host github-<project>
@@ -71,17 +71,17 @@ Then use that host name in clone URLs and in each project's `REPO_URL`
 (`git@github-<project>:owner/repo.git`).
 
 ```bash
-git clone git@github-release-deploy:ivan-tarasov/release-deploy.git ~/release-deploy
-cp ~/release-deploy/projects/example.env ~/release-deploy/projects/<project>.env
+git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
+cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
 ```
 
 Edit the new file (see Settings), then add an alias to your shell profile:
 
 ```bash
-alias deploy="$HOME/release-deploy/deploy"
+alias deploy="$HOME/release-switch/deploy"
 ```
 
-Update the engine with `git -C ~/release-deploy pull`. Files in `projects/` other than
+Update the engine with `git -C ~/release-switch pull`. Files in `projects/` other than
 `example.env` are not tracked, so a pull never touches them.
 
 ### Moving a project from a plain checkout

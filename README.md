@@ -52,8 +52,26 @@ It can be left out when there is only one.
 
 ## Setup on a server
 
+The repos are private. A GitHub deploy key (read-only, under the repo's **Settings → Deploy keys**)
+works for one repo only, so give each repo its own key and host name in `~/.ssh/config`:
+
+```text
+Host github-release-deploy
+    HostName github.com
+    IdentityFile ~/.ssh/release_deploy
+    IdentitiesOnly yes
+
+Host github-<project>
+    HostName github.com
+    IdentityFile ~/.ssh/<project>_deploy
+    IdentitiesOnly yes
+```
+
+Then use that host name in clone URLs and in each project's `REPO_URL`
+(`git@github-<project>:owner/repo.git`).
+
 ```bash
-git clone git@github.com:ivan-tarasov/release-deploy.git ~/release-deploy
+git clone git@github-release-deploy:ivan-tarasov/release-deploy.git ~/release-deploy
 cp ~/release-deploy/projects/example.env ~/release-deploy/projects/<project>.env
 ```
 

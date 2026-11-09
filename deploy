@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+#
+# Zero-downtime deploys with release folders. Runs on the server. See README.md.
+#
+#   deploy [project] [deploy | status | rollback [name] | init <checkout> [--dry-run] | help]
+
+set -euo pipefail
+
+ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
+
+# Settings a project file may set. Env vars of the same name win.
+SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION
+    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ)
+
+PROJECT=""
+
+# Set while a deploy runs, so the exit trap knows what to clean up.
+NEW_RELEASE=""
+PREVIOUS_RELEASE=""
+SWITCHED=0
+LOCK_DIR=""
+RELEASE_DIR=""
+RELEASE_NAME=""
+SHARED=()
+
+say() {
+    printf '==> %s\n' "$*"
+}
+
+fail() {
+    printf 'deploy: %s\n' "$*" >&2
+    exit 1
+}
+
+# Project names, from projects/<name>.env.
+list_projects() {
+    local file
+
+    for file in "$PROJECTS_DIR"/*.env; do
+        [ -f "$file" ] || continue
+        file="$(basename "$file" .env)"
+        [ "$file" = example ] || printf '%s\n' "$file"
+    done
+}
+
+# Reads projects/<name>.env, keeping any setting already set as an env var.
+load_project() {
+    local name kept_names=() kept_values=() i
+    PROJECT="$1"
+
+    for name in "${SETTINGS[@]}"; do
+        if [ -n "${!name+x}" ]; then
+            kept_names+=("$name")
+            kept_values+=("${!name}")
+        fi
+    done
+
+    # shellcheck source=/dev/null
+    . "$PROJECTS_DIR/$PROJECT.env"
+
+    # The +-forms keep empty arrays safe under `set -u` in bash 3.2 (macOS).
+    for i in ${kept_names[@]+"${!kept_names[@]}"}; do
+        printf -v "${kept_names[$i]}" '%s' "${kept_values[$i]}"
+    done
+}
+
+apply_defaults() {
+    DEPLOY_BASE="${DEPLOY_BASE:-}"
+    CHECK_URL="${CHECK_URL:-}"
+    REPO_URL="${REPO_URL:-}"
+    DEPLOY_BRANCH="${DEPLOY_BRANCH:-develop}"
+    KEEP_RELEASES="${KEEP_RELEASES:-5}"
+    CHECK_WAIT="${CHECK_WAIT:-150}"
+    CHECK_VERSION="${CHECK_VERSION:-1}"
+    PHP_BIN="${PHP_BIN:-php}"
+    COMPOSER_BIN="${COMPOSER_BIN:-composer}"
+    PHP_RELOAD_CMD="${PHP_RELOAD_CMD:-}"
+    DISPLAY_TZ="${DISPLAY_TZ:-}"
+
+    export DEPLOY_BASE PHP_BIN COMPOSER_BIN
+}
+
+resolve_base() {
+    [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/<project>.env"
+
+    mkdir -p "$DEPLOY_BASE"
+    DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
+}
+
+acquire_lock() {
+    LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
+
+    # mkdir is atomic, and unlike flock it exists everywhere.
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        LOCK_DIR=""
+        fail "another deploy is running (remove $DEPLOY_BASE/.deploy.lock if it is not)"
+    fi
+}
+
+on_exit() {
+    local status=$?
+
+    if [ -n "$NEW_RELEASE" ] && [ "$SWITCHED" -eq 0 ]; then
+        rm -rf "${DEPLOY_BASE:?}/releases/$NEW_RELEASE"
+
+        if [ "$status" -ne 0 ]; then
+            printf 'deploy: failed before the switch; %s is still live\n' "${PREVIOUS_RELEASE:-the old release}" >&2
+        fi
+    fi
+
+    if [ -n "$LOCK_DIR" ]; then
+        rmdir "$LOCK_DIR"
+    fi
+}
+
+current_release() {
+    if [ -L "$DEPLOY_BASE/current" ]; then
+        basename "$(readlink "$DEPLOY_BASE/current")"
+    fi
+}
+
+# Oldest first. Sorts on the timestamp digits alone, so older names without the dash
+# (20261105171708-<sha>) mix with newer ones (20261105-171708-<tag>-<sha>).
+list_releases() {
+    if [ -d "$DEPLOY_BASE/releases" ]; then
+        find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; \
+            | awk '{ key = $0; sub(/^[0-9]{8}-/, substr($0, 1, 8), key); print substr(key, 1, 14) "\t" $0 }' \
+            | sort | cut -f2
+    fi
+}
+
+# The release just before the given one, or nothing.
+release_before() {
+    list_releases | awk -v name="$1" '$0 == name { print prev; exit } { prev = $0 }'
+}
+
+# The one release whose name is or contains $1 (a full name, a sha, a tag).
+find_release() {
+    local matches count
+    matches="$(list_releases | grep -F -- "$1" || true)"
+    count="$(printf '%s' "$matches" | grep -c . || true)"
+
+    [ "$count" -gt 0 ] || fail "no release matches '$1' (see: deploy status)"
+    [ "$count" -eq 1 ] || fail "'$1' matches $count releases; use more of the name"
+
+    printf '%s\n' "$matches"
+}
+
+# The deploy time in a release name, as "2026-11-05 18:30 UTC", plus DISPLAY_TZ when set.
+release_time() {
+    local stamp="${1//-/}"
+
+    # shellcheck disable=SC2016 # PHP code, not shell.
+    "$PHP_BIN" -r '
+        $d = DateTime::createFromFormat("YmdHis", $argv[1], new DateTimeZone("UTC"));
+        echo $d->format("Y-m-d H:i T");
+        if ($argv[2] !== "") {
+            echo ", ", $d->setTimezone(new DateTimeZone($argv[2]))->format("Y-m-d H:i T");
+        }
+    ' "${stamp:0:14}" "$DISPLAY_TZ" 2>/dev/null || printf 'unknown time'
+}
+
+# The release tag on a commit (v2026.11.21), from the remote, since a shallow clone may lack it.
+release_tag() {
+    git ls-remote --tags "$REPO_URL" 2>/dev/null \
+        | awk -v sha="$1" '$1 == sha { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true
+}
+
+# Swaps the `current` link in one rename, so no request sees a missing or half-made link.
+switch_to() {
+    local link="$DEPLOY_BASE/current"
+    local tmp="$DEPLOY_BASE/current.tmp"
+
+    ln -sfn "releases/$1" "$tmp"
+
+    # GNU mv -T renames over the link itself. BSD mv (macOS) spells it -h.
+    if mv -Tf "$tmp" "$link" 2>/dev/null || mv -hf "$tmp" "$link" 2>/dev/null; then
+        :
+    else
+        # Not atomic: there is a moment with no link at all.
+        rm -f "$tmp"
+        ln -sfn "releases/$1" "$link"
+    fi
+
+    if [ -n "$PHP_RELOAD_CMD" ]; then
+        sh -c "$PHP_RELOAD_CMD" || say "PHP_RELOAD_CMD failed; carrying on"
+    fi
+}
+
+require_check_url() {
+    [ -n "$CHECK_URL" ] || fail "set CHECK_URL in $PROJECTS_DIR/<project>.env"
+}
+
+# Reads deploy.conf of a release: SHARED and the step functions.
+load_conf() {
+    [ -f "$1/deploy.conf" ] || fail "$DEPLOY_BRANCH has no deploy.conf"
+
+    SHARED=()
+    unset -f preflight build verify after_switch
+
+    # shellcheck source=/dev/null
+    . "$1/deploy.conf"
+
+    declare -F build > /dev/null || fail "deploy.conf has no build step"
+}
+
+# Runs one step of deploy.conf in the release folder, if the project has it. Sets RUN_STATUS.
+run_step() {
+    local status
+
+    RUN_STATUS=0
+    declare -F "$1" > /dev/null || return 0
+    say "Running $1"
+
+    # Off here, so `set -e` inside the subshell stops the step at its first failing command.
+    set +e
+    (
+        set -e
+        cd "$RELEASE_DIR"
+        "$1"
+    )
+    status=$?
+    set -e
+
+    # A plain return would trip `set -e` in the caller; it reads RUN_STATUS instead.
+    RUN_STATUS="$status"
+}
+
+link_shared() {
+    local path
+
+    for path in ${SHARED[@]+"${SHARED[@]}"}; do
+        [ -e "$DEPLOY_BASE/shared/$path" ] || fail "shared/$path is missing (run init, or create it)"
+
+        rm -rf "${RELEASE_DIR:?}/$path"
+        mkdir -p "$(dirname "$RELEASE_DIR/$path")"
+        ln -sfn "$DEPLOY_BASE/shared/$path" "$RELEASE_DIR/$path"
+    done
+}
+
+# One request to CHECK_URL. Sets PROBE_STATUS and PROBE_VERSION (empty when missing).
+probe() {
+    local headers
+    headers="$(curl --silent --show-error --max-time 10 --location --output /dev/null --dump-header - "$CHECK_URL" 2>&1)" || true
+    PROBE_STATUS="$(printf '%s\n' "$headers" | sed -nE 's#^HTTP/[0-9.]+ ([0-9]+).*#\1#p' | tail -n1)"
+    PROBE_VERSION="$(printf '%s\n' "$headers" | sed -nE 's#^[Xx]-[Aa]pp-[Vv]ersion: *([^[:space:]]+).*#\1#p' | tail -n1)"
+}
+
+# Polls CHECK_URL until it answers 200 (with the new version, unless CHECK_VERSION=0),
+# or CHECK_WAIT runs out.
+release_is_serving() {
+    local expected="$1" deadline
+    deadline=$(($(date +%s) + CHECK_WAIT))
+
+    while :; do
+        probe
+
+        if [ "$PROBE_STATUS" = 200 ] && { [ "$CHECK_VERSION" = 0 ] || [ "$PROBE_VERSION" = "$expected" ]; }; then
+            return 0
+        fi
+
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            printf 'deploy: %s answered %s with version %s\n' "$CHECK_URL" "${PROBE_STATUS:-nothing (no answer)}" "${PROBE_VERSION:-none}" >&2
+
+            return 1
+        fi
+
+        sleep 2
+    done
+}
+
+prune() {
+    local live release count
+    live="$(current_release)"
+    count="$(list_releases | wc -l)"
+
+    rm -rf "${DEPLOY_BASE:?}"/releases/.failed-*
+
+    # BSD head rejects -n 0.
+    if [ "$count" -le "$KEEP_RELEASES" ]; then
+        return
+    fi
+
+    for release in $(list_releases | head -n "$((count - KEEP_RELEASES))"); do
+        if [ "$release" != "$live" ]; then
+            say "Removing old release $release"
+            rm -rf "${DEPLOY_BASE:?}/releases/$release"
+        fi
+    done
+}
+
+deploy() {
+    resolve_base
+    require_check_url
+    acquire_lock
+
+    mkdir -p "$DEPLOY_BASE/releases"
+    PREVIOUS_RELEASE="$(current_release)"
+
+    if [ -z "$REPO_URL" ]; then
+        [ -n "$PREVIOUS_RELEASE" ] || fail "set REPO_URL for the first deploy"
+        REPO_URL="$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null)" \
+            || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
+    fi
+
+    local stamp sha tag
+    stamp="$(date -u +%Y%m%d-%H%M%S)"
+
+    say "Cloning $DEPLOY_BRANCH"
+    NEW_RELEASE="$stamp"
+    git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp"
+    sha="$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse --short HEAD)"
+    tag="$(release_tag "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)")"
+
+    NEW_RELEASE="$stamp${tag:+-$tag}-$sha"
+    mv "$DEPLOY_BASE/releases/$stamp" "$DEPLOY_BASE/releases/$NEW_RELEASE"
+    RELEASE_DIR="$DEPLOY_BASE/releases/$NEW_RELEASE"
+    RELEASE_NAME="$NEW_RELEASE"
+    export RELEASE_DIR RELEASE_NAME
+    say "Building release $NEW_RELEASE"
+
+    # The project sends this as the X-App-Version header.
+    printf '%s\n' "$NEW_RELEASE" > "$RELEASE_DIR/RELEASE"
+
+    load_conf "$RELEASE_DIR"
+    link_shared
+
+    local step
+    for step in preflight build verify; do
+        run_step "$step"
+        [ "$RUN_STATUS" -eq 0 ] || fail "$step failed"
+    done
+
+    say "Switching current to $NEW_RELEASE"
+    switch_to "$NEW_RELEASE"
+    SWITCHED=1
+
+    run_step after_switch
+    [ "$RUN_STATUS" -eq 0 ] || say "after_switch failed; carrying on"
+
+    say "Checking $CHECK_URL"
+    if ! release_is_serving "$NEW_RELEASE"; then
+        if [ -n "$PREVIOUS_RELEASE" ]; then
+            say "Rolling back to $PREVIOUS_RELEASE"
+            switch_to "$PREVIOUS_RELEASE"
+            # Requests may still run in it, so set it aside now and delete it on the next deploy.
+            mv "$RELEASE_DIR" "$DEPLOY_BASE/releases/.failed-$NEW_RELEASE"
+        fi
+
+        fail "the check failed; ${PREVIOUS_RELEASE:-$NEW_RELEASE, the only release,} is live (data changes stay applied)"
+    fi
+
+    prune
+    say "Deployed $NEW_RELEASE"
+}
+
+rollback() {
+    resolve_base
+    require_check_url
+    acquire_lock
+
+    local live target
+    live="$(current_release)"
+    [ -n "$live" ] || fail "$DEPLOY_BASE/current is not a link; nothing to roll back"
+
+    if [ -n "${1:-}" ]; then
+        target="$(find_release "$1")"
+        [ "$target" != "$live" ] || fail "$target is already live"
+    else
+        target="$(release_before "$live")"
+        [ -n "$target" ] || fail "no release older than $live"
+    fi
+
+    switch_to "$target"
+    say "Rolled back from $live to $target (data changes stay applied)"
+
+    say "Checking $CHECK_URL"
+    release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
+}
+
+status() {
+    resolve_base
+
+    local live previous release failed
+    live="$(current_release)"
+
+    [ -z "$PROJECT" ] || printf 'Project:   %s (%s)\n' "$PROJECT" "$DEPLOY_BASE"
+
+    if [ -z "$live" ]; then
+        printf 'Live:      none (%s/current is not a link)\n' "$DEPLOY_BASE"
+    else
+        printf 'Live:      %s\n           deployed %s\n' "$live" "$(release_time "$live")"
+        previous="$(release_before "$live")"
+        printf 'Rollback:  %s\n' "${previous:-none (no older release)}"
+    fi
+
+    printf '\nReleases, oldest first (keeping %s):\n' "$KEEP_RELEASES"
+    for release in $(list_releases); do
+        if [ "$release" = "$live" ]; then
+            printf '  * %s  (live)\n' "$release"
+        else
+            printf '    %s\n' "$release"
+        fi
+    done
+
+    for failed in "$DEPLOY_BASE"/releases/.failed-*; do
+        [ -e "$failed" ] || continue
+        printf '  ! %s  (failed; deleted on the next deploy)\n' "$(basename "$failed")"
+    done
+
+    if [ -d "$DEPLOY_BASE/.deploy.lock" ]; then
+        printf '\nLock:      held (a deploy is running, or remove %s/.deploy.lock)\n' "$DEPLOY_BASE"
+    else
+        printf '\nLock:      free\n'
+    fi
+
+    if [ -z "$CHECK_URL" ]; then
+        printf 'Site:      not checked (no CHECK_URL)\n'
+
+        return
+    fi
+
+    probe
+    printf 'Site:      %s answered %s, version %s' "$CHECK_URL" "${PROBE_STATUS:-nothing}" "${PROBE_VERSION:-none}"
+
+    if [ -n "$live" ] && [ "$PROBE_VERSION" = "$live" ]; then
+        printf ' (matches live)\n'
+    else
+        printf ' (NOT the live release)\n'
+    fi
+}
+
+# Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.
+move_to_shared() {
+    local from="$1" to="$2" dry_run="$3"
+
+    if [ -e "$to" ]; then
+        say "Keeping existing ${to#"$DEPLOY_BASE"/}"
+
+        return
+    fi
+
+    [ -e "$from" ] || fail "$from is missing"
+
+    if [ "$dry_run" -eq 1 ]; then
+        say "Would move $from to $to and link it back"
+
+        return
+    fi
+
+    mkdir -p "$(dirname "$to")"
+    mv "$from" "$to"
+    ln -s "$to" "$from"
+    say "Moved $from to $to"
+}
+
+init() {
+    local checkout="${1:-}" dry_run=0 path
+
+    [ -n "$checkout" ] || fail "usage: deploy [project] init <checkout> [--dry-run]"
+    [ -d "$checkout" ] || fail "$checkout is not a folder"
+    checkout="$(cd "$checkout" && pwd -P)"
+
+    if [ "${2:-}" = --dry-run ]; then
+        dry_run=1
+    elif [ -n "${2:-}" ]; then
+        fail "unknown option $2"
+    fi
+
+    [ -f "$checkout/deploy.conf" ] || fail "$checkout has no deploy.conf; update it to a commit that has one"
+
+    resolve_base
+
+    # Only SHARED is needed, so the steps are not loaded into this shell.
+    local shared
+    # shellcheck source=/dev/null
+    shared="$(SHARED=() && . "$checkout/deploy.conf" && printf '%s\n' ${SHARED[@]+"${SHARED[@]}"})"
+
+    for path in $shared; do
+        move_to_shared "$checkout/$path" "$DEPLOY_BASE/shared/$path" "$dry_run"
+    done
+
+    if [ "$dry_run" -eq 0 ]; then
+        mkdir -p "$DEPLOY_BASE/releases"
+    fi
+
+    cat <<EOF
+
+Next steps:
+  1. Deploy the first release: deploy ${PROJECT:-<project>}
+     (REPO_URL must be set for it: $(git -C "$checkout" remote get-url origin 2>/dev/null || printf 'the repo URL'))
+  2. Point the web root at $DEPLOY_BASE/current/public (or replace it with a link to it).
+  3. Point cron at $DEPLOY_BASE/current.
+EOF
+}
+
+# Shows the values in effect, so env overrides (e.g. from a shell profile) are visible.
+usage() {
+    local projects
+    projects="$(list_projects | paste -sd ' ' -)"
+
+    cat <<EOF
+Usage: deploy [project] [command]
+
+Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
+The project can be left out when there is only one.
+
+Commands:
+  deploy                     Build the newest commit and switch to it (the default)
+  status                     Show the live release, the rollback target, all releases and the site
+  rollback [name]            Point current at the previous release, or at the named one
+                             (a full name or a unique part of it, like the sha or tag)
+  init <checkout> [--dry-run]
+                             Move the SHARED paths of an existing checkout into shared/
+  help                       Show this help
+
+Settings${PROJECT:+ for $PROJECT} (value now in effect):
+  DEPLOY_BASE     Folder with releases/, shared/ and current (${DEPLOY_BASE:-not set})
+  CHECK_URL       Page that must show the new version (${CHECK_URL:-not set})
+  REPO_URL        Repo to clone (${REPO_URL:-origin of current})
+  DEPLOY_BRANCH   Branch to deploy ($DEPLOY_BRANCH)
+  KEEP_RELEASES   Releases to keep ($KEEP_RELEASES)
+  CHECK_WAIT      Seconds to wait for CHECK_URL ($CHECK_WAIT)
+  CHECK_VERSION   0 to only wait for a 200 ($CHECK_VERSION)
+  PHP_BIN         PHP binary ($PHP_BIN)
+  COMPOSER_BIN    Composer command ($COMPOSER_BIN)
+  PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
+  DISPLAY_TZ      Extra time zone for status times (${DISPLAY_TZ:-UTC only})
+EOF
+}
+
+# The project: the first argument when it names a project file, else the only project there is.
+if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
+    load_project "$1"
+    shift
+elif [ "$(list_projects | wc -l)" -eq 1 ]; then
+    load_project "$(list_projects)"
+fi
+
+apply_defaults
+
+if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
+    && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
+    projects="$(list_projects | paste -sd ' ' -)"
+    fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
+fi
+
+trap on_exit EXIT
+
+case "${1:-deploy}" in
+    deploy)
+        deploy
+        ;;
+    status)
+        status
+        ;;
+    rollback)
+        rollback "${2:-}"
+        ;;
+    init)
+        init "${2:-}" "${3:-}"
+        ;;
+    help | -h | --help)
+        usage
+        ;;
+    *)
+        usage >&2
+        fail "unknown command: $1"
+        ;;
+esac

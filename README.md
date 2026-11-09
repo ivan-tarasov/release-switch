@@ -52,39 +52,74 @@ It can be left out when there is only one.
 
 ## Setup on a server
 
-The repos are private. A GitHub deploy key (read-only, under the repo's **Settings → Deploy keys**)
-works for one repo only, so give each repo its own key and host name in `~/.ssh/config`:
+The repos are private. A GitHub deploy key works for one repo only, so each repo gets its own key,
+named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
 
-```text
-Host github-release-switch
-    HostName github.com
-    IdentityFile ~/.ssh/release_switch_deploy
-    IdentitiesOnly yes
+1. Make a key for this repo and print it:
 
-Host github-<project>
-    HostName github.com
-    IdentityFile ~/.ssh/<project>_deploy
-    IdentitiesOnly yes
-```
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/release_switch_deploy -N "" -C "release-switch"
+   cat ~/.ssh/release_switch_deploy.pub
+   ```
 
-Then use that host name in clone URLs and in each project's `REPO_URL`
-(`git@github-<project>:owner/repo.git`).
+   Add it in GitHub under this repo's **Settings → Deploy keys**, with write access off.
 
-```bash
-git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
-cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
-```
+2. Give the key a host name, at the end of `~/.ssh/config`:
 
-Edit the new file (see Settings), then add an alias to your shell profile:
+   ```text
+   Host github-release-switch
+       HostName github.com
+       IdentityFile ~/.ssh/release_switch_deploy
+       IdentitiesOnly yes
+   ```
 
-```bash
-alias deploy="$HOME/release-switch/deploy"
-```
+   Check it:
 
-Update the engine with `git -C ~/release-switch pull`. Files in `projects/` other than
+   ```bash
+   git ls-remote git@github-release-switch:ivan-tarasov/release-switch.git HEAD
+   ```
+
+3. Install the script:
+
+   ```bash
+   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
+   ```
+
+4. Add the alias to `~/.bashrc`, then `source ~/.bashrc`:
+
+   ```bash
+   alias deploy="$HOME/release-switch/deploy"
+   ```
+
+   Keep the settings in the project files, not in the shell profile: an env var wins over every
+   project file, so a `PHP_BIN` there would apply to all projects.
+
+5. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
+
+To update the script: `git -C ~/release-switch pull`. Files in `projects/` other than
 `example.env` are not tracked, so a pull never touches them.
 
-### Moving a project from a plain checkout
+### Adding a project
+
+1. Give the server read access to the project's repo, as in steps 1 and 2 above: a key
+   `~/.ssh/<repo>_deploy`, added under that repo's **Deploy keys**, and a `Host github-<repo>`
+   entry. Check it with `git ls-remote git@github-<repo>:owner/<repo>.git HEAD`.
+2. Add a `deploy.conf` to the project's repo (see [deploy.conf](#deployconf)), and make the project
+   send the `X-App-Version` header, or set `CHECK_VERSION=0` for now.
+3. Write the project file:
+
+   ```bash
+   cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
+   ```
+
+   Set `DEPLOY_BASE`, `CHECK_URL` and `REPO_URL` (`git@github-<repo>:owner/<repo>.git`), plus
+   `PHP_BIN` and `COMPOSER_BIN` if the default `php` is not the one the project needs.
+   See [Settings](#settings).
+
+If the base folder already has `releases/`, `shared/` and `current` (from an older copy of this
+script), that is all: run `deploy <project>`. Otherwise, move the project in first:
+
+#### Moving a project from a plain checkout
 
 1. Make sure the project's repo has a `deploy.conf` on the deploy branch.
 2. `deploy <project> init <checkout> --dry-run`, then without `--dry-run`. This moves the `SHARED`

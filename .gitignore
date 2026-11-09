@@ -1,0 +1,2 @@
+/projects/*.env
+!/projects/example.env

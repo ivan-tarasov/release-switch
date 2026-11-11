@@ -139,8 +139,13 @@ deploy fixture init "$OLD"
 check "shared/ holds .env and data/; the old checkout links to them"
 
 # Serves whatever `current` points at. No realpath cache, so a switch shows on the next request.
+# /hook stands in for an alert webhook: it keeps each request body in hook.log.
 cat > "$WORK/router.php" <<EOF
 <?php
+if (\$_SERVER['REQUEST_URI'] === '/hook') {
+    file_put_contents('$WORK/hook.log', file_get_contents('php://input') . "\n", FILE_APPEND);
+    return;
+}
 chdir('$BASE/current/public');
 require '$BASE/current/public/index.php';
 EOF
@@ -334,6 +339,44 @@ grep -q "^FAIL  fixture: lock: held for 45 min" "$WORK/check-err.log" || fail "c
 deploy check --all > "$WORK/check-all.log"
 grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check the fixture"
 check "check passes on a healthy site; reports broken shared links, a bad site and a stuck deploy on stderr"
+
+step "Alerts"
+export ALERTS="$WORK/alerts.log"
+: > "$ALERTS"
+# shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here.
+alert_cmd='printf "%s|%s\n" "$NOTIFY_EVENT" "$NOTIFY_TEXT" >> "$ALERTS"'
+if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" deploy fixture 2> /dev/null; then
+    fail "a deploy with a failing build succeeded"
+fi
+cat "$ALERTS"
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" || fail "no alert for the failed build"
+grep -qF '"text":"fixture: deploy ' "$WORK/hook.log" || fail "NOTIFY_URL got no JSON alert"
+grep -qF '"event":"deploy"' "$WORK/hook.log" || fail "the JSON alert has no event"
+NOTIFY_CMD="$alert_cmd" deploy fixture > /dev/null
+[ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "a successful deploy sent an alert without NOTIFY_ON=all"
+NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:1/" NOTIFY_CMD="$alert_cmd" deploy fixture > /dev/null 2> "$WORK/notify.log" \
+    || fail "an alert that cannot be sent failed the deploy"
+grep -q "could not send the alert to NOTIFY_URL" "$WORK/notify.log" || fail "no warning for an alert that cannot be sent"
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: ok \([0-9]+s\)$" "$ALERTS" || fail "NOTIFY_ON=all sent no alert for a good deploy"
+NOTIFY_CMD="$alert_cmd" deploy fixture rollback > /dev/null
+grep -qE "^rollback\|fixture: rollback [0-9-]+.*: ok, from " "$ALERTS" || fail "no alert for a rollback"
+check "alerts for a failed build and a rollback; good deploys only with NOTIFY_ON=all; a dead webhook only warns"
+
+step "Check alerts only when the result changes"
+: > "$ALERTS"
+for _ in 1 2; do
+    if CHECK_URL="http://127.0.0.1:$PORT/missing" NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null 2>&1; then
+        fail "check passed with a 404"
+    fi
+done
+cat "$ALERTS"
+[ "$(grep -c "^check|fixture: check failed: site: .* answered 404" "$ALERTS")" = 1 ] || fail "check did not alert once for the 404"
+NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null || fail "check failed on a healthy site"
+grep -q "^check|fixture: check ok again$" "$ALERTS" || fail "no alert when the check is ok again"
+[ ! -e "$BASE/.check-failed" ] || fail "check kept the failure state after it was ok"
+NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null
+[ "$(wc -l < "$ALERTS" | tr -d ' ')" = 2 ] || fail "a healthy check sent another alert"
+check "one alert for a failing check, one when it is ok again, none while nothing changes"
 
 step "Deploy history"
 DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"

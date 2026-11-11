@@ -147,7 +147,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `PHP_BIN` | `php` | PHP binary, for the project's steps |
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt` |
-| `DISPLAY_TZ` | none | Extra time zone for `status` times, e.g. `America/Toronto` |
+| `DISPLAY_TZ` | UTC | Time zone for deploy times in `status`, e.g. `America/Toronto`. Release names stay in UTC |
 
 ## deploy.conf
 

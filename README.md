@@ -13,6 +13,7 @@ Each project has a base folder on the server:
   releases/<UTC date>-<time>-<tag>-<short sha>/   one full copy of the code per deploy
   shared/                                         files that live across releases (.env, uploads, a database file)
   current -> releases/<name>                      the live release; the web server serves current/public
+  deploy.log                                      one line per deploy and rollback, with the result
 ```
 
 `deploy <project>`:
@@ -20,7 +21,8 @@ Each project has a base folder on the server:
 1. takes a lock, so two deploys of one project never run at once;
 2. clones the newest commit of the branch into a new release folder, and writes its name to
    `RELEASE` in the release root;
-3. links the project's `SHARED` paths from `shared/` into the release;
+3. links the project's `SHARED` paths from `shared/` into the release, and copies its
+   `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
 4. runs the project's `preflight`, `build` and `verify` steps there;
 5. switches `current` to the new release in one rename, then runs `after_switch` and `PHP_RELOAD_CMD`;
 6. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
@@ -29,6 +31,7 @@ Each project has a base folder on the server:
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 Migrations and other data changes are not undone by a switch back or a rollback.
+Every deploy and rollback, and how it ended, goes to `deploy.log` (see `deploy <project> log`).
 
 Release names are in UTC, so they sort the same all year. The tag (`v2026.11.21`) is left out when
 the commit has none.
@@ -43,8 +46,11 @@ deploy [project] [command]
   status --all      One line per project: live release, deploy time, site check, lock and
                     failed releases. Exits with 1 if any site does not serve its live release,
                     so it can run from cron as a simple monitor
-  rollback [name]   Go to the previous release, or to the named one
-                    (a full name, or any part only one release has: date and time, sha, tag)
+  rollback [name]   Go to the previous good release, and mark the live one bad, so the next
+                    rollback skips it. With a name, go to that release instead (a full name, or
+                    any part only one release has: date and time, sha, tag); this marks nothing,
+                    and clears the mark if that release had one
+  log [count]       The last deploys and rollbacks, with results and times (20 by default)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   help              Commands and the settings in effect
@@ -158,6 +164,11 @@ steps change together with the code. Every step runs in the release folder, with
 # Paths under the release that live in shared/ instead.
 SHARED=(.env storage database/database.sqlite)
 
+# Optional. Paths copied from the live release before the build, so Composer only installs what
+# changed. A copy, never a link, so the build cannot touch the live site. Paths the repo tracks are
+# skipped.
+COPY_FROM_LIVE=(vendor)
+
 # Optional. Stop before building, e.g. when .env points at the wrong host.
 preflight() {
     grep -q '^APP_URL=https://example.com' .env
@@ -192,5 +203,6 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
-deploys, rollbacks, failing builds and checks, `status`, the lock, and that shared files survive.
+deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`,
+the log, the lock, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. CI runs it and `shellcheck` on every push.

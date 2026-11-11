@@ -225,6 +225,22 @@ grep -q "Lock: *free" "$WORK/status.log" || fail "status does not show a free lo
 grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fail "status does not check the site"
 check "status shows the live release, the rollback target and the site"
 
+step "Status of all projects"
+deploy status --all > "$WORK/all.log"
+cat "$WORK/all.log"
+grep -qE "^fixture +$latest +.*200, matches live" "$WORK/all.log" || fail "status --all does not show the fixture row"
+# A second project with its own settings: no base folder yet.
+printf 'DEPLOY_BASE="%s"\nCHECK_URL="http://127.0.0.1:%s/"\n' "$WORK/other" "$PORT" > "$WORK/projects/other.env"
+if deploy status --all > "$WORK/all.log"; then
+    fail "status --all passed with a broken project"
+fi
+cat "$WORK/all.log"
+grep -qE "^other +none +.*no base folder" "$WORK/all.log" || fail "status --all does not show the second project"
+grep -qE "^fixture +$latest " "$WORK/all.log" || fail "the second project changed the fixture row"
+[ ! -e "$WORK/other" ] || fail "status --all created a base folder"
+rm "$WORK/projects/other.env"
+check "status --all shows each project with its own settings, and fails when one is broken"
+
 step "Rollback to a named release"
 if deploy fixture rollback v2026.11.99 2> "$WORK/ambiguous.log"; then
     fail "rollback to a part shared by two releases succeeded"

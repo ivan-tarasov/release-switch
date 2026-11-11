@@ -227,7 +227,18 @@ grep -qF "$second  (bad; rollback skips it)" "$WORK/status.log" || fail "status 
 grep -qF "* $latest  (live)" "$WORK/status.log" || fail "status does not mark the live release"
 grep -q "Lock: *free" "$WORK/status.log" || fail "status does not show a free lock"
 grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fail "status does not check the site"
+grep -q "^Pending: *none (live is the tip of develop)" "$WORK/status.log" || fail "status shows pending commits when live is the tip"
 check "status shows the live release, the rollback target and the site"
+
+step "Status lists commits not deployed yet"
+commit "fixture pending one"
+commit "fixture pending two"
+deploy fixture status > "$WORK/pending.log"
+cat "$WORK/pending.log"
+grep -q "^Pending: *2 commit(s) on develop, not deployed yet" "$WORK/pending.log" || fail "status does not count the pending commits"
+grep -qE "^ +[0-9a-f]+ fixture pending two$" "$WORK/pending.log" || fail "status does not list the pending commits"
+deploy status --all | grep -qE "^fixture +.*2 pending" || fail "status --all does not note the pending commits"
+check "status lists 2 pending commits; status --all notes them"
 
 step "Status of all projects"
 deploy status --all > "$WORK/all.log"

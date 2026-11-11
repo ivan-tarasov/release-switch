@@ -224,6 +224,52 @@ release_tag() {
         | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true
 }
 
+# Commits on DEPLOY_BRANCH after the live one. Sets PENDING_COUNT (empty when unknown),
+# PENDING_LOG (newest first) and PENDING_NOTE (why the count is unknown).
+pending_commits() {
+    local repo live_sha tip tmp
+    PENDING_COUNT=""
+    PENDING_LOG=""
+    PENDING_NOTE=""
+
+    repo="${REPO_URL:-$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null || true)}"
+    live_sha="$(git -C "$DEPLOY_BASE/releases/$1" rev-parse HEAD 2>/dev/null || true)"
+
+    if [ -z "$repo" ] || [ -z "$live_sha" ]; then
+        PENDING_NOTE="no repo to compare with"
+
+        return
+    fi
+
+    tip="$(git ls-remote "$repo" "refs/heads/$DEPLOY_BRANCH" 2>/dev/null | cut -f1)" || true
+
+    if [ -z "$tip" ]; then
+        PENDING_NOTE="cannot read $DEPLOY_BRANCH from the repo"
+
+        return
+    fi
+
+    if [ "$tip" = "$live_sha" ]; then
+        PENDING_COUNT=0
+
+        return
+    fi
+
+    # Commits only, no files, so even a long history is quick to fetch.
+    tmp="$(mktemp -d)"
+
+    if ! git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$repo" "$tmp/repo" 2>/dev/null; then
+        PENDING_NOTE="cannot clone the repo"
+    elif ! git -C "$tmp/repo" merge-base --is-ancestor "$live_sha" HEAD 2>/dev/null; then
+        PENDING_NOTE="the live commit is not on $DEPLOY_BRANCH"
+    else
+        PENDING_COUNT="$(git -C "$tmp/repo" rev-list --count "$live_sha..HEAD")"
+        PENDING_LOG="$(git -C "$tmp/repo" log --format='%h %s' "$live_sha..HEAD")"
+    fi
+
+    rm -rf "$tmp"
+}
+
 # Swaps the `current` link in one rename, so no request sees a missing or half-made link.
 switch_to() {
     local link="$DEPLOY_BASE/current"
@@ -484,6 +530,24 @@ rollback() {
     ACTION=""
 }
 
+# The Pending line of status: what the next deploy would ship.
+show_pending() {
+    local more
+
+    pending_commits "$1"
+
+    if [ -z "$PENDING_COUNT" ]; then
+        printf 'Pending:   unknown (%s)\n' "$PENDING_NOTE"
+    elif [ "$PENDING_COUNT" = 0 ]; then
+        printf 'Pending:   none (live is the tip of %s)\n' "$DEPLOY_BRANCH"
+    else
+        printf 'Pending:   %s commit(s) on %s, not deployed yet\n' "$PENDING_COUNT" "$DEPLOY_BRANCH"
+        printf '%s\n' "$PENDING_LOG" | sed -n '1,10s/^/             /p'
+        more=$((PENDING_COUNT - 10))
+        [ "$more" -le 0 ] || printf '             ... and %s more\n' "$more"
+    fi
+}
+
 status() {
     resolve_base
 
@@ -498,6 +562,7 @@ status() {
         printf 'Live:      %s\n           deployed %s\n' "$live" "$(release_time "$live")"
         previous="$(rollback_target "$live")"
         printf 'Rollback:  %s\n' "${previous:-none (no good older release)}"
+        show_pending "$live"
     fi
 
     printf '\nReleases, oldest first (keeping %s):\n' "$KEEP_RELEASES"
@@ -564,6 +629,16 @@ status_row() {
         else
             site="${PROBE_STATUS:-no answer}, NOT the live release"
             ok=1
+        fi
+    fi
+
+    if [ -n "$live" ]; then
+        pending_commits "$live"
+
+        if [ -z "$PENDING_COUNT" ]; then
+            notes+=("pending unknown")
+        elif [ "$PENDING_COUNT" != 0 ]; then
+            notes+=("$PENDING_COUNT pending")
         fi
     fi
 
@@ -682,7 +757,8 @@ The project can be left out when there is only one.
 
 Commands:
   deploy                     Build the newest commit and switch to it (the default)
-  status                     Show the live release, the rollback target, all releases and the site
+  status                     Show the live release, the rollback target, pending commits, all
+                             releases and the site
   status --all               One line per project; fails if any site does not serve its live release
   log [count]                The last deploys and rollbacks, with results (20 by default)
   rollback [name]            Point current at the previous good release and mark the live one

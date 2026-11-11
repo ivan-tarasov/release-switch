@@ -279,13 +279,61 @@ mkdir "$BASE/.deploy.lock"
 if deploy fixture 2> "$WORK/lock.log"; then
     fail "deploy ran while locked"
 fi
-grep -q "another deploy is running" "$WORK/lock.log" || fail "no lock message"
-rmdir "$BASE/.deploy.lock"
-check "locked deploy refused"
+grep -q "another deploy is running (no owner recorded)" "$WORK/lock.log" || fail "no lock message"
+# Held by this test's shell, which is alive.
+printf '%s %s deploy\n' "$$" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+if deploy fixture 2> "$WORK/lock.log"; then
+    fail "deploy ran while a live process held the lock"
+fi
+grep -q "another deploy is running (PID $$, deploy, 0 min)" "$WORK/lock.log" || fail "the lock message does not name the owner"
+deploy fixture status > "$WORK/lock-status.log"
+grep -q "^Lock: *held (PID $$, deploy, 0 min)" "$WORK/lock-status.log" || fail "status does not show the lock owner"
+check "locked deploy refused; the message and status name the owner"
+
+step "A lock whose process is gone is removed"
+sh -c 'exit 0' &
+dead=$!
+wait "$dead"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+deploy fixture status > "$WORK/lock-status.log"
+grep -q "^Lock: *stale (PID $dead" "$WORK/lock-status.log" || fail "status does not show a stale lock"
+deploy fixture > "$WORK/stale.log"
+grep -q "Removing a stale lock: PID $dead is gone" "$WORK/stale.log" || fail "deploy did not remove the stale lock"
+[ ! -d "$BASE/.deploy.lock" ] || fail "deploy left the lock behind"
+fresh="$(live_release)"
+serves "$fresh" || fail "server does not show $fresh"
+check "deploy removed the stale lock and went live with $fresh"
 
 step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
+
+step "Check"
+deploy fixture check > "$WORK/check-ok.log" 2> "$WORK/check-err.log" || fail "check failed on a healthy site"
+cat "$WORK/check-ok.log"
+grep -q "^ok    fixture: live: $fresh$" "$WORK/check-ok.log" || fail "check does not show the live release"
+grep -q "^ok    fixture: shared: all present$" "$WORK/check-ok.log" || fail "check does not check shared links"
+grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-ok.log" || fail "check does not check the site"
+[ ! -s "$WORK/check-err.log" ] || fail "check wrote to stderr on a healthy site"
+mv "$BASE/shared/data" "$BASE/shared/data.moved"
+if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
+    fail "check passed with a missing shared folder and a 404"
+fi
+mv "$BASE/shared/data.moved" "$BASE/shared/data"
+cat "$WORK/check-err.log"
+grep -q "^FAIL  fixture: shared: missing data$" "$WORK/check-err.log" || fail "check does not report the broken link"
+grep -q "^FAIL  fixture: site: .* answered 404" "$WORK/check-err.log" || fail "check does not report the 404"
+printf '%s %s deploy\n' "$$" "$(($(date +%s) - 45 * 60))" > "$WORK/owner"
+mkdir "$BASE/.deploy.lock"
+mv "$WORK/owner" "$BASE/.deploy.lock/owner"
+if deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
+    fail "check passed with a deploy running for 45 min"
+fi
+rm -rf "$BASE/.deploy.lock"
+grep -q "^FAIL  fixture: lock: held for 45 min" "$WORK/check-err.log" || fail "check does not report a stuck deploy"
+deploy check --all > "$WORK/check-all.log"
+grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check the fixture"
+check "check passes on a healthy site; reports broken shared links, a bad site and a stuck deploy on stderr"
 
 step "Deploy history"
 DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"

@@ -18,7 +18,8 @@ Each project has a base folder on the server:
 
 `deploy <project>`:
 
-1. takes a lock, so two deploys of one project never run at once;
+1. takes a lock, so two deploys of one project never run at once. A lock left by a deploy that
+   died (its process is gone) is removed;
 2. clones the newest commit of the branch into a new release folder, and writes its name to
    `RELEASE` in the release root;
 3. links the project's `SHARED` paths from `shared/` into the release, and copies its
@@ -52,6 +53,11 @@ deploy [project] [command]
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
                     and clears the mark if that release had one
+  check             A quick health check that changes nothing: the live release, its shared
+                    links, the site, and a lock held for 30 min or more. Problems go to stderr
+                    and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
+                    only problems
+  check --all       The same for every project
   log [count]       The last deploys and rollbacks, with results and times (20 by default)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
@@ -206,5 +212,5 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, the log, the lock, and that shared files survive.
+with pending commits, `check`, the log, the lock and stale locks, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. CI runs it and `shellcheck` on every push.

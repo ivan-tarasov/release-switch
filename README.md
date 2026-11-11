@@ -235,4 +235,5 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, `check`, alerts, the log, the lock and stale locks, and that shared files survive.
-It needs bash, PHP 8.1+, git and curl. CI runs it and `shellcheck` on every push.
+It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
+`shellcheck deploy tests/run.sh` before a pull request.

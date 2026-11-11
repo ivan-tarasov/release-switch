@@ -432,6 +432,73 @@ status() {
     fi
 }
 
+# One tab-separated row for `status --all`. Fails when the site does not serve the live release.
+status_row() {
+    local live time site notes=() failed ok=0
+
+    if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
+        printf '%s\tnone\t-\t-\t%s\n' "$PROJECT" "no base folder: ${DEPLOY_BASE:-DEPLOY_BASE not set}"
+
+        return 1
+    fi
+
+    live="$(current_release)"
+    time="-"
+    [ -z "$live" ] || time="$(release_time "$live")"
+
+    if [ -z "$CHECK_URL" ]; then
+        site="not checked (no CHECK_URL)"
+    else
+        probe
+
+        if [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$PROBE_VERSION" = "$live" ]; then
+            site="200, matches live"
+        elif [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
+            site="200 (version not checked)"
+        else
+            site="${PROBE_STATUS:-no answer}, NOT the live release"
+            ok=1
+        fi
+    fi
+
+    [ ! -d "$DEPLOY_BASE/.deploy.lock" ] || notes+=("lock held")
+
+    failed="$(find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$failed" -eq 0 ] || notes+=("$failed failed release(s)")
+
+    local IFS=,
+    printf '%s\t%s\t%s\t%s\t%s\n' "$PROJECT" "${live:-none}" "$time" "$site" "${notes[*]:--}"
+
+    return "$ok"
+}
+
+# One row per project. Each runs in a subshell, so one project's settings never leak into the next.
+status_all() {
+    local project row rows="" failed=0
+
+    for project in $(list_projects); do
+        if row="$(load_project "$project" && apply_defaults && status_row)"; then
+            :
+        else
+            failed=1
+        fi
+
+        rows+="$row"$'\n'
+    done
+
+    [ -n "$rows" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"
+
+    rows="$(printf 'PROJECT\tLIVE\tDEPLOYED\tSITE\tNOTES\n%s' "$rows")"
+
+    if command -v column > /dev/null; then
+        printf '%s\n' "$rows" | column -t -s $'\t'
+    else
+        printf '%s\n' "$rows"
+    fi
+
+    return "$failed"
+}
+
 # Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.
 move_to_shared() {
     local from="$1" to="$2" dry_run="$3"
@@ -510,6 +577,7 @@ The project can be left out when there is only one.
 Commands:
   deploy                     Build the newest commit and switch to it (the default)
   status                     Show the live release, the rollback target, all releases and the site
+  status --all               One line per project; fails if any site does not serve its live release
   rollback [name]            Point current at the previous release, or at the named one
                              (a full name or a unique part of it, like the sha or tag)
   init <checkout> [--dry-run]
@@ -530,6 +598,12 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   DISPLAY_TZ      Extra time zone for status times (${DISPLAY_TZ:-UTC only})
 EOF
 }
+
+# Before a project is loaded: each project loads its own settings.
+if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
+    status_all
+    exit 0
+fi
 
 # The project: the first argument when it names a project file, else the only project there is.
 if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then

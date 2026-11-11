@@ -40,6 +40,9 @@ deploy [project] [command]
 
   deploy            Build the newest commit and switch to it (the default)
   status            The live release, the rollback target, all releases, the lock and the site
+  status --all      One line per project: live release, deploy time, site check, lock and
+                    failed releases. Exits with 1 if any site does not serve its live release,
+                    so it can run from cron as a simple monitor
   rollback [name]   Go to the previous release, or to the named one
                     (a full name, or any part only one release has: date and time, sha, tag)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/

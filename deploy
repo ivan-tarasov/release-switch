@@ -147,17 +147,14 @@ find_release() {
     printf '%s\n' "$matches"
 }
 
-# The deploy time in a release name, as "2026-11-05 18:30 UTC", plus DISPLAY_TZ when set.
+# The deploy time in a release name, in DISPLAY_TZ ("2026-11-05 13:30 EST"), or in UTC when unset.
 release_time() {
     local stamp="${1//-/}"
 
     # shellcheck disable=SC2016 # PHP code, not shell.
     "$PHP_BIN" -r '
         $d = DateTime::createFromFormat("YmdHis", $argv[1], new DateTimeZone("UTC"));
-        echo $d->format("Y-m-d H:i T");
-        if ($argv[2] !== "") {
-            echo ", ", $d->setTimezone(new DateTimeZone($argv[2]))->format("Y-m-d H:i T");
-        }
+        echo $d->setTimezone(new DateTimeZone($argv[2] !== "" ? $argv[2] : "UTC"))->format("Y-m-d H:i T");
     ' "${stamp:0:14}" "$DISPLAY_TZ" 2>/dev/null || printf 'unknown time'
 }
 
@@ -595,7 +592,7 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   PHP_BIN         PHP binary ($PHP_BIN)
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
   PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
-  DISPLAY_TZ      Extra time zone for status times (${DISPLAY_TZ:-UTC only})
+  DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
 EOF
 }
 

@@ -23,6 +23,13 @@ LOCK_DIR=""
 RELEASE_DIR=""
 RELEASE_NAME=""
 SHARED=()
+COPY_FROM_LIVE=()
+
+# For deploy.log: what runs, on which release, and the stage it has reached.
+ACTION=""
+LOG_RELEASE=""
+STAGE=""
+STARTED="$(date +%s)"
 
 say() {
     printf '==> %s\n' "$*"
@@ -109,9 +116,49 @@ on_exit() {
         fi
     fi
 
+    if [ "$status" -ne 0 ] && [ -n "$ACTION" ]; then
+        log_event "$ACTION" "$LOG_RELEASE" "failed: $STAGE"
+    fi
+
     if [ -n "$LOCK_DIR" ]; then
         rmdir "$LOCK_DIR"
     fi
+}
+
+# One line per deploy or rollback in <base>/deploy.log: UTC time, action, release, result, seconds.
+log_event() {
+    local file="$DEPLOY_BASE/deploy.log"
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" \
+        "$(($(date +%s) - STARTED))" >> "$file"
+
+    # Keeps it small: past 1000 lines, only the last 500 stay.
+    if [ "$(wc -l < "$file")" -gt 1000 ]; then
+        tail -n 500 "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    fi
+}
+
+# The last lines of deploy.log, with times in DISPLAY_TZ.
+show_log() {
+    local count="${1:-20}" file="$DEPLOY_BASE/deploy.log"
+
+    [[ "$count" =~ ^[0-9]+$ ]] || fail "usage: deploy [project] log [count]"
+
+    if [ ! -f "$file" ]; then
+        printf 'No deploys logged yet in %s\n' "$file"
+
+        return
+    fi
+
+    # shellcheck disable=SC2016 # PHP code, not shell.
+    tail -n "$count" "$file" | "$PHP_BIN" -r '
+        $tz = new DateTimeZone($argv[1] !== "" ? $argv[1] : "UTC");
+        while (($line = fgets(STDIN)) !== false) {
+            [$time, $action, $release, $result, $seconds] = explode("\t", rtrim($line, "\n")) + array_fill(0, 5, "");
+            $date = (new DateTime($time))->setTimezone($tz)->format("Y-m-d H:i T");
+            printf("%s  %-8s  %s  %s (%ss)\n", $date, $action, $release, $result, $seconds);
+        }
+    ' "$DISPLAY_TZ"
 }
 
 current_release() {
@@ -130,9 +177,21 @@ list_releases() {
     fi
 }
 
-# The release just before the given one, or nothing.
-release_before() {
-    list_releases | awk -v name="$1" '$0 == name { print prev; exit } { prev = $0 }'
+# A plain rollback leaves this file in the release it leaves, so the next one skips it.
+is_bad() {
+    [ -e "$DEPLOY_BASE/releases/$1/.bad" ]
+}
+
+# The newest release older than the given one that is not marked bad, or nothing.
+rollback_target() {
+    local release target=""
+
+    for release in $(list_releases); do
+        [ "$release" != "$1" ] || break
+        is_bad "$release" || target="$release"
+    done
+
+    printf '%s\n' "$target"
 }
 
 # The one release whose name is or contains $1 (a full name, a sha, a tag).
@@ -195,6 +254,7 @@ load_conf() {
     [ -f "$1/deploy.conf" ] || fail "$DEPLOY_BRANCH has no deploy.conf"
 
     SHARED=()
+    COPY_FROM_LIVE=()
     unset -f preflight build verify after_switch
 
     # shellcheck source=/dev/null
@@ -234,6 +294,27 @@ link_shared() {
         rm -rf "${RELEASE_DIR:?}/$path"
         mkdir -p "$(dirname "$RELEASE_DIR/$path")"
         ln -sfn "$DEPLOY_BASE/shared/$path" "$RELEASE_DIR/$path"
+    done
+}
+
+# Copies COPY_FROM_LIVE paths (e.g. vendor) from the live release, so the build only updates them.
+# A copy, not a link: the build must never change files the live site runs on.
+copy_from_live() {
+    local path from
+
+    [ -n "$PREVIOUS_RELEASE" ] || return 0
+
+    for path in ${COPY_FROM_LIVE[@]+"${COPY_FROM_LIVE[@]}"}; do
+        from="$DEPLOY_BASE/releases/$PREVIOUS_RELEASE/$path"
+
+        # Skips paths the repo tracks, and ones the live release does not have.
+        if [ -e "$RELEASE_DIR/$path" ] || [ ! -e "$from" ]; then
+            continue
+        fi
+
+        say "Copying $path from $PREVIOUS_RELEASE"
+        mkdir -p "$(dirname "$RELEASE_DIR/$path")"
+        cp -a "$from" "$RELEASE_DIR/$path"
     done
 }
 
@@ -292,6 +373,8 @@ deploy() {
     resolve_base
     require_check_url
     acquire_lock
+    ACTION=deploy
+    STAGE=clone
 
     mkdir -p "$DEPLOY_BASE/releases"
     PREVIOUS_RELEASE="$(current_release)"
@@ -312,6 +395,7 @@ deploy() {
     tag="$(release_tag "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)")"
 
     NEW_RELEASE="$stamp${tag:+-$tag}-$sha"
+    LOG_RELEASE="$NEW_RELEASE"
     mv "$DEPLOY_BASE/releases/$stamp" "$DEPLOY_BASE/releases/$NEW_RELEASE"
     RELEASE_DIR="$DEPLOY_BASE/releases/$NEW_RELEASE"
     RELEASE_NAME="$NEW_RELEASE"
@@ -323,9 +407,11 @@ deploy() {
 
     load_conf "$RELEASE_DIR"
     link_shared
+    copy_from_live
 
     local step
     for step in preflight build verify; do
+        STAGE="$step"
         run_step "$step"
         [ "$RUN_STATUS" -eq 0 ] || fail "$step failed"
     done
@@ -338,8 +424,10 @@ deploy() {
     [ "$RUN_STATUS" -eq 0 ] || say "after_switch failed; carrying on"
 
     say "Checking $CHECK_URL"
+    STAGE=check
     if ! release_is_serving "$NEW_RELEASE"; then
         if [ -n "$PREVIOUS_RELEASE" ]; then
+            STAGE="check, switched back to $PREVIOUS_RELEASE"
             say "Rolling back to $PREVIOUS_RELEASE"
             switch_to "$PREVIOUS_RELEASE"
             # Requests may still run in it, so set it aside now and delete it on the next deploy.
@@ -350,6 +438,8 @@ deploy() {
     fi
 
     prune
+    log_event deploy "$NEW_RELEASE" ok
+    ACTION=""
     say "Deployed $NEW_RELEASE"
 }
 
@@ -365,16 +455,33 @@ rollback() {
     if [ -n "${1:-}" ]; then
         target="$(find_release "$1")"
         [ "$target" != "$live" ] || fail "$target is already live"
+
+        if is_bad "$target"; then
+            rm -f "$DEPLOY_BASE/releases/$target/.bad"
+            say "Cleared the bad mark on $target"
+        fi
     else
-        target="$(release_before "$live")"
-        [ -n "$target" ] || fail "no release older than $live"
+        target="$(rollback_target "$live")"
+        [ -n "$target" ] || fail "no good release older than $live"
     fi
 
+    ACTION=rollback
+    LOG_RELEASE="$target"
+    STAGE=check
     switch_to "$target"
+
+    # Only a plain rollback says the release it leaves is bad; a named one may go forward.
+    if [ -z "${1:-}" ]; then
+        touch "$DEPLOY_BASE/releases/$live/.bad"
+        say "Marked $live as bad; later rollbacks skip it"
+    fi
+
     say "Rolled back from $live to $target (data changes stay applied)"
 
     say "Checking $CHECK_URL"
     release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
+    log_event rollback "$target" "ok, from $live"
+    ACTION=""
 }
 
 status() {
@@ -389,14 +496,16 @@ status() {
         printf 'Live:      none (%s/current is not a link)\n' "$DEPLOY_BASE"
     else
         printf 'Live:      %s\n           deployed %s\n' "$live" "$(release_time "$live")"
-        previous="$(release_before "$live")"
-        printf 'Rollback:  %s\n' "${previous:-none (no older release)}"
+        previous="$(rollback_target "$live")"
+        printf 'Rollback:  %s\n' "${previous:-none (no good older release)}"
     fi
 
     printf '\nReleases, oldest first (keeping %s):\n' "$KEEP_RELEASES"
     for release in $(list_releases); do
         if [ "$release" = "$live" ]; then
             printf '  * %s  (live)\n' "$release"
+        elif is_bad "$release"; then
+            printf '    %s  (bad; rollback skips it)\n' "$release"
         else
             printf '    %s\n' "$release"
         fi
@@ -575,8 +684,10 @@ Commands:
   deploy                     Build the newest commit and switch to it (the default)
   status                     Show the live release, the rollback target, all releases and the site
   status --all               One line per project; fails if any site does not serve its live release
-  rollback [name]            Point current at the previous release, or at the named one
-                             (a full name or a unique part of it, like the sha or tag)
+  log [count]                The last deploys and rollbacks, with results (20 by default)
+  rollback [name]            Point current at the previous good release and mark the live one
+                             bad, or go to the named release (a full name or a unique part of
+                             it, like the sha or tag)
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
   help                       Show this help
@@ -626,6 +737,10 @@ case "${1:-deploy}" in
         ;;
     status)
         status
+        ;;
+    log)
+        resolve_base
+        show_log "${2:-}"
         ;;
     rollback)
         rollback "${2:-}"

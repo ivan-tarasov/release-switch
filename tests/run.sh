@@ -164,13 +164,16 @@ deploy fixture
 second="$(live_release)"
 [[ "$second" =~ ^[0-9]{8}-[0-9]{6}-v2026\.11\.99-[0-9a-f]{7,}$ ]] || fail "release name $second has no tag"
 serves "$second" || fail "server does not show $second"
-check "live: $second"
+[ "$(cat "$BASE/current/cache/origin")" = "$first" ] || fail "cache/ was not copied from $first"
+[ ! -L "$BASE/current/cache" ] || fail "cache/ is a link, not a copy"
+check "live: $second; cache/ copied from $first"
 
 step "Rollback"
 deploy fixture rollback
 [ "$(live_release)" = "$first" ] || fail "rollback did not go back to $first"
 serves "$first" || fail "server does not show $first after rollback"
-check "rolled back to $first"
+[ -e "$BASE/releases/$second/.bad" ] || fail "rollback did not mark $second as bad"
+check "rolled back to $first; $second is marked bad"
 
 releases_before="$(release_count)"
 
@@ -219,7 +222,8 @@ DISPLAY_TZ=America/Toronto deploy fixture status > "$WORK/status.log"
 cat "$WORK/status.log"
 grep -qE "^Live: +$latest$" "$WORK/status.log" || fail "status does not show the live release"
 grep -qE "deployed 20[0-9-]+ [0-9:]+ E[SD]T$" "$WORK/status.log" || fail "status does not show the time in DISPLAY_TZ only"
-grep -qE "^Rollback: +$second$" "$WORK/status.log" || fail "status does not show $second as the rollback target"
+grep -qE "^Rollback: +$first$" "$WORK/status.log" || fail "status does not skip the bad $second"
+grep -qF "$second  (bad; rollback skips it)" "$WORK/status.log" || fail "status does not mark $second as bad"
 grep -qF "* $latest  (live)" "$WORK/status.log" || fail "status does not mark the live release"
 grep -q "Lock: *free" "$WORK/status.log" || fail "status does not show a free lock"
 grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fail "status does not check the site"
@@ -249,11 +253,15 @@ grep -q "matches 2 releases" "$WORK/ambiguous.log" || fail "no message for a par
 if deploy fixture rollback nope 2> /dev/null; then
     fail "rollback to a missing release succeeded"
 fi
-deploy fixture rollback "${first##*-}"
-[ "$(live_release)" = "$first" ] || fail "rollback by sha did not go to $first"
-serves "$first" || fail "server does not show $first after a rollback by sha"
+deploy fixture rollback
+[ "$(live_release)" = "$first" ] || fail "rollback did not skip the bad $second"
+serves "$first" || fail "server does not show $first"
+deploy fixture rollback "${second:0:15}"
+[ "$(live_release)" = "$second" ] || fail "rollback by time did not go to $second"
+serves "$second" || fail "server does not show $second after a rollback by time"
+[ ! -e "$BASE/releases/$second/.bad" ] || fail "going to $second by name did not clear its bad mark"
 [ ! -d "$BASE/.deploy.lock" ] || fail "rollback left the lock behind"
-check "rolled back to $first by its sha; unclear and missing names refused"
+check "rollback skipped the bad $second; naming it went there and cleared the mark; unclear and missing names refused"
 
 step "A second deploy waits for the lock"
 mkdir "$BASE/.deploy.lock"
@@ -267,5 +275,17 @@ check "locked deploy refused"
 step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
+
+step "Deploy history"
+DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"
+cat "$WORK/history.log"
+[ "$(grep -cE ' deploy +.* ok \(' "$WORK/history.log")" -ge 3 ] || fail "the log misses successful deploys"
+grep -q "failed: build" "$WORK/history.log" || fail "the log misses the failed build"
+grep -q "failed: preflight" "$WORK/history.log" || fail "the log misses the failed preflight"
+grep -q "failed: check, switched back to $first" "$WORK/history.log" || fail "the log misses the failed check"
+grep -qE "rollback +$first +ok, from $latest" "$WORK/history.log" || fail "the log misses a rollback"
+grep -q "E[SD]T " "$WORK/history.log" || fail "the log does not use DISPLAY_TZ"
+[ "$(deploy fixture log 2 | wc -l | tr -d ' ')" = 2 ] || fail "log 2 does not show 2 lines"
+check "the log shows deploys, failures and rollbacks"
 
 printf '\nAll deploy tests passed.\n'

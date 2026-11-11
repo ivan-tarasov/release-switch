@@ -42,10 +42,12 @@ the commit has none.
 deploy [project] [command]
 
   deploy            Build the newest commit and switch to it (the default)
-  status            The live release, the rollback target, all releases, the lock and the site
-  status --all      One line per project: live release, deploy time, site check, lock and
-                    failed releases. Exits with 1 if any site does not serve its live release,
-                    so it can run from cron as a simple monitor
+  status            The live release, the rollback target, the commits not deployed yet, all
+                    releases, the lock and the site
+  status --all      One line per project: live release, deploy time, site check, lock, pending
+                    commits and failed releases. Exits with 1 if any site does not serve its live
+                    release, so it can run from cron as a simple monitor. Pending commits come from
+                    the repo: a quick check, plus a commits-only clone when there are any
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
@@ -203,6 +205,6 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
-deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`,
-the log, the lock, and that shared files survive.
+deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
+with pending commits, the log, the lock, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. CI runs it and `shellcheck` on every push.

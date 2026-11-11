@@ -2,7 +2,7 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project] [deploy | status | rollback [name] | init <checkout> [--dry-run] | help]
+#   deploy [project] [deploy | status | check | log | rollback [name] | init <checkout> [--dry-run] | help]
 
 set -euo pipefail
 
@@ -95,14 +95,68 @@ resolve_base() {
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
 }
 
+# Who holds the lock: "<pid> <start, epoch seconds> <action>". Empty if nobody does, or the
+# owner file is not written yet.
+lock_owner() {
+    cat "$DEPLOY_BASE/.deploy.lock/owner" 2>/dev/null || true
+}
+
+# One of: free, stale (its process is gone), held.
+lock_state() {
+    local pid
+
+    if [ ! -d "$DEPLOY_BASE/.deploy.lock" ]; then
+        printf 'free\n'
+
+        return
+    fi
+
+    pid="$(lock_owner | cut -d' ' -f1)"
+
+    if [ -n "$pid" ] && ! ps -p "$pid" > /dev/null 2>&1; then
+        printf 'stale\n'
+    else
+        printf 'held\n'
+    fi
+}
+
+# "PID 123, deploy, 4 min", or a note when no owner is recorded.
+lock_text() {
+    local pid started action
+
+    read -r pid started action <<< "$(lock_owner)"
+
+    if [ -z "${pid:-}" ]; then
+        printf 'no owner recorded'
+
+        return
+    fi
+
+    printf 'PID %s, %s, %s min' "$pid" "${action:-unknown}" "$((($(date +%s) - ${started:-0}) / 60))"
+}
+
+# Takes the lock for $1 (deploy or rollback). A lock whose process is gone is removed first.
 acquire_lock() {
+    local owner
     LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
 
     # mkdir is atomic, and unlike flock it exists everywhere.
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        LOCK_DIR=""
-        fail "another deploy is running (remove $DEPLOY_BASE/.deploy.lock if it is not)"
+        owner="$(lock_owner)"
+
+        # Read the owner twice, so a lock another deploy just took is left alone.
+        if [ "$(lock_state)" = stale ] && [ "$(lock_owner)" = "$owner" ]; then
+            say "Removing a stale lock: PID ${owner%% *} is gone"
+            rm -rf "$LOCK_DIR"
+        fi
+
+        if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+            LOCK_DIR=""
+            fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not"
+        fi
     fi
+
+    printf '%s %s %s\n' "$$" "$(date +%s)" "$1" > "$LOCK_DIR/owner"
 }
 
 on_exit() {
@@ -121,7 +175,7 @@ on_exit() {
     fi
 
     if [ -n "$LOCK_DIR" ]; then
-        rmdir "$LOCK_DIR"
+        rm -rf "$LOCK_DIR"
     fi
 }
 
@@ -418,7 +472,7 @@ prune() {
 deploy() {
     resolve_base
     require_check_url
-    acquire_lock
+    acquire_lock deploy
     ACTION=deploy
     STAGE=clone
 
@@ -492,7 +546,7 @@ deploy() {
 rollback() {
     resolve_base
     require_check_url
-    acquire_lock
+    acquire_lock rollback
 
     local live target
     live="$(current_release)"
@@ -581,11 +635,11 @@ status() {
         printf '  ! %s  (failed; deleted on the next deploy)\n' "$(basename "$failed")"
     done
 
-    if [ -d "$DEPLOY_BASE/.deploy.lock" ]; then
-        printf '\nLock:      held (a deploy is running, or remove %s/.deploy.lock)\n' "$DEPLOY_BASE"
-    else
-        printf '\nLock:      free\n'
-    fi
+    case "$(lock_state)" in
+        free) printf '\nLock:      free\n' ;;
+        stale) printf '\nLock:      stale (%s; the process is gone, the next deploy removes it)\n' "$(lock_text)" ;;
+        held) printf '\nLock:      held (%s)\n' "$(lock_text)" ;;
+    esac
 
     if [ -z "$CHECK_URL" ]; then
         printf 'Site:      not checked (no CHECK_URL)\n'
@@ -642,7 +696,10 @@ status_row() {
         fi
     fi
 
-    [ ! -d "$DEPLOY_BASE/.deploy.lock" ] || notes+=("lock held")
+    case "$(lock_state)" in
+        stale) notes+=("stale lock") ;;
+        held) notes+=("lock held") ;;
+    esac
 
     failed="$(find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' 2>/dev/null | wc -l | tr -d ' ')"
     [ "$failed" -eq 0 ] || notes+=("$failed failed release(s)")
@@ -681,6 +738,100 @@ status_all() {
 }
 
 # Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.
+# For check: one line per item. Problems go to stderr, so cron can mail only those.
+check_ok() {
+    printf 'ok    %s%s\n' "${PROJECT:+$PROJECT: }" "$*"
+}
+
+check_bad() {
+    printf 'FAIL  %s%s\n' "${PROJECT:+$PROJECT: }" "$*" >&2
+    CHECK_FAILED=1
+}
+
+# A health check that changes nothing. Exits with 1 if anything is wrong.
+check() {
+    local live dir broken minutes
+    CHECK_FAILED=0
+
+    if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
+        check_bad "no base folder: ${DEPLOY_BASE:-DEPLOY_BASE not set}"
+
+        return 1
+    fi
+
+    DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
+    live="$(current_release)"
+    dir="$DEPLOY_BASE/releases/$live"
+
+    if [ -z "$live" ]; then
+        check_bad "no live release ($DEPLOY_BASE/current is not a link)"
+    elif [ ! -d "$dir" ]; then
+        check_bad "current points at $live, which is missing"
+    else
+        check_ok "live: $live"
+
+        if [ -f "$dir/deploy.conf" ]; then
+            # A link into shared/ that points at nothing breaks the app quietly.
+            # shellcheck source=/dev/null
+            broken="$(cd "$dir" && SHARED=() && . ./deploy.conf > /dev/null 2>&1 \
+                && for path in ${SHARED[@]+"${SHARED[@]}"}; do [ -e "$path" ] || printf '%s ' "$path"; done)" \
+                || broken="deploy.conf does not load "
+
+            if [ -n "$broken" ]; then
+                check_bad "shared: missing ${broken% }"
+            else
+                check_ok "shared: all present"
+            fi
+        fi
+    fi
+
+    if [ -z "$CHECK_URL" ]; then
+        check_ok "site: not checked (no CHECK_URL)"
+    else
+        probe
+
+        if [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$PROBE_VERSION" = "$live" ]; then
+            check_ok "site: 200, matches live"
+        elif [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
+            check_ok "site: 200 (version not checked)"
+        else
+            check_bad "site: $CHECK_URL answered ${PROBE_STATUS:-nothing}, version ${PROBE_VERSION:-none}"
+        fi
+    fi
+
+    case "$(lock_state)" in
+        free)
+            check_ok "lock: free"
+            ;;
+        stale)
+            check_ok "lock: stale ($(lock_text)); the next deploy removes it"
+            ;;
+        held)
+            minutes="$(lock_text | sed -nE 's/.* ([0-9]+) min$/\1/p')"
+
+            if [ "${minutes:-0}" -ge 30 ]; then
+                check_bad "lock: held for ${minutes} min ($(lock_text)); a deploy may be stuck"
+            else
+                check_ok "lock: held ($(lock_text))"
+            fi
+            ;;
+    esac
+
+    return "$CHECK_FAILED"
+}
+
+check_all() {
+    local project failed=0
+
+    for project in $(list_projects); do
+        (load_project "$project" && apply_defaults && check) || failed=1
+    done
+
+    [ -n "$(list_projects)" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"
+
+    return "$failed"
+}
+
 move_to_shared() {
     local from="$1" to="$2" dry_run="$3"
 
@@ -760,6 +911,9 @@ Commands:
   status                     Show the live release, the rollback target, pending commits, all
                              releases and the site
   status --all               One line per project; fails if any site does not serve its live release
+  check                      Check the live release, its shared links, the site and the lock;
+                             changes nothing. Problems go to stderr; exits with 1 on any
+  check --all                The same for every project
   log [count]                The last deploys and rollbacks, with results (20 by default)
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
@@ -789,6 +943,11 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
     exit 0
 fi
 
+if [ "${1:-}" = check ] && [ "${2:-}" = --all ]; then
+    check_all
+    exit 0
+fi
+
 # The project: the first argument when it names a project file, else the only project there is.
 if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
     load_project "$1"
@@ -813,6 +972,9 @@ case "${1:-deploy}" in
         ;;
     status)
         status
+        ;;
+    check)
+        check
         ;;
     log)
         resolve_base

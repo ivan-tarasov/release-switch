@@ -11,7 +11,7 @@ PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 
 # Settings a project file may set. Env vars of the same name win.
 SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION
-    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ)
+    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON)
 
 PROJECT=""
 
@@ -31,11 +31,15 @@ LOG_RELEASE=""
 STAGE=""
 STARTED="$(date +%s)"
 
+# The last fail() message, for the alert.
+FAIL_MESSAGE=""
+
 say() {
     printf '==> %s\n' "$*"
 }
 
 fail() {
+    FAIL_MESSAGE="$*"
     printf 'deploy: %s\n' "$*" >&2
     exit 1
 }
@@ -84,6 +88,9 @@ apply_defaults() {
     COMPOSER_BIN="${COMPOSER_BIN:-composer}"
     PHP_RELOAD_CMD="${PHP_RELOAD_CMD:-}"
     DISPLAY_TZ="${DISPLAY_TZ:-}"
+    NOTIFY_URL="${NOTIFY_URL:-}"
+    NOTIFY_CMD="${NOTIFY_CMD:-}"
+    NOTIFY_ON="${NOTIFY_ON:-problems}"
 
     export DEPLOY_BASE PHP_BIN COMPOSER_BIN
 }
@@ -181,10 +188,17 @@ on_exit() {
 
 # One line per deploy or rollback in <base>/deploy.log: UTC time, action, release, result, seconds.
 log_event() {
-    local file="$DEPLOY_BASE/deploy.log"
+    local file="$DEPLOY_BASE/deploy.log" seconds
+    seconds="$(($(date +%s) - STARTED))"
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" \
-        "$(($(date +%s) - STARTED))" >> "$file"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" "$seconds" >> "$file"
+
+    # Failures and rollbacks always; a plain successful deploy only with NOTIFY_ON=all.
+    if [ "$3" != ok ]; then
+        notify "$1" "$1 ${2:--}: $3${FAIL_MESSAGE:+ ($FAIL_MESSAGE)}"
+    elif [ "$NOTIFY_ON" = all ]; then
+        notify "$1" "$1 $2: ok (${seconds}s)"
+    fi
 
     # Keeps it small: past 1000 lines, only the last 500 stay.
     if [ "$(wc -l < "$file")" -gt 1000 ]; then
@@ -193,6 +207,29 @@ log_event() {
 }
 
 # The last lines of deploy.log, with times in DISPLAY_TZ.
+# Sends an alert: $1 is the event (deploy, rollback, check), $2 the text. NOTIFY_URL gets JSON
+# with a "text" field, which Slack-style webhooks show. NOTIFY_CMD runs with the text in
+# $NOTIFY_TEXT. Never fails: an alert that cannot be sent only warns.
+notify() {
+    local text="${PROJECT:+$PROJECT: }$2" body
+
+    if [ -n "$NOTIFY_URL" ]; then
+        # shellcheck disable=SC2016 # PHP code, not shell.
+        body="$("$PHP_BIN" -r 'echo json_encode(["text" => $argv[1], "project" => $argv[2], "event" => $argv[3]],
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' "$text" "$PROJECT" "$1" 2>/dev/null)" || body=""
+
+        if [ -z "$body" ] || ! curl --silent --fail --max-time 10 --output /dev/null \
+            --header 'Content-Type: application/json' --data "$body" "$NOTIFY_URL"; then
+            printf 'deploy: could not send the alert to NOTIFY_URL\n' >&2
+        fi
+    fi
+
+    if [ -n "$NOTIFY_CMD" ]; then
+        NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" sh -c "$NOTIFY_CMD" > /dev/null 2>&1 \
+            || printf 'deploy: NOTIFY_CMD failed\n' >&2
+    fi
+}
+
 show_log() {
     local count="${1:-20}" file="$DEPLOY_BASE/deploy.log"
 
@@ -746,12 +783,36 @@ check_ok() {
 check_bad() {
     printf 'FAIL  %s%s\n' "${PROJECT:+$PROJECT: }" "$*" >&2
     CHECK_FAILED=1
+    CHECK_PROBLEMS+="${CHECK_PROBLEMS:+; }$*"
+    # The part before ":" names the problem; the rest (like minutes) may change each run.
+    CHECK_KEYS+="${*%%:*}"$'\n'
 }
 
-# A health check that changes nothing. Exits with 1 if anything is wrong.
+# Alerts only when the check result changes, so a cron check does not repeat itself.
+# Remembers the last failure in <base>/.check-failed.
+check_notify() {
+    local state="$DEPLOY_BASE/.check-failed"
+
+    [ -n "$NOTIFY_URL$NOTIFY_CMD" ] || return 0
+
+    if [ "$CHECK_FAILED" -eq 1 ]; then
+        if [ "$(cat "$state" 2>/dev/null)" != "${CHECK_KEYS%$'\n'}" ]; then
+            notify check "check failed: $CHECK_PROBLEMS"
+            printf '%s' "$CHECK_KEYS" > "$state"
+        fi
+    elif [ -f "$state" ]; then
+        notify check "check ok again"
+        rm -f "$state"
+    fi
+}
+
+# A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
+# anything is wrong.
 check() {
     local live dir broken minutes
     CHECK_FAILED=0
+    CHECK_PROBLEMS=""
+    CHECK_KEYS=""
 
     if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
         check_bad "no base folder: ${DEPLOY_BASE:-DEPLOY_BASE not set}"
@@ -816,6 +877,8 @@ check() {
             fi
             ;;
     esac
+
+    check_notify
 
     return "$CHECK_FAILED"
 }
@@ -934,6 +997,9 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
   PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
   DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
+  NOTIFY_URL      Webhook for alerts, gets JSON with "text" (${NOTIFY_URL:+set}${NOTIFY_URL:-not set})
+  NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT (${NOTIFY_CMD:+set}${NOTIFY_CMD:-not set})
+  NOTIFY_ON       problems, or all to also send successful deploys ($NOTIFY_ON)
 EOF
 }
 

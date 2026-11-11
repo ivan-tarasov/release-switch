@@ -162,6 +162,28 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt` |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status`, e.g. `America/Toronto`. Release names stay in UTC |
+| `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON: `text`, `project`, `event` |
+| `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` |
+| `NOTIFY_ON` | problems | `problems`, or `all` to also send successful deploys |
+
+### Alerts
+
+With `NOTIFY_URL` or `NOTIFY_CMD` set, the engine sends an alert when a deploy or rollback fails,
+when a rollback runs, and when the result of `check` changes (once when it fails, once when it is
+ok again, so a cron check does not repeat itself). An alert that cannot be sent only warns.
+
+`NOTIFY_URL` suits Slack-style incoming webhooks, which show the `text` field. `NOTIFY_CMD` covers
+anything else, like local mail:
+
+```bash
+NOTIFY_CMD='printf "%s\n" "$NOTIFY_TEXT" | mail -s "deploy alert" you@example.com'
+```
+
+For alerts on a down site, run `check` from cron. The alerts do the telling, so cron mail is off:
+
+```cron
+*/5 * * * * $HOME/release-switch/deploy check --all > /dev/null 2>&1
+```
 
 ## deploy.conf
 
@@ -212,6 +234,6 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, the log, the lock and stale locks, and that shared files survive.
+with pending commits, `check`, alerts, the log, the lock and stale locks, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

@@ -493,6 +493,31 @@ NOTIFY_CMD="$alert_cmd" deploy fixture rollback > /dev/null
 grep -qE "^rollback\|fixture: rollback [0-9-]+.*: ok, from " "$ALERTS" || fail "no alert for a rollback"
 check "alerts for a failed build and a rollback; good deploys only with NOTIFY_ON=all; a dead webhook only warns"
 
+step "A token in REPO_URL never shows in output, deploy.log or alerts"
+secret_url="http://user:ghp_FAKE123@127.0.0.1:1/missing.git"
+: > "$ALERTS"
+for args in "--force" "--ref main"; do
+    # shellcheck disable=SC2086 # Split on purpose.
+    if REPO_URL="$secret_url" NOTIFY_CMD="$alert_cmd" deploy fixture $args > "$WORK/secret.out" 2> "$WORK/secret.err"; then
+        fail "a deploy from a missing repo succeeded"
+    fi
+    grep -q "could not clone http://\*\*\*@127.0.0.1:1/missing.git" "$WORK/secret.err" || fail "no redacted clone error"
+done
+[ -s "$ALERTS" ] || fail "no alert for the failed clone"
+if grep -F ghp_FAKE123 "$WORK/secret.out" "$WORK/secret.err" "$ALERTS" "$BASE/deploy.log"; then
+    fail "the token shows in the output, the alert or deploy.log"
+fi
+REPO_URL="$secret_url" deploy fixture help > "$WORK/secret.out"
+grep -q "REPO_URL .*(http://\*\*\*@127.0.0.1:1/missing.git)" "$WORK/secret.out" || fail "help does not show the redacted REPO_URL"
+if grep -F ghp_FAKE123 "$WORK/secret.out"; then
+    fail "help shows the token"
+fi
+REPO_URL="git@github.com:owner/repo.git" deploy fixture help | grep -qF "(git@github.com:owner/repo.git)" \
+    || fail "help hides an SSH REPO_URL"
+REPO_URL="ssh://git@github.com/owner/repo.git" deploy fixture help | grep -qF "(ssh://git@github.com/owner/repo.git)" \
+    || fail "help hides an ssh:// REPO_URL"
+check "a token in REPO_URL is redacted in errors, alerts, deploy.log and help; SSH URLs stay as they are"
+
 step "A deploy lists the commits it ships, in the output, the log and the alert"
 commit "fixture shipped one"
 commit "fixture shipped two"

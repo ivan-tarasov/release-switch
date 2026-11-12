@@ -203,6 +203,9 @@ With `NOTIFY_URL` or `NOTIFY_CMD` set, the engine sends an alert when a deploy o
 when a rollback runs, and when the result of `check` changes (once when it fails, once when it is
 ok again, so a cron check does not repeat itself). An alert that cannot be sent only warns.
 
+URLs in output, `deploy.log` and alerts hide their user and password: `https://user:token@host`
+shows as `https://***@host`. SSH URLs like `git@github.com:owner/repo.git` stay as they are.
+
 `NOTIFY_URL` suits Slack-style incoming webhooks, which show the `text` field. `NOTIFY_CMD` covers
 anything else, like local mail:
 

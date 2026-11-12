@@ -399,6 +399,7 @@ cat "$WORK/check-ok.log"
 grep -q "^ok    fixture: live: $fresh$" "$WORK/check-ok.log" || fail "check does not show the live release"
 grep -q "^ok    fixture: shared: all present$" "$WORK/check-ok.log" || fail "check does not check shared links"
 grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-ok.log" || fail "check does not check the site"
+grep -q "^ok    fixture: health: queue is empty$" "$WORK/check-ok.log" || fail "check does not run health()"
 [ ! -s "$WORK/check-err.log" ] || fail "check wrote to stderr on a healthy site"
 mv "$BASE/shared/data" "$BASE/shared/data.moved"
 if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
@@ -416,9 +417,13 @@ if deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
 fi
 rm -rf "$BASE/.deploy.lock"
 grep -q "^FAIL  fixture: lock: held for 45 min" "$WORK/check-err.log" || fail "check does not report a stuck deploy"
+if FIXTURE_UNHEALTHY=1 deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
+    fail "check passed with a failing health()"
+fi
+grep -q "^FAIL  fixture: health: queue is stuck$" "$WORK/check-err.log" || fail "check does not report the health() problem"
 deploy check --all > "$WORK/check-all.log"
 grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check the fixture"
-check "check passes on a healthy site; reports broken shared links, a bad site and a stuck deploy on stderr"
+check "check passes on a healthy site; reports broken shared links, a bad site, a stuck deploy and a failing health() on stderr"
 
 step "Alerts"
 export ALERTS="$WORK/alerts.log"

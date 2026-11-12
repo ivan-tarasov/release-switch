@@ -580,6 +580,48 @@ deploy fixture log 1 > "$WORK/missing-log.log"
 [ -n "$(sed -nE "/rollback +$back +ok, from $hung /p" "$WORK/missing-log.log")" ] || fail "the log does not say the rollback was ok"
 check "rolled back from the missing $hung to $back, checked the site and logged ok"
 
+step "KEEP_RELEASES below 2 or not a number, and CHECK_WAIT not a number, are refused"
+releases_now="$(release_count)"
+if KEEP_RELEASES=1 deploy fixture --force > /dev/null 2> "$WORK/keep.log"; then
+    fail "KEEP_RELEASES=1 was not refused"
+fi
+[ -n "$(sed -n '/KEEP_RELEASES must be 2 or more: the live release and one to roll back to/p' "$WORK/keep.log")" ] \
+    || fail "no reason given for refusing KEEP_RELEASES=1"
+if KEEP_RELEASES=two deploy fixture --force > /dev/null 2> "$WORK/keep.log"; then
+    fail "KEEP_RELEASES=two was not refused"
+fi
+[ -n "$(sed -n "/KEEP_RELEASES must be a whole number, not 'two'/p" "$WORK/keep.log")" ] \
+    || fail "no message for KEEP_RELEASES=two"
+if run env CHECK_WAIT=1m "$ROOT/deploy" fixture --force > /dev/null 2> "$WORK/keep.log"; then
+    fail "CHECK_WAIT=1m was not refused"
+fi
+[ -n "$(sed -n "/CHECK_WAIT must be a whole number of seconds, not '1m'/p" "$WORK/keep.log")" ] \
+    || fail "no message for CHECK_WAIT=1m"
+[ "$(release_count)" = "$releases_now" ] || fail "a refused setting still built a release"
+check "bad KEEP_RELEASES and CHECK_WAIT stop the deploy before a clone"
+
+step "Prune keeps the release that was just live"
+sleep 1
+KEEP_RELEASES=2 deploy fixture --force > /dev/null
+r1="$(live_release)"
+sleep 1
+KEEP_RELEASES=2 deploy fixture --force > /dev/null
+r2="$(live_release)"
+KEEP_RELEASES=2 deploy fixture rollback > /dev/null
+[ "$(live_release)" = "$r1" ] || fail "rollback did not go back to $r1"
+sleep 1
+KEEP_RELEASES=2 deploy fixture --force > /dev/null
+r3="$(live_release)"
+[ -d "$BASE/releases/$r1" ] || fail "prune deleted $r1, live before $r3"
+[ -d "$BASE/releases/$r2" ] && [ "$(release_count)" = 3 ] || fail "prune did not keep $r1, $r2 and $r3"
+sleep 1
+KEEP_RELEASES=2 deploy fixture --force > /dev/null
+r4="$(live_release)"
+[ "$(release_count)" = 2 ] && [ -d "$BASE/releases/$r3" ] && [ -d "$BASE/releases/$r4" ] \
+    || fail "prune did not keep only $r3 and $r4"
+serves "$r4" || fail "server does not show $r4"
+check "prune kept $r1 after a rollback, then kept the newest 2 and deleted the oldest"
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

@@ -200,6 +200,18 @@ apply_defaults() {
     NOTIFY_CMD="${NOTIFY_CMD:-}"
     NOTIFY_ON="${NOTIFY_ON:-problems}"
 
+    case "$KEEP_RELEASES" in
+        '' | *[!0-9]*) fail "KEEP_RELEASES must be a whole number, not '$KEEP_RELEASES'" ;;
+    esac
+    case "$CHECK_WAIT" in
+        '' | *[!0-9]*) fail "CHECK_WAIT must be a whole number of seconds, not '$CHECK_WAIT'" ;;
+    esac
+    # 10# drops leading zeros, which bash math reads as octal.
+    KEEP_RELEASES=$((10#$KEEP_RELEASES))
+    CHECK_WAIT=$((10#$CHECK_WAIT))
+    [ "$KEEP_RELEASES" -ge 2 ] \
+        || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
+
     export DEPLOY_BASE PHP_BIN COMPOSER_BIN
 }
 
@@ -688,8 +700,10 @@ prune() {
         return
     fi
 
+    # Requests and the PHP realpath cache may still run in the release that was live before
+    # this deploy, so it goes on the next one.
     for release in $(list_releases | head -n "$((count - KEEP_RELEASES))"); do
-        if [ "$release" != "$live" ]; then
+        if [ "$release" != "$live" ] && [ "$release" != "$PREVIOUS_RELEASE" ]; then
             say "Removing old release $release"
             rm -rf "${DEPLOY_BASE:?}/releases/$release"
         fi
@@ -1544,7 +1558,7 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   CHECK_URL       Page that must show the new version (${CHECK_URL:-not set})
   REPO_URL        Repo to clone (${REPO_URL:-origin of current})
   DEPLOY_BRANCH   Branch to deploy ($DEPLOY_BRANCH)
-  KEEP_RELEASES   Releases to keep ($KEEP_RELEASES)
+  KEEP_RELEASES   Releases to keep, 2 or more ($KEEP_RELEASES)
   CHECK_WAIT      Seconds to wait for CHECK_URL ($CHECK_WAIT)
   CHECK_VERSION   0 to only wait for a 200 ($CHECK_VERSION)
   PHP_BIN         PHP binary ($PHP_BIN)

@@ -4,7 +4,7 @@
 #
 #   deploy [project] [deploy [--ref <ref>] [--force] | freeze [reason] | unfreeze | status | check
 #                     | log [count] | rollback [name] | init <checkout> [--dry-run] | help]
-#   deploy self-update
+#   deploy self-update | self [log [count]]
 
 set -euo pipefail
 
@@ -1190,6 +1190,35 @@ self_update() {
     git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after"
 }
 
+# The engine's history, newest first: commits not pulled yet, then the last installed ones.
+self_log() {
+    local count="${1:-10}" tz="${DISPLAY_TZ:-}" first upstream="" new
+
+    [[ "$count" =~ ^[0-9]+$ ]] || fail "usage: deploy self log [count]"
+    git -C "$ENGINE_DIR" rev-parse --git-dir > /dev/null 2>&1 || fail "$ENGINE_DIR is not a git checkout"
+
+    # Times in the first project's DISPLAY_TZ, like the project logs.
+    first="$(list_projects | sed -n 1p)"
+
+    if [ -z "$tz" ] && [ -n "$first" ]; then
+        tz="$(load_project "$first" && printf '%s' "${DISPLAY_TZ:-}")" || tz=""
+    fi
+
+    if git -C "$ENGINE_DIR" fetch --quiet 2>/dev/null; then
+        upstream="$(git -C "$ENGINE_DIR" rev-parse --verify --quiet '@{upstream}' || true)"
+    fi
+
+    if [ -n "$upstream" ]; then
+        new="$(TZ="${tz:-UTC}" git -C "$ENGINE_DIR" log --no-merges --format='  %h  %ad  %s' \
+            --date='format-local:%Y-%m-%d %H:%M %Z' "HEAD..$upstream")"
+        [ -z "$new" ] || printf 'Not pulled yet (run: deploy self):\n%s\n\n' "$new"
+    fi
+
+    printf 'Installed in %s:\n' "$ENGINE_DIR"
+    TZ="${tz:-UTC}" git -C "$ENGINE_DIR" log --no-merges -n "$count" --format='  %h  %ad  %s' \
+        --date='format-local:%Y-%m-%d %H:%M %Z' HEAD
+}
+
 usage() {
     local projects
     projects="$(list_projects | paste -sd ' ' -)"
@@ -1221,6 +1250,7 @@ Commands:
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
   self-update, self          Update the engine: git pull in $ENGINE_DIR
+  self log [count]           The engine's last commits (10 by default), and ones not pulled yet
   help                       Show this help
 
 Settings${PROJECT:+ for $PROJECT} (value now in effect):
@@ -1244,7 +1274,12 @@ EOF
 # Before a project is loaded: the engine itself, and commands where each project loads its own
 # settings.
 if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
-    self_update
+    case "${2:-}" in
+        "" | update) self_update ;;
+        log) self_log "${3:-}" ;;
+        *) fail "unknown command: deploy $1 $2 (try: deploy self, deploy self log [count])" ;;
+    esac
+
     exit 0
 fi
 

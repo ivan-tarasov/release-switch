@@ -77,6 +77,7 @@ deploy [project] [command]
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder, then
                     the new commits. Stops if the folder has local changes. Short form: self
+  self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
   help              Commands and the settings in effect
 ```
 
@@ -250,7 +251,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, `self log`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

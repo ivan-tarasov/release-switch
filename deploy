@@ -36,6 +36,9 @@ STARTED="$(date +%s)"
 # The last fail() message, for the alert.
 FAIL_MESSAGE=""
 
+# The commits a deploy ships, "<sha> <subject>" per line, newest first. Empty when unknown or none.
+SHIPPED=""
+
 say() {
     printf '==> %s\n' "$*"
 }
@@ -193,13 +196,14 @@ log_event() {
     local file="$DEPLOY_BASE/deploy.log" seconds
     seconds="$(($(date +%s) - STARTED))"
 
-    printf '%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" "$seconds" >> "$file"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" "$seconds" \
+        "$(shipped_summary)" >> "$file"
 
     # Failures and rollbacks always; a plain successful deploy only with NOTIFY_ON=all.
     if [ "$3" != ok ]; then
-        notify "$1" "$1 ${2:--}: $3${FAIL_MESSAGE:+ ($FAIL_MESSAGE)}"
+        notify "$1" "$1 ${2:--}: $3${FAIL_MESSAGE:+ ($FAIL_MESSAGE)}$(shipped_list)"
     elif [ "$NOTIFY_ON" = all ]; then
-        notify "$1" "$1 $2: ok (${seconds}s)"
+        notify "$1" "$1 $2: ok (${seconds}s)$(shipped_list)"
     fi
 
     # Keeps it small: past 1000 lines, only the last 500 stay.
@@ -232,6 +236,54 @@ notify() {
     fi
 }
 
+# Finds the commits from the live commit ($1) to the new release ($2). A shallow release has no
+# history, so those come from a commits-only clone. Sets SHIPPED; never fails the deploy.
+shipped_commits() {
+    local live_sha="$1" dir="$2" new_sha git_dir tmp=""
+    SHIPPED=""
+
+    [ -n "$live_sha" ] || return 0
+    new_sha="$(git -C "$dir" rev-parse HEAD)"
+    [ "$new_sha" != "$live_sha" ] || return 0
+    git_dir="$dir"
+
+    if [ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+        tmp="$(mktemp -d)"
+        git_dir="$tmp/repo"
+        git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$REPO_URL" "$git_dir" \
+            2>/dev/null || git_dir=""
+    fi
+
+    # Only when going forward: a --ref to an older commit ships nothing new.
+    if [ -n "$git_dir" ] && git -C "$git_dir" merge-base --is-ancestor "$live_sha" "$new_sha" 2>/dev/null; then
+        SHIPPED="$(git -C "$git_dir" log --format='%h %s' "$live_sha..$new_sha" 2>/dev/null | tr '\t' ' ' || true)"
+    fi
+
+    [ -z "$tmp" ] || rm -rf "$tmp"
+}
+
+# For deploy.log: "3 commits: Fix a; Add b; Update c", the first 5 subjects only.
+shipped_summary() {
+    local count
+
+    [ -n "$SHIPPED" ] || return 0
+    count="$(printf '%s\n' "$SHIPPED" | wc -l | tr -d ' ')"
+    printf '%s commit(s): %s' "$count" \
+        "$(printf '%s\n' "$SHIPPED" | sed -n '1,5p' | cut -d' ' -f2- | paste -sd ';' - | sed 's/;/; /g')"
+    [ "$count" -le 5 ] || printf '; ...'
+}
+
+# For alerts and the deploy output: the first 10 commits, one per line.
+shipped_list() {
+    local count
+
+    [ -n "$SHIPPED" ] || return 0
+    count="$(printf '%s\n' "$SHIPPED" | wc -l | tr -d ' ')"
+    printf '\n%s commit(s):\n' "$count"
+    printf '%s\n' "$SHIPPED" | sed -n '1,10s/^/  /p'
+    [ "$count" -le 10 ] || printf '  ... and %s more\n' "$((count - 10))"
+}
+
 show_log() {
     local count="${1:-20}" file="$DEPLOY_BASE/deploy.log"
 
@@ -247,9 +299,12 @@ show_log() {
     tail -n "$count" "$file" | "$PHP_BIN" -r '
         $tz = new DateTimeZone($argv[1] !== "" ? $argv[1] : "UTC");
         while (($line = fgets(STDIN)) !== false) {
-            [$time, $action, $release, $result, $seconds] = explode("\t", rtrim($line, "\n")) + array_fill(0, 5, "");
+            [$time, $action, $release, $result, $seconds, $commits] = explode("\t", rtrim($line, "\n")) + array_fill(0, 6, "");
             $date = (new DateTime($time))->setTimezone($tz)->format("Y-m-d H:i T");
-            printf("%s  %-8s  %s  %s (%ss)\n", $date, $action, $release, $result, $seconds);
+            if (strlen($commits) > 80) {
+                $commits = (function_exists("mb_strcut") ? mb_strcut($commits, 0, 77) : substr($commits, 0, 77)) . "...";
+            }
+            printf("%s  %-8s  %s  %s (%ss)%s\n", $date, $action, $release, $result, $seconds, $commits !== "" ? "  $commits" : "");
         }
     ' "$DISPLAY_TZ"
 }
@@ -641,6 +696,9 @@ deploy() {
     RELEASE_NAME="$NEW_RELEASE"
     export RELEASE_DIR RELEASE_NAME
     say "Building release $NEW_RELEASE"
+
+    shipped_commits "$live_sha" "$RELEASE_DIR"
+    [ -z "$SHIPPED" ] || shipped_list
 
     # The project sends this as the X-App-Version header.
     printf '%s\n' "$NEW_RELEASE" > "$RELEASE_DIR/RELEASE"

@@ -382,8 +382,9 @@ if deploy fixture --ref nope 2> "$WORK/ref.log"; then
 fi
 grep -q "no tag, branch or commit nope" "$WORK/ref.log" || fail "no message for a missing ref"
 sleep 1
-deploy --ref=develop > /dev/null
+deploy --ref=develop > "$WORK/ref.log"
 fresh="$(live_release)"
+grep -q "^1 commit(s):$" "$WORK/ref.log" || fail "--ref=develop does not list the commit it ships"
 [[ "$fresh" == *"-$(git -C "$REPO" rev-parse --short develop)" ]] || fail "--ref=develop deployed $fresh"
 serves "$fresh" || fail "server does not show $fresh"
 check "--ref deployed a tag, a commit and a branch; the live commit and a missing ref stopped"
@@ -440,6 +441,21 @@ grep -qE "^deploy\|fixture: deploy [0-9-]+.*: ok \([0-9]+s\)$" "$ALERTS" || fail
 NOTIFY_CMD="$alert_cmd" deploy fixture rollback > /dev/null
 grep -qE "^rollback\|fixture: rollback [0-9-]+.*: ok, from " "$ALERTS" || fail "no alert for a rollback"
 check "alerts for a failed build and a rollback; good deploys only with NOTIFY_ON=all; a dead webhook only warns"
+
+step "A deploy lists the commits it ships, in the output, the log and the alert"
+commit "fixture shipped one"
+commit "fixture shipped two"
+sleep 1
+NOTIFY_ON=all NOTIFY_CMD="$alert_cmd" deploy fixture > "$WORK/shipped.log"
+cat "$WORK/shipped.log"
+grep -q "^2 commit(s):$" "$WORK/shipped.log" || fail "deploy does not count the commits it ships"
+grep -qE "^  [0-9a-f]+ fixture shipped two$" "$WORK/shipped.log" || fail "deploy does not list the commits it ships"
+deploy fixture log 1 > "$WORK/shipped-log.log"
+cat "$WORK/shipped-log.log"
+grep -q "ok ([0-9]*s)  2 commit(s): fixture shipped two; fixture shipped one$" "$WORK/shipped-log.log" \
+    || fail "the log does not list the commits"
+grep -qE "^  [0-9a-f]+ fixture shipped one$" "$ALERTS" || fail "the alert does not list the commits"
+check "the output, the log and the alert list both commits"
 
 step "Check alerts only when the result changes"
 : > "$ALERTS"

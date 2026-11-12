@@ -36,6 +36,7 @@ Each project has a base folder on the server:
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 Migrations and other data changes are not undone by a switch back or a rollback.
 Every deploy and rollback, and how it ended, goes to `deploy.log` (see `deploy <project> log`).
+A deploy also lists the commits it ships, in its output, the log and the alert.
 
 Release names are in UTC, so they sort the same all year. The tag (`v2026.11.21`) is left out when
 the commit has none.
@@ -70,7 +71,8 @@ deploy [project] [command]
                     and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
                     only problems
   check --all       The same for every project
-  log [count]       The last deploys and rollbacks, with results and times (20 by default)
+  log [count]       The last deploys and rollbacks, with results, times and the commits each
+                    deploy shipped (20 by default)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder, then
@@ -248,7 +250,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

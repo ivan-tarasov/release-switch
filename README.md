@@ -67,7 +67,8 @@ deploy [project] [command]
                     any part only one release has: date and time, sha, tag); this marks nothing,
                     and clears the mark if that release had one
   check             A quick health check that changes nothing: the live release, its shared
-                    links, the site, and a lock held for 30 min or more. Problems go to stderr
+                    links, the project's health() step, the site, and a lock held for 30 min
+                    or more. Problems go to stderr
                     and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
                     only problems
   check --all       The same for every project
@@ -237,6 +238,16 @@ verify() {
 after_switch() {
     "$PHP_BIN" artisan cache:forget sitemap.xml
 }
+
+# Optional. Run by `check` (and so by the cron check) in the live release. A non-zero exit is a
+# problem, and an alert if alerts are on. The last line it prints shows in the check.
+health() {
+    "$PHP_BIN" artisan db:show > /dev/null 2>&1 || {
+        echo "the database does not answer"
+        return 1
+    }
+    echo "database ok"
+}
 ```
 
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN` and `COMPOSER_BIN`.
@@ -251,7 +262,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, `self log`, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

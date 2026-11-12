@@ -1013,6 +1013,40 @@ check_notify() {
     fi
 }
 
+# Runs the project's optional health() step from the live release's deploy.conf, in that
+# release. A non-zero exit is a problem; the last line it prints says why.
+check_health() {
+    local dir="$1" output last status
+
+    # shellcheck source=/dev/null
+    (cd "$dir" && . ./deploy.conf > /dev/null 2>&1 && declare -F health > /dev/null) || return 0
+    output="$(mktemp)"
+
+    # Off here, so `set -e` inside the subshell stops the step at its first failing command.
+    set +e
+    (
+        set -e
+        cd "$dir"
+        RELEASE_DIR="$dir"
+        RELEASE_NAME="$(basename "$dir")"
+        export RELEASE_DIR RELEASE_NAME
+        # shellcheck source=/dev/null
+        . ./deploy.conf > /dev/null 2>&1
+        health
+    ) > "$output" 2>&1
+    status=$?
+    set -e
+
+    last="$(sed '/^[[:space:]]*$/d' "$output" | tail -n1)"
+    rm -f "$output"
+
+    if [ "$status" -eq 0 ]; then
+        check_ok "health: ${last:-ok}"
+    else
+        check_bad "health: ${last:-failed with exit code $status}"
+    fi
+}
+
 # A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
 # anything is wrong.
 check() {
@@ -1050,6 +1084,8 @@ check() {
             else
                 check_ok "shared: all present"
             fi
+
+            check_health "$dir"
         fi
     fi
 
@@ -1240,8 +1276,9 @@ Commands:
                              releases and the site
   status --all               One line per project, and one for the engine; fails if any site does
                              not serve its live release
-  check                      Check the live release, its shared links, the site and the lock;
-                             changes nothing. Problems go to stderr; exits with 1 on any
+  check                      Check the live release, its shared links, its health() step, the
+                             site and the lock; changes nothing. Problems go to stderr; exits
+                             with 1 on any
   check --all                The same for every project
   log [count]                The last deploys and rollbacks, with results (20 by default)
   rollback [name]            Point current at the previous good release and mark the live one

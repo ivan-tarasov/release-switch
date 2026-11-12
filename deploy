@@ -54,29 +54,44 @@ fi
 # 1 once intro has opened the rails, so on_exit closes them.
 INTRO=0
 
+# Hides the user and password in URLs: https://user:token@host becomes https://***@host.
+# ssh://git@host stays, as git@ holds no secret.
+redact() {
+    case "$1" in
+        *://*@*) printf '%s' "$1" | sed -E $'s#://git@#://\001#g; s#://[^/@[:space:]]+@#://***@#g; s#://\001#://git@#g' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 say() {
+    local text
+    text="$(redact "$*")"
+
     if [ "$RAILS" -eq 1 ]; then
-        printf '%s◇%s  %s\n' "$C_GREEN" "$C_OFF" "$*"
+        printf '%s◇%s  %s\n' "$C_GREEN" "$C_OFF" "$text"
     else
-        printf '==> %s\n' "$*"
+        printf '==> %s\n' "$text"
     fi
 }
 
 warn() {
+    local text
+    text="$(redact "$*")"
+
     if [ "$RAILS" -eq 1 ]; then
-        printf '%s▲%s  %s\n' "$C_YELLOW" "$C_OFF" "$*" >&2
+        printf '%s▲%s  %s\n' "$C_YELLOW" "$C_OFF" "$text" >&2
     else
-        printf 'deploy: %s\n' "$*" >&2
+        printf 'deploy: %s\n' "$text" >&2
     fi
 }
 
 fail() {
-    FAIL_MESSAGE="$*"
+    FAIL_MESSAGE="$(redact "$*")"
 
     if [ "$RAILS" -eq 1 ]; then
-        printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$*" >&2
+        printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$FAIL_MESSAGE" >&2
     else
-        printf 'deploy: %s\n' "$*" >&2
+        printf 'deploy: %s\n' "$FAIL_MESSAGE" >&2
     fi
 
     exit 1
@@ -339,7 +354,8 @@ log_event() {
 # with a "text" field, which Slack-style webhooks show. NOTIFY_CMD runs with the text in
 # $NOTIFY_TEXT. Never fails: an alert that cannot be sent only warns.
 notify() {
-    local text="${PROJECT:+$PROJECT: }$2" body
+    local text body
+    text="$(redact "${PROJECT:+$PROJECT: }$2")"
 
     if [ -n "$NOTIFY_URL" ]; then
         # shellcheck disable=SC2016 # PHP code, not shell.
@@ -843,7 +859,7 @@ deploy() {
             || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
     fi
 
-    local stamp sha tag live_sha="" tip
+    local stamp sha tag live_sha="" tip err
 
     [ -z "$PREVIOUS_RELEASE" ] || live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
 
@@ -865,7 +881,11 @@ deploy() {
     NEW_RELEASE="$stamp"
 
     if [ -z "$ref" ]; then
-        git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp"
+        # Git may print the URL with its token, so its errors are shown redacted.
+        if ! err="$(git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>&1)"; then
+            [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
+            fail "could not clone $REPO_URL"
+        fi
     else
         # Any tag, branch or commit: the whole history, with file contents fetched on checkout.
         git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>/dev/null \
@@ -1058,7 +1078,7 @@ status() {
     fi
 
     probe
-    printf 'Site:      %s answered %s, version %s' "$CHECK_URL" "${PROBE_STATUS:-nothing}" "${PROBE_VERSION:-none}"
+    printf 'Site:      %s answered %s, version %s' "$(redact "$CHECK_URL")" "${PROBE_STATUS:-nothing}" "${PROBE_VERSION:-none}"
 
     if [ -n "$live" ] && [ "$PROBE_VERSION" = "$live" ]; then
         printf ' (matches live)\n'
@@ -1198,13 +1218,13 @@ status_all() {
 # Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.
 # For check: one line per item. Problems go to stderr, so cron can mail only those.
 check_ok() {
-    printf 'ok    %s%s\n' "${PROJECT:+$PROJECT: }" "$*"
+    printf 'ok    %s%s\n' "${PROJECT:+$PROJECT: }" "$(redact "$*")"
 }
 
 check_bad() {
-    printf 'FAIL  %s%s\n' "${PROJECT:+$PROJECT: }" "$*" >&2
+    printf 'FAIL  %s%s\n' "${PROJECT:+$PROJECT: }" "$(redact "$*")" >&2
     CHECK_FAILED=1
-    CHECK_PROBLEMS+="${CHECK_PROBLEMS:+; }$*"
+    CHECK_PROBLEMS+="${CHECK_PROBLEMS:+; }$(redact "$*")"
     # The part before ":" names the problem; the rest (like minutes) may change each run.
     CHECK_KEYS+="${*%%:*}"$'\n'
 }
@@ -1419,7 +1439,7 @@ init() {
 
 Next steps:
   1. Deploy the first release: deploy ${PROJECT:-<project>}
-     (REPO_URL must be set for it: $(git -C "$checkout" remote get-url origin 2>/dev/null || printf 'the repo URL'))
+     (REPO_URL must be set for it: $(redact "$(git -C "$checkout" remote get-url origin 2>/dev/null || printf 'the repo URL')"))
   2. Point the web root at $DEPLOY_BASE/current/public (or replace it with a link to it).
   3. Point cron at $DEPLOY_BASE/current.
 EOF
@@ -1555,8 +1575,8 @@ Commands:
 
 Settings${PROJECT:+ for $PROJECT} (value now in effect):
   DEPLOY_BASE     Folder with releases/, shared/ and current (${DEPLOY_BASE:-not set})
-  CHECK_URL       Page that must show the new version (${CHECK_URL:-not set})
-  REPO_URL        Repo to clone (${REPO_URL:-origin of current})
+  CHECK_URL       Page that must show the new version ($(redact "${CHECK_URL:-not set}"))
+  REPO_URL        Repo to clone ($(redact "${REPO_URL:-origin of current}"))
   DEPLOY_BRANCH   Branch to deploy ($DEPLOY_BRANCH)
   KEEP_RELEASES   Releases to keep, 2 or more ($KEEP_RELEASES)
   CHECK_WAIT      Seconds to wait for CHECK_URL ($CHECK_WAIT)
@@ -1565,8 +1585,8 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
   PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
   DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
-  NOTIFY_URL      Webhook for alerts, gets JSON with "text" (${NOTIFY_URL:+set}${NOTIFY_URL:-not set})
-  NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT (${NOTIFY_CMD:+set}${NOTIFY_CMD:-not set})
+  NOTIFY_URL      Webhook for alerts, gets JSON with "text" ($([ -n "$NOTIFY_URL" ] && printf set || printf 'not set'))
+  NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT ($([ -n "$NOTIFY_CMD" ] && printf set || printf 'not set'))
   NOTIFY_ON       problems, or all to also send successful deploys ($NOTIFY_ON)
 EOF
 }

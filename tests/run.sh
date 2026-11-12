@@ -549,15 +549,23 @@ git -C "$WORK/engine-src" push --quiet --tags "$WORK/engine.git" main
 git clone --quiet --branch main "file://$WORK/engine.git" "$WORK/engine"
 [ "$("$WORK/engine/deploy" --version)" = v2026.11.1 ] || fail "--version does not show the release tag"
 "$WORK/engine/deploy" self-update > "$WORK/self.log"
-grep -q "Already up to date" "$WORK/self.log" || fail "self-update does not say it is up to date"
+grep -q "Already up to date (v2026.11.1)" "$WORK/self.log" || fail "self-update does not say it is up to date"
 printf '# newer\n' >> "$WORK/engine-src/deploy"
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newer engine"
-git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+git -C "$WORK/engine-src" tag v2026.11.2
+printf '# untagged\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Untagged engine"
+git -C "$WORK/engine-src" push --quiet --tags "$WORK/engine.git" main
 "$WORK/engine/deploy" self > "$WORK/self.log"
 cat "$WORK/self.log"
-grep -qE "^    [0-9a-f]+ Newer engine$" "$WORK/self.log" || fail "self does not list the new commit"
-tail -n1 "$WORK/engine/deploy" | grep -q "^# newer$" || fail "self did not update the engine"
-[ "$("$WORK/engine/deploy" --version)" = v2026.11.1+1 ] || fail "--version does not count commits past the tag"
+grep -q "Updated v2026.11.1 → v2026.11.2+1$" "$WORK/self.log" || fail "self does not show both versions"
+# No gh for a file:// repo, so each tag lists its commits.
+sed -n '/^v2026.11.2$/,/^Not released yet$/p' "$WORK/self.log" | grep -E "^    [0-9a-f]+ Newer engine$" > /dev/null \
+    || fail "self does not list the new tag with its commits"
+sed -n '/^Not released yet$/,$p' "$WORK/self.log" | grep -E "^    [0-9a-f]+ Untagged engine$" > /dev/null \
+    || fail "self does not list the commits past the tag"
+tail -n1 "$WORK/engine/deploy" | grep -q "^# untagged$" || fail "self did not update the engine"
+[ "$("$WORK/engine/deploy" --version)" = v2026.11.2+1 ] || fail "--version does not count commits past the tag"
 printf '# local change\n' >> "$WORK/engine/deploy"
 printf '# newest\n' >> "$WORK/engine-src/deploy"
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newest engine"
@@ -566,19 +574,19 @@ if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
     fail "self-update ran over a local change"
 fi
 grep -q "could not update" "$WORK/self.log" || fail "no message when self-update cannot pull"
-check "self-update lists new commits, says when it is up to date, and stops on local changes; --version follows the tags"
+check "self-update shows both versions, lists new tags and commits, says when it is up to date, and stops on local changes; --version follows the tags"
 
 step "status --all shows the engine"
 PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"
 cat "$WORK/engine-row.log"
-grep -qE "^release-switch +[0-9a-f]+ +today at .* +- +1 new, run deploy self, local changes$" "$WORK/engine-row.log" \
+grep -qE "^release-switch +v2026\.11\.2\+1 +today at .* +- +1 new, run deploy self, local changes$" "$WORK/engine-row.log" \
     || fail "status --all does not show the engine behind and changed"
 git -C "$WORK/engine" checkout --quiet -- deploy
 "$WORK/engine/deploy" self > /dev/null
 PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"
-grep -qE "^release-switch +[0-9a-f]+ +today at .* +- +up to date$" "$WORK/engine-row.log" \
+grep -qE "^release-switch +v2026\.11\.2\+2 +today at .* +- +up to date$" "$WORK/engine-row.log" \
     || fail "status --all does not show the engine up to date"
-check "status --all shows the engine's commit and whether it is behind or changed"
+check "status --all shows the engine's version and whether it is behind or changed"
 
 step "self log shows the engine's commits, and the ones not pulled yet"
 printf '# unpulled\n' >> "$WORK/engine-src/deploy"

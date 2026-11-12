@@ -1112,12 +1112,12 @@ join_notes() {
     printf '%s' "${text:--}"
 }
 
-# The engine's own row for status --all: its commit, when that commit was made, and whether the
+# The engine's own row for status --all: its version, when its commit was made, and whether the
 # repo has newer ones. Fetching only updates the engine's remote refs, never its files.
 engine_row() {
-    local sha stamp behind notes=()
+    local stamp behind notes=()
 
-    if ! sha="$(git -C "$ENGINE_DIR" rev-parse --short HEAD 2>/dev/null)"; then
+    if ! git -C "$ENGINE_DIR" rev-parse --short HEAD > /dev/null 2>&1; then
         printf 'release-switch\t-\t-\t-\tnot a git checkout\n'
 
         return
@@ -1137,7 +1137,7 @@ engine_row() {
 
     [ -z "$(git -C "$ENGINE_DIR" status --porcelain --untracked-files=no)" ] || notes+=("local changes")
 
-    printf 'release-switch\t%s\t%s\t-\t%s\n' "$sha" "$(release_time "$stamp")" "$(join_notes "${notes[@]}")"
+    printf 'release-switch\t%s\t%s\t-\t%s\n' "$(engine_version)" "$(release_time "$stamp")" "$(join_notes "${notes[@]}")"
 }
 
 status_all() {
@@ -1402,10 +1402,11 @@ EOF
 # Shows the values in effect, so env overrides (e.g. from a shell profile) are visible.
 # Updates the engine itself: a fast-forward pull of its own checkout.
 self_update() {
-    local before after
+    local before after from_version tags
 
     git -C "$ENGINE_DIR" rev-parse --git-dir > /dev/null 2>&1 || fail "$ENGINE_DIR is not a git checkout"
     before="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+    from_version="$(engine_version)"
 
     say "Updating the engine in $ENGINE_DIR"
     git -C "$ENGINE_DIR" pull --quiet --ff-only \
@@ -1413,13 +1414,48 @@ self_update() {
     after="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
 
     if [ "$before" = "$after" ]; then
-        say "Already up to date (${after:0:7})"
+        say "Already up to date ($(engine_version))"
 
         return
     fi
 
-    say "Updated ${before:0:7} to ${after:0:7}:"
-    git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after" | rail
+    say "Updated $from_version → $(engine_version)"
+    tags="$(git -C "$ENGINE_DIR" tag --list 'v[0-9]*' --sort=v:refname --merged "$after" --no-merged "$before")"
+
+    if [ -z "$tags" ] && [ -z "$(git -C "$ENGINE_DIR" tag --list 'v[0-9]*')" ]; then
+        git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after" | rail
+
+        return
+    fi
+
+    self_update_notes "$before" "$after" "$tags" | rail
+}
+
+# What changed: each new tag with its GitHub release notes (or its commits when gh cannot read
+# them), then the commits past the last tag.
+self_update_notes() {
+    local from="$1" after="$2" tags="$3" tag notes commits
+
+    for tag in $tags; do
+        printf '%s\n' "$tag"
+        notes=""
+
+        if command -v gh > /dev/null; then
+            notes="$(cd "$ENGINE_DIR" && GH_PROMPT_DISABLED=1 gh release view "$tag" --json body --jq .body \
+                2>/dev/null | tr -d '\r')" || notes=""
+        fi
+
+        if [ -n "$notes" ]; then
+            printf '%s\n' "$notes" | sed 's/^/    /'
+        else
+            git -C "$ENGINE_DIR" log --no-merges --format='    %h %s' "$from..$tag"
+        fi
+
+        from="$tag"
+    done
+
+    commits="$(git -C "$ENGINE_DIR" log --no-merges --format='    %h %s' "$from..$after")"
+    [ -z "$commits" ] || printf 'Not released yet\n%s\n' "$commits"
 }
 
 # The engine's history, newest first: commits not pulled yet, then the last installed ones.
@@ -1485,7 +1521,8 @@ Commands:
                              it, like the sha or tag)
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
-  self-update, self          Update the engine: git pull in $ENGINE_DIR
+  self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
+                             versions and their release notes
   self log [count]           The engine's last commits (10 by default), and ones not pulled yet
   help                       Show this help
   --version, version         The engine's version: its newest release tag

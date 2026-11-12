@@ -277,7 +277,12 @@ acquire_lock() {
 on_exit() {
     local status=$?
 
-    if [ -n "$NEW_RELEASE" ] && [ "$SWITCHED" -eq 0 ]; then
+    # Cleanup runs to the end: no second signal, and no stop on a failed write to a closed terminal.
+    trap '' INT TERM HUP
+    set +e
+
+    # Never deletes the release that `current` points at, whatever the flags say.
+    if [ -n "$NEW_RELEASE" ] && [ "$SWITCHED" -eq 0 ] && [ "$(current_release)" != "$NEW_RELEASE" ]; then
         rm -rf "${DEPLOY_BASE:?}/releases/$NEW_RELEASE"
 
         if [ "$status" -ne 0 ]; then
@@ -549,6 +554,9 @@ switch_to() {
         rm -f "$tmp"
         ln -sfn "releases/$1" "$link"
     fi
+
+    # Set here, before the reload, so a signal from now on never deletes the live release.
+    SWITCHED=1
 
     if [ -n "$PHP_RELOAD_CMD" ]; then
         sh -c "$PHP_RELOAD_CMD" || say "PHP_RELOAD_CMD failed; carrying on"
@@ -890,9 +898,9 @@ deploy() {
         [ "$RUN_STATUS" -eq 0 ] || fail "$step failed"
     done
 
+    STAGE=switch
     say "Switching current to $NEW_RELEASE"
     switch_to "$NEW_RELEASE"
-    SWITCHED=1
 
     run_step after_switch
     [ "$RUN_STATUS" -eq 0 ] || say "after_switch failed; carrying on"
@@ -949,8 +957,12 @@ rollback() {
 
     # Only a plain rollback says the release it leaves is bad; a named one may go forward.
     if [ -z "${1:-}" ]; then
-        touch "$DEPLOY_BASE/releases/$live/.bad"
-        say "Marked $live as bad; later rollbacks skip it"
+        if [ -d "$DEPLOY_BASE/releases/$live" ]; then
+            touch "$DEPLOY_BASE/releases/$live/.bad"
+            say "Marked $live as bad; later rollbacks skip it"
+        else
+            warn "the folder of $live was missing, so it is not marked bad"
+        fi
     fi
 
     say "Rolled back from $live to $target (data changes stay applied)"
@@ -1545,109 +1557,122 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
 EOF
 }
 
-# Before a project is loaded: the engine itself, and commands where each project loads its own
-# settings.
-if [ "${1:-}" = --version ] || [ "${1:-}" = version ]; then
-    engine_version
-    printf '\n'
-    exit 0
-fi
+# Runs only once bash has read the whole file, so a `git pull` of the engine during a run cannot
+# change the code that runs.
+main() {
+    local projects command
 
-trap on_exit EXIT
+    # Before a project is loaded: the engine itself, and commands where each project loads its own
+    # settings.
+    if [ "${1:-}" = --version ] || [ "${1:-}" = version ]; then
+        engine_version
+        printf '\n'
+        exit 0
+    fi
 
-if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
-    case "${2:-}" in
-        "" | update)
-            intro "self update"
-            self_update
-            ;;
-        log) report "self log" self_log "${3:-}" ;;
-        *) fail "unknown command: deploy $1 $2 (try: deploy self, deploy self log [count])" ;;
+    trap on_exit EXIT
+
+    # A signal exits with 128 + its number, so on_exit cleans up once.
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+
+    if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
+        case "${2:-}" in
+            "" | update)
+                intro "self update"
+                self_update
+                ;;
+            log) report "self log" self_log "${3:-}" ;;
+            *) fail "unknown command: deploy $1 $2 (try: deploy self, deploy self log [count])" ;;
+        esac
+
+        exit 0
+    fi
+
+    if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
+        report "status --all" status_all
+        exit 0
+    fi
+
+    if [ "${1:-}" = check ] && [ "${2:-}" = --all ]; then
+        report "check --all" check_all
+        exit 0
+    fi
+
+    # The project: the first argument when it names a project file, else the only project there is.
+    if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
+        load_project "$1"
+        shift
+    elif [ "$(list_projects | wc -l)" -eq 1 ]; then
+        load_project "$(list_projects)"
+    fi
+
+    apply_defaults
+
+    if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
+        && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
+        projects="$(list_projects | paste -sd ' ' -)"
+        fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
+    fi
+
+    command="${1:-deploy}"
+    case "$command" in
+        --force | --ref | --ref=*) command=deploy ;;
     esac
 
-    exit 0
-fi
+    case "$command" in
+        deploy | freeze | unfreeze | down | up | rollback | init)
+            intro "${PROJECT:+$PROJECT · }$command"
+            ;;
+    esac
 
-if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
-    report "status --all" status_all
-    exit 0
-fi
+    case "${1:-deploy}" in
+        deploy)
+            [ $# -eq 0 ] || shift
+            deploy "$@"
+            ;;
+        --force | --ref | --ref=*)
+            deploy "$@"
+            ;;
+        freeze)
+            shift
+            freeze "$*"
+            ;;
+        unfreeze)
+            unfreeze
+            ;;
+        down)
+            shift
+            maintenance_down "$*"
+            ;;
+        up)
+            maintenance_up
+            ;;
+        status)
+            report "${PROJECT:+$PROJECT · }status" status
+            ;;
+        check)
+            report "${PROJECT:+$PROJECT · }check" check
+            ;;
+        log)
+            resolve_base
+            report "${PROJECT:+$PROJECT · }log" show_log "${2:-}"
+            ;;
+        rollback)
+            rollback "${2:-}"
+            ;;
+        init)
+            init "${2:-}" "${3:-}"
+            ;;
+        help | -h | --help)
+            report help usage
+            ;;
+        *)
+            usage >&2
+            fail "unknown command: $1"
+            ;;
+    esac
+}
 
-if [ "${1:-}" = check ] && [ "${2:-}" = --all ]; then
-    report "check --all" check_all
-    exit 0
-fi
-
-# The project: the first argument when it names a project file, else the only project there is.
-if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
-    load_project "$1"
-    shift
-elif [ "$(list_projects | wc -l)" -eq 1 ]; then
-    load_project "$(list_projects)"
-fi
-
-apply_defaults
-
-if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
-    && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
-    projects="$(list_projects | paste -sd ' ' -)"
-    fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
-fi
-
-command="${1:-deploy}"
-case "$command" in
-    --force | --ref | --ref=*) command=deploy ;;
-esac
-
-case "$command" in
-    deploy | freeze | unfreeze | down | up | rollback | init)
-        intro "${PROJECT:+$PROJECT · }$command"
-        ;;
-esac
-
-case "${1:-deploy}" in
-    deploy)
-        [ $# -eq 0 ] || shift
-        deploy "$@"
-        ;;
-    --force | --ref | --ref=*)
-        deploy "$@"
-        ;;
-    freeze)
-        shift
-        freeze "$*"
-        ;;
-    unfreeze)
-        unfreeze
-        ;;
-    down)
-        shift
-        maintenance_down "$*"
-        ;;
-    up)
-        maintenance_up
-        ;;
-    status)
-        report "${PROJECT:+$PROJECT · }status" status
-        ;;
-    check)
-        report "${PROJECT:+$PROJECT · }check" check
-        ;;
-    log)
-        resolve_base
-        report "${PROJECT:+$PROJECT · }log" show_log "${2:-}"
-        ;;
-    rollback)
-        rollback "${2:-}"
-        ;;
-    init)
-        init "${2:-}" "${3:-}"
-        ;;
-    help | -h | --help)
-        report help usage
-        ;;
-    *)
-        usage >&2
-        fail "unknown command: $1"
-        ;;
-esac
+main "$@"

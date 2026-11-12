@@ -34,6 +34,9 @@ Each project has a base folder on the server:
 9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder.
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
+A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cleans up the same
+way and exits with 130, 143 or 129. Once `current` points at the new release, it is never deleted:
+it stays live, and the log says at which stage the deploy stopped.
 Migrations and other data changes are not undone by a switch back or a rollback.
 Every deploy and rollback, and how it ended, goes to `deploy.log` (see `deploy <project> log`).
 A deploy also lists the commits it ships, in its output, the log and the alert.
@@ -299,7 +302,8 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks,
+`PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

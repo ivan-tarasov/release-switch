@@ -364,6 +364,30 @@ deploy fixture unfreeze > /dev/null
 deploy fixture > /dev/null || fail "deploy failed after unfreeze"
 check "freeze refused deploy and rollback, showed in status; unfreeze allowed deploys again"
 
+step "Deploy a chosen tag, commit or branch with --ref"
+sleep 1
+deploy fixture --ref v2026.11.99 > /dev/null
+tagged="$(live_release)"
+[[ "$tagged" =~ -v2026\.11\.99-[0-9a-f]{7,}$ ]] || fail "--ref v2026.11.99 deployed $tagged"
+serves "$tagged" || fail "server does not show $tagged"
+deploy fixture --ref v2026.11.99 > "$WORK/ref.log"
+grep -q "$tagged already runs v2026.11.99" "$WORK/ref.log" || fail "--ref of the live commit did not stop"
+[ "$(live_release)" = "$tagged" ] || fail "--ref of the live commit changed the live release"
+sleep 1
+older="$(git -C "$REPO" rev-parse --short develop~1)"
+deploy fixture --ref "$older" > /dev/null
+[[ "$(live_release)" == *"-$older" ]] || fail "--ref $older deployed $(live_release)"
+if deploy fixture --ref nope 2> "$WORK/ref.log"; then
+    fail "--ref of a missing ref succeeded"
+fi
+grep -q "no tag, branch or commit nope" "$WORK/ref.log" || fail "no message for a missing ref"
+sleep 1
+deploy --ref=develop > /dev/null
+fresh="$(live_release)"
+[[ "$fresh" == *"-$(git -C "$REPO" rev-parse --short develop)" ]] || fail "--ref=develop deployed $fresh"
+serves "$fresh" || fail "server does not show $fresh"
+check "--ref deployed a tag, a commit and a branch; the live commit and a missing ref stopped"
+
 step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"

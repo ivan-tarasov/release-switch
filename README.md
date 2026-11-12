@@ -28,7 +28,7 @@ Each project has a base folder on the server:
 5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
 6. runs the project's `preflight`, `build` and `verify` steps there;
-7. switches `current` to the new release in one rename, then runs `after_switch` and `PHP_RELOAD_CMD`;
+7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD` and `after_switch`;
 8. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
    If it does not, it switches back and sets the new release aside as `releases/.failed-<name>`;
 9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder.

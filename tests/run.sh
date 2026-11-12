@@ -393,6 +393,31 @@ step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
 
+step "Down and up for maintenance"
+deploy fixture down "database upgrade" > /dev/null
+[ "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$PORT/")" = 503 ] \
+    || fail "down did not run the down() step"
+deploy fixture status > "$WORK/down-status.log"
+grep -q "^Down: *since today at .*: database upgrade$" "$WORK/down-status.log" || fail "status does not show down"
+grep -q "(down for maintenance)$" "$WORK/down-status.log" || fail "status does not explain the 503"
+deploy status --all > "$WORK/down-all.log" || true
+grep -qE "^fixture .*503, down for maintenance .*down" "$WORK/down-all.log" || fail "status --all does not note down"
+deploy fixture check > "$WORK/down-check.log" 2>&1 || fail "check failed while down"
+grep -q "^ok    fixture: site: 503, down for maintenance$" "$WORK/down-check.log" || fail "check does not accept the 503"
+grep -q "^ok    fixture: health: not checked, down for maintenance$" "$WORK/down-check.log" \
+    || fail "check ran health() while down"
+sleep 1
+deploy fixture --force > "$WORK/down-deploy.log" || fail "deploy failed while down"
+grep -q "Not checking .*: the site is down for maintenance" "$WORK/down-deploy.log" || fail "deploy checked the site while down"
+fresh="$(live_release)"
+deploy fixture up > /dev/null || fail "up failed"
+[ ! -e "$BASE/.down" ] || fail "up left the down file"
+serves "$fresh" || fail "server does not show $fresh after up"
+deploy fixture log 3 > "$WORK/down-log.log"
+grep -qE "down +[0-9-]+.*ok" "$WORK/down-log.log" || fail "the log has no down"
+grep -qE "up +$fresh +ok" "$WORK/down-log.log" || fail "the log has no up"
+check "down served a 503; status, check and deploy knew it; up brought $fresh back"
+
 step "Check"
 deploy fixture check > "$WORK/check-ok.log" 2> "$WORK/check-err.log" || fail "check failed on a healthy site"
 cat "$WORK/check-ok.log"

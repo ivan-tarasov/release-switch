@@ -47,6 +47,9 @@ deploy [project] [command]
 
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
                     is already live, unless --force
+  deploy --ref <ref>
+                    Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
+                    to a release that rollback no longer keeps. Stops if it is already live
   freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
                     status, status --all and check show it
   unfreeze          Allow deploys again
@@ -245,7 +248,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

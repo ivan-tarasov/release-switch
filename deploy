@@ -2,8 +2,8 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project] [deploy [--force] | freeze [reason] | unfreeze | status | check | log [count]
-#                     | rollback [name] | init <checkout> [--dry-run] | help]
+#   deploy [project] [deploy [--ref <ref>] [--force] | freeze [reason] | unfreeze | status | check
+#                     | log [count] | rollback [name] | init <checkout> [--dry-run] | help]
 #   deploy self-update
 
 set -euo pipefail
@@ -554,8 +554,26 @@ unfreeze() {
     fi
 }
 
-# $1 is --force to deploy even when the newest commit is already live.
+# Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
+# --force builds even when that commit is already live.
 deploy() {
+    local force=0 ref=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1 ;;
+            --ref=*) ref="${1#--ref=}" ;;
+            --ref)
+                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force]"
+                ref="$2"
+                shift
+                ;;
+            *) fail "unknown option for deploy: $1" ;;
+        esac
+
+        shift
+    done
+
     resolve_base
     refuse_if_frozen
     require_check_url
@@ -572,11 +590,12 @@ deploy() {
             || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
     fi
 
-    local stamp sha tag live_sha tip
+    local stamp sha tag live_sha="" tip
+
+    [ -z "$PREVIOUS_RELEASE" ] || live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
 
     # Like Deployer's check_remote: an empty release would only push a good one out.
-    if [ -n "$PREVIOUS_RELEASE" ] && [ "${1:-}" != --force ]; then
-        live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
+    if [ -n "$PREVIOUS_RELEASE" ] && [ -z "$ref" ] && [ "$force" -eq 0 ]; then
         tip="$(git ls-remote "$REPO_URL" "refs/heads/$DEPLOY_BRANCH" 2>/dev/null | cut -f1)" || true
 
         if [ -n "$live_sha" ] && [ "$tip" = "$live_sha" ]; then
@@ -589,9 +608,29 @@ deploy() {
 
     stamp="$(date -u +%Y%m%d-%H%M%S)"
 
-    say "Cloning $DEPLOY_BRANCH"
+    say "Cloning ${ref:-$DEPLOY_BRANCH}"
     NEW_RELEASE="$stamp"
-    git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp"
+
+    if [ -z "$ref" ]; then
+        git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp"
+    else
+        # Any tag, branch or commit: the whole history, with file contents fetched on checkout.
+        git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>/dev/null \
+            || fail "could not clone $REPO_URL"
+        git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach "$ref" 2>/dev/null \
+            || git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach "origin/$ref" 2>/dev/null \
+            || fail "no tag, branch or commit $ref in the repo"
+
+        if [ "$force" -eq 0 ] && [ -n "$live_sha" ] \
+            && [ "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)" = "$live_sha" ]; then
+            rm -rf "${DEPLOY_BASE:?}/releases/$stamp"
+            NEW_RELEASE=""
+            say "$PREVIOUS_RELEASE already runs $ref"
+            say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--ref $ref --force"
+
+            return
+        fi
+    fi
     sha="$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse --short HEAD)"
     tag="$(release_tag "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)")"
 
@@ -1104,8 +1143,10 @@ Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
 The project can be left out when there is only one.
 
 Commands:
-  deploy [--force]           Build the newest commit and switch to it (the default). Stops if
-                             that commit is already live, unless --force
+  deploy [--ref <ref>] [--force]
+                             Build the newest commit and switch to it (the default). Stops if
+                             that commit is already live, unless --force. --ref deploys a tag,
+                             branch or commit instead
   freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
   unfreeze                   Allow deploys again
   status                     Show the live release, the rollback target, pending commits, all
@@ -1179,10 +1220,11 @@ trap on_exit EXIT
 
 case "${1:-deploy}" in
     deploy)
-        deploy "${2:-}"
+        [ $# -eq 0 ] || shift
+        deploy "$@"
         ;;
-    --force)
-        deploy --force
+    --force | --ref | --ref=*)
+        deploy "$@"
         ;;
     freeze)
         shift

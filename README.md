@@ -84,6 +84,8 @@ deploy [project] [command]
                     the new commits. Stops if the folder has local changes. Short form: self
   self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
   help              Commands and the settings in effect
+  --version         The engine's version: its newest release tag, like v2026.11.1, with "+N" when
+                    it is N commits past it
 ```
 
 `project` is the name of a file in `projects/` (`projects/tarasov.ca.env` is `tarasov.ca`).
@@ -272,11 +274,56 @@ The project must send the release name as a header, so the check knows the new c
 header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEASE')));
 ```
 
+### Output
+
+In a terminal, each command runs on rails, like this:
+
+```
+┌  release-switch v2026.11.1 · tarasov.ca · deploy
+│
+◇  Cloning develop
+◇  Running build
+│  (the step's own output)
+◇  Deployed 20261112-195410-v2026.11.4-55fc7c8
+│
+└  Done in 42s
+```
+
+A failure is marked with `■` on stderr and ends with `└  Failed after Ns`. In a pipe or cron, the
+output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and mail stay clean.
+`DEPLOY_RAILS=1` forces the rails, `DEPLOY_RAILS=0` turns them off. `NO_COLOR` turns off colors.
+
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.
+
+## Pull requests and releases
+
+Open pull requests into `main`, as drafts until they are ready.
+
+Every pull request needs:
+
+- **Title:** `Fix:`, `Update:`, `Feature:` or `Design:`, then `` `Component` – short phrase `` (en dash).
+  Example: ``Feature: `Deploy` – down and up for maintenance mode``.
+- **One release label:** `release:major`, `release:minor` (new functionality),
+  `release:patch` (fix or internal change; the default) or `no-release` (docs, CI, chores).
+- **An assignee.**
+- **Body:** `## Description`, `## Changes` and `## Release note` (1–3 sentences, or `None`).
+
+The PR rules workflow checks this once a pull request is ready. It is not a required check. To check
+by hand:
+
+```bash
+PR=<N> GITHUB_REPOSITORY=ivan-tarasov/release-switch node scripts/pr-check.mjs
+```
+
+When a pull request merges into `main`, the Release workflow tags the merge commit and makes a
+GitHub release with generated notes. A `no-release` pull request gets no tag.
+The version is `vYEAR.MONTH.COUNT` from the merge date in UTC: the first release of November 2026
+is `v2026.11.1`, the next `v2026.11.2`. `deploy self` pulls the tags with the code, and
+`deploy --version` shows the one in use.

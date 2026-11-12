@@ -4,7 +4,7 @@
 #
 #   deploy [project] [deploy [--ref <ref>] [--force] | freeze [reason] | unfreeze | status | check
 #                     | log [count] | rollback [name] | init <checkout> [--dry-run] | help]
-#   deploy self-update | self [log [count]]
+#   deploy self-update | self [log [count]] | --version
 
 set -euo pipefail
 
@@ -39,14 +39,117 @@ FAIL_MESSAGE=""
 # The commits a deploy ships, "<sha> <subject>" per line, newest first. Empty when unknown or none.
 SHIPPED=""
 
+# Rails like Clack's (┌ ◇ │ └) when stdout is a terminal, or with DEPLOY_RAILS=1. Pipes and cron
+# get plain lines. Colors only on a terminal, and never with NO_COLOR.
+RAILS=0
+if [ "${DEPLOY_RAILS:-}" = 1 ] || { [ -t 1 ] && [ "${DEPLOY_RAILS:-}" != 0 ]; }; then
+    RAILS=1
+fi
+
+C_DIM="" C_BOLD="" C_GREEN="" C_RED="" C_YELLOW="" C_OFF=""
+if [ "$RAILS" -eq 1 ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    C_DIM=$'\e[2m' C_BOLD=$'\e[1m' C_GREEN=$'\e[32m' C_RED=$'\e[31m' C_YELLOW=$'\e[33m' C_OFF=$'\e[0m'
+fi
+
+# 1 once intro has opened the rails, so on_exit closes them.
+INTRO=0
+
 say() {
-    printf '==> %s\n' "$*"
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s◇%s  %s\n' "$C_GREEN" "$C_OFF" "$*"
+    else
+        printf '==> %s\n' "$*"
+    fi
+}
+
+warn() {
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s▲%s  %s\n' "$C_YELLOW" "$C_OFF" "$*" >&2
+    else
+        printf 'deploy: %s\n' "$*" >&2
+    fi
 }
 
 fail() {
     FAIL_MESSAGE="$*"
-    printf 'deploy: %s\n' "$*" >&2
+
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$*" >&2
+    else
+        printf 'deploy: %s\n' "$*" >&2
+    fi
+
     exit 1
+}
+
+# Puts each line of its input on the rail.
+rail() {
+    local line
+
+    if [ "$RAILS" -eq 0 ]; then
+        cat
+
+        return
+    fi
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '%s│%s  %s\n' "$C_DIM" "$C_OFF" "$line"
+    done
+}
+
+# The newest release tag of the engine, "+N" when N commits are past it, or the short sha.
+engine_version() {
+    local described
+
+    if described="$(git -C "$ENGINE_DIR" describe --tags --match 'v[0-9]*' 2>/dev/null)"; then
+        printf '%s' "$described" | sed -E 's/-([0-9]+)-g[0-9a-f]+$/+\1/'
+    else
+        git -C "$ENGINE_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+    fi
+}
+
+# Opens the rails: "┌  release-switch v2026.11.1 · tarasov.ca · deploy".
+intro() {
+    [ "$RAILS" -eq 1 ] || return 0
+    printf '%s┌%s  %srelease-switch%s %s%s%s%s\n%s│%s\n' "$C_DIM" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_DIM" \
+        "$(engine_version)" "$C_OFF" "${1:+ · $1}" "$C_DIM" "$C_OFF"
+    INTRO=1
+}
+
+outro() {
+    local seconds
+    [ "$INTRO" -eq 1 ] || return 0
+    seconds="$(($(date +%s) - STARTED))"
+
+    if [ "$1" -eq 0 ]; then
+        printf '%s│%s\n%s└%s  Done in %ss\n' "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$seconds"
+    else
+        printf '%s│%s\n%s└%s  %sFailed%s after %ss\n' "$C_DIM" "$C_OFF" "$C_DIM" "$C_OFF" "$C_RED" "$C_OFF" "$seconds"
+    fi
+}
+
+# Runs a command that only reports (status, check, log). On the rails, its output and errors go on
+# the rail; elsewhere it runs as is.
+report() {
+    local title="$1" status
+    shift
+
+    if [ "$RAILS" -eq 0 ]; then
+        "$@"
+
+        return
+    fi
+
+    intro "$title"
+    set +e
+    (
+        set -e
+        "$@"
+    ) 2>&1 | rail
+    status="${PIPESTATUS[0]}"
+    set -e
+
+    return "$status"
 }
 
 # Project names, from projects/<name>.env.
@@ -178,7 +281,7 @@ on_exit() {
         rm -rf "${DEPLOY_BASE:?}/releases/$NEW_RELEASE"
 
         if [ "$status" -ne 0 ]; then
-            printf 'deploy: failed before the switch; %s is still live\n' "${PREVIOUS_RELEASE:-the old release}" >&2
+            warn "failed before the switch; ${PREVIOUS_RELEASE:-the old release} is still live"
         fi
     fi
 
@@ -189,6 +292,8 @@ on_exit() {
     if [ -n "$LOCK_DIR" ]; then
         rm -rf "$LOCK_DIR"
     fi
+
+    outro "$status"
 }
 
 # One line per deploy or rollback in <base>/deploy.log: UTC time, action, release, result, seconds.
@@ -226,13 +331,13 @@ notify() {
 
         if [ -z "$body" ] || ! curl --silent --fail --max-time 10 --output /dev/null \
             --header 'Content-Type: application/json' --data "$body" "$NOTIFY_URL"; then
-            printf 'deploy: could not send the alert to NOTIFY_URL\n' >&2
+            warn "could not send the alert to NOTIFY_URL"
         fi
     fi
 
     if [ -n "$NOTIFY_CMD" ]; then
         NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" sh -c "$NOTIFY_CMD" > /dev/null 2>&1 \
-            || printf 'deploy: NOTIFY_CMD failed\n' >&2
+            || warn "NOTIFY_CMD failed"
     fi
 }
 
@@ -478,12 +583,21 @@ run_step() {
 
     # Off here, so `set -e` inside the subshell stops the step at its first failing command.
     set +e
-    (
-        set -e
-        cd "$RELEASE_DIR"
-        "$1"
-    )
-    status=$?
+    if [ "$RAILS" -eq 1 ]; then
+        (
+            set -e
+            cd "$RELEASE_DIR"
+            "$1"
+        ) 2>&1 | rail
+        status="${PIPESTATUS[0]}"
+    else
+        (
+            set -e
+            cd "$RELEASE_DIR"
+            "$1"
+        )
+        status=$?
+    fi
     set -e
 
     # A plain return would trip `set -e` in the caller; it reads RUN_STATUS instead.
@@ -545,7 +659,7 @@ release_is_serving() {
         fi
 
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            printf 'deploy: %s answered %s with version %s\n' "$CHECK_URL" "${PROBE_STATUS:-nothing (no answer)}" "${PROBE_VERSION:-none}" >&2
+            warn "$CHECK_URL answered ${PROBE_STATUS:-nothing (no answer)} with version ${PROBE_VERSION:-none}"
 
             return 1
         fi
@@ -760,7 +874,7 @@ deploy() {
     say "Building release $NEW_RELEASE"
 
     shipped_commits "$live_sha" "$RELEASE_DIR"
-    [ -z "$SHIPPED" ] || shipped_list
+    [ -z "$SHIPPED" ] || shipped_list | rail
 
     # The project sends this as the X-App-Version header.
     printf '%s\n' "$NEW_RELEASE" > "$RELEASE_DIR/RELEASE"
@@ -1305,7 +1419,7 @@ self_update() {
     fi
 
     say "Updated ${before:0:7} to ${after:0:7}:"
-    git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after"
+    git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after" | rail
 }
 
 # The engine's history, newest first: commits not pulled yet, then the last installed ones.
@@ -1374,6 +1488,7 @@ Commands:
   self-update, self          Update the engine: git pull in $ENGINE_DIR
   self log [count]           The engine's last commits (10 by default), and ones not pulled yet
   help                       Show this help
+  --version, version         The engine's version: its newest release tag
 
 Settings${PROJECT:+ for $PROJECT} (value now in effect):
   DEPLOY_BASE     Folder with releases/, shared/ and current (${DEPLOY_BASE:-not set})
@@ -1395,10 +1510,21 @@ EOF
 
 # Before a project is loaded: the engine itself, and commands where each project loads its own
 # settings.
+if [ "${1:-}" = --version ] || [ "${1:-}" = version ]; then
+    engine_version
+    printf '\n'
+    exit 0
+fi
+
+trap on_exit EXIT
+
 if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
     case "${2:-}" in
-        "" | update) self_update ;;
-        log) self_log "${3:-}" ;;
+        "" | update)
+            intro "self update"
+            self_update
+            ;;
+        log) report "self log" self_log "${3:-}" ;;
         *) fail "unknown command: deploy $1 $2 (try: deploy self, deploy self log [count])" ;;
     esac
 
@@ -1406,12 +1532,12 @@ if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
 fi
 
 if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
-    status_all
+    report "status --all" status_all
     exit 0
 fi
 
 if [ "${1:-}" = check ] && [ "${2:-}" = --all ]; then
-    check_all
+    report "check --all" check_all
     exit 0
 fi
 
@@ -1431,7 +1557,16 @@ if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
     fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
 fi
 
-trap on_exit EXIT
+command="${1:-deploy}"
+case "$command" in
+    --force | --ref | --ref=*) command=deploy ;;
+esac
+
+case "$command" in
+    deploy | freeze | unfreeze | down | up | rollback | init)
+        intro "${PROJECT:+$PROJECT · }$command"
+        ;;
+esac
 
 case "${1:-deploy}" in
     deploy)
@@ -1456,14 +1591,14 @@ case "${1:-deploy}" in
         maintenance_up
         ;;
     status)
-        status
+        report "${PROJECT:+$PROJECT · }status" status
         ;;
     check)
-        check
+        report "${PROJECT:+$PROJECT · }check" check
         ;;
     log)
         resolve_base
-        show_log "${2:-}"
+        report "${PROJECT:+$PROJECT · }log" show_log "${2:-}"
         ;;
     rollback)
         rollback "${2:-}"
@@ -1472,7 +1607,7 @@ case "${1:-deploy}" in
         init "${2:-}" "${3:-}"
         ;;
     help | -h | --help)
-        usage
+        report help usage
         ;;
     *)
         usage >&2

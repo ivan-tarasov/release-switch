@@ -393,6 +393,27 @@ step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
 
+step "Rails on a terminal"
+commit "fixture rails"
+sleep 1
+DEPLOY_RAILS=1 deploy fixture > "$WORK/rails.log"
+cat "$WORK/rails.log"
+fresh="$(live_release)"
+grep -qE "^┌  release-switch [0-9a-fv.+]+ · fixture · deploy$" "$WORK/rails.log" || fail "no opening line with the version"
+grep -q "^◇  Running build$" "$WORK/rails.log" || fail "steps are not on the rails"
+grep -qE "^│    [0-9a-f]+ fixture rails$" "$WORK/rails.log" || fail "the shipped commits are not on the rail"
+grep -qE "^└  Done in [0-9]+s$" "$WORK/rails.log" || fail "no closing line"
+if FIXTURE_FAIL_BUILD=1 DEPLOY_RAILS=1 deploy fixture --force > "$WORK/rails.log" 2> "$WORK/rails-err.log"; then
+    fail "a deploy with a failing build succeeded"
+fi
+grep -q "^■  build failed$" "$WORK/rails-err.log" || fail "the failure is not marked"
+grep -qE "^└  Failed after [0-9]+s$" "$WORK/rails.log" || fail "no closing line for the failure"
+DEPLOY_RAILS=1 deploy fixture status > "$WORK/rails.log"
+grep -q "^│  Live: *$fresh$" "$WORK/rails.log" || fail "status is not on the rail"
+deploy fixture status > "$WORK/rails.log"
+grep -q "^Live: *$fresh$" "$WORK/rails.log" || fail "status has rails in a pipe"
+check "a deploy, a failed deploy and status on the rails; plain lines in a pipe"
+
 step "Down and up for maintenance"
 deploy fixture down "database upgrade" > /dev/null
 [ "$(curl --silent --output /dev/null --write-out '%{http_code}' "http://127.0.0.1:$PORT/")" = 503 ] \
@@ -523,8 +544,10 @@ git -C "$WORK/engine-src" init --quiet -b main
 git -C "$WORK/engine-src" add deploy
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -m "engine"
 git init --quiet --bare "$WORK/engine.git"
-git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+git -C "$WORK/engine-src" tag v2026.11.1
+git -C "$WORK/engine-src" push --quiet --tags "$WORK/engine.git" main
 git clone --quiet --branch main "file://$WORK/engine.git" "$WORK/engine"
+[ "$("$WORK/engine/deploy" --version)" = v2026.11.1 ] || fail "--version does not show the release tag"
 "$WORK/engine/deploy" self-update > "$WORK/self.log"
 grep -q "Already up to date" "$WORK/self.log" || fail "self-update does not say it is up to date"
 printf '# newer\n' >> "$WORK/engine-src/deploy"
@@ -534,6 +557,7 @@ git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
 cat "$WORK/self.log"
 grep -qE "^    [0-9a-f]+ Newer engine$" "$WORK/self.log" || fail "self does not list the new commit"
 tail -n1 "$WORK/engine/deploy" | grep -q "^# newer$" || fail "self did not update the engine"
+[ "$("$WORK/engine/deploy" --version)" = v2026.11.1+1 ] || fail "--version does not count commits past the tag"
 printf '# local change\n' >> "$WORK/engine/deploy"
 printf '# newest\n' >> "$WORK/engine-src/deploy"
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newest engine"
@@ -542,7 +566,7 @@ if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
     fail "self-update ran over a local change"
 fi
 grep -q "could not update" "$WORK/self.log" || fail "no message when self-update cannot pull"
-check "self-update lists new commits, says when it is up to date, and stops on local changes"
+check "self-update lists new commits, says when it is up to date, and stops on local changes; --version follows the tags"
 
 step "status --all shows the engine"
 PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"

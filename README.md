@@ -46,8 +46,10 @@ deploy [project] [command]
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
-                    commits and failed releases. Exits with 1 if any site does not serve its live
-                    release, so it can run from cron as a simple monitor. Pending commits come from
+                    commits and failed releases. A last line shows the engine: its commit, and
+                    whether the repo has newer ones (run `deploy self`) or it has local changes.
+                    Exits with 1 if any site does not serve its live release, so it can run from
+                    cron as a simple monitor. Pending commits come from
                     the repo: a quick check, plus a commits-only clone when there are any
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or

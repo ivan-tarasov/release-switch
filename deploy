@@ -2,7 +2,8 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project] [deploy | status | check | log | rollback [name] | init <checkout> [--dry-run] | help]
+#   deploy [project] [deploy [--force] | freeze [reason] | unfreeze | status | check | log [count]
+#                     | rollback [name] | init <checkout> [--dry-run] | help]
 #   deploy self-update
 
 set -euo pipefail
@@ -518,8 +519,45 @@ prune() {
     done
 }
 
+# Set by freeze: "<UTC stamp>" on the first line, the reason on the second.
+FREEZE_FILE=".frozen"
+
+# "today at 11:00 EST: reason", or empty when deploys are not frozen.
+frozen_text() {
+    local stamp reason
+
+    [ -f "$DEPLOY_BASE/$FREEZE_FILE" ] || return 0
+    { read -r stamp; read -r reason; } < "$DEPLOY_BASE/$FREEZE_FILE" || true
+    printf 'since %s: %s' "$(release_time "${stamp:-0}")" "${reason:-no reason given}"
+}
+
+refuse_if_frozen() {
+    local text
+    text="$(frozen_text)"
+    [ -z "$text" ] || fail "deploys are frozen $text (run: deploy ${PROJECT:+$PROJECT }unfreeze)"
+}
+
+freeze() {
+    resolve_base
+    printf '%s\n%s\n' "$(date -u +%Y%m%d%H%M%S)" "${1:-}" > "$DEPLOY_BASE/$FREEZE_FILE"
+    say "Deploys and rollbacks are frozen: ${1:-no reason given}"
+}
+
+unfreeze() {
+    resolve_base
+
+    if [ -f "$DEPLOY_BASE/$FREEZE_FILE" ]; then
+        rm -f "$DEPLOY_BASE/$FREEZE_FILE"
+        say "Deploys are allowed again"
+    else
+        say "Deploys were not frozen"
+    fi
+}
+
+# $1 is --force to deploy even when the newest commit is already live.
 deploy() {
     resolve_base
+    refuse_if_frozen
     require_check_url
     acquire_lock deploy
     ACTION=deploy
@@ -534,7 +572,21 @@ deploy() {
             || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
     fi
 
-    local stamp sha tag
+    local stamp sha tag live_sha tip
+
+    # Like Deployer's check_remote: an empty release would only push a good one out.
+    if [ -n "$PREVIOUS_RELEASE" ] && [ "${1:-}" != --force ]; then
+        live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
+        tip="$(git ls-remote "$REPO_URL" "refs/heads/$DEPLOY_BRANCH" 2>/dev/null | cut -f1)" || true
+
+        if [ -n "$live_sha" ] && [ "$tip" = "$live_sha" ]; then
+            say "Nothing new on $DEPLOY_BRANCH: $PREVIOUS_RELEASE already runs ${tip:0:7}"
+            say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--force"
+
+            return
+        fi
+    fi
+
     stamp="$(date -u +%Y%m%d-%H%M%S)"
 
     say "Cloning $DEPLOY_BRANCH"
@@ -594,6 +646,7 @@ deploy() {
 
 rollback() {
     resolve_base
+    refuse_if_frozen
     require_check_url
     acquire_lock rollback
 
@@ -684,6 +737,8 @@ status() {
         printf '  ! %s  (failed; deleted on the next deploy)\n' "$(basename "$failed")"
     done
 
+    [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || printf '\nFrozen:    %s\n' "$(frozen_text)"
+
     case "$(lock_state)" in
         free) printf '\nLock:      free\n' ;;
         stale) printf '\nLock:      stale (%s; the process is gone, the next deploy removes it)\n' "$(lock_text)" ;;
@@ -744,6 +799,8 @@ status_row() {
             notes+=("$PENDING_COUNT pending")
         fi
     fi
+
+    [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || notes+=("frozen")
 
     case "$(lock_state)" in
         stale) notes+=("stale lock") ;;
@@ -913,6 +970,8 @@ check() {
         fi
     fi
 
+    [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || check_ok "frozen $(frozen_text)"
+
     case "$(lock_state)" in
         free)
             check_ok "lock: free"
@@ -1045,7 +1104,10 @@ Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
 The project can be left out when there is only one.
 
 Commands:
-  deploy                     Build the newest commit and switch to it (the default)
+  deploy [--force]           Build the newest commit and switch to it (the default). Stops if
+                             that commit is already live, unless --force
+  freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
+  unfreeze                   Allow deploys again
   status                     Show the live release, the rollback target, pending commits, all
                              releases and the site
   status --all               One line per project, and one for the engine; fails if any site does
@@ -1117,7 +1179,17 @@ trap on_exit EXIT
 
 case "${1:-deploy}" in
     deploy)
-        deploy
+        deploy "${2:-}"
+        ;;
+    --force)
+        deploy --force
+        ;;
+    freeze)
+        shift
+        freeze "$*"
+        ;;
+    unfreeze)
+        unfreeze
         ;;
     status)
         status

@@ -18,17 +18,20 @@ Each project has a base folder on the server:
 
 `deploy <project>`:
 
-1. takes a lock, so two deploys of one project never run at once. A lock left by a deploy that
+1. stops if deploys are frozen (see `freeze`);
+2. takes a lock, so two deploys of one project never run at once. A lock left by a deploy that
    died (its process is gone) is removed;
-2. clones the newest commit of the branch into a new release folder, and writes its name to
+3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
+   out (`--force` builds it anyway);
+4. clones the newest commit of the branch into a new release folder, and writes its name to
    `RELEASE` in the release root;
-3. links the project's `SHARED` paths from `shared/` into the release, and copies its
+5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
-4. runs the project's `preflight`, `build` and `verify` steps there;
-5. switches `current` to the new release in one rename, then runs `after_switch` and `PHP_RELOAD_CMD`;
-6. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
+6. runs the project's `preflight`, `build` and `verify` steps there;
+7. switches `current` to the new release in one rename, then runs `after_switch` and `PHP_RELOAD_CMD`;
+8. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
    If it does not, it switches back and sets the new release aside as `releases/.failed-<name>`;
-7. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder.
+9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder.
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 Migrations and other data changes are not undone by a switch back or a rollback.
@@ -42,7 +45,11 @@ the commit has none.
 ```
 deploy [project] [command]
 
-  deploy            Build the newest commit and switch to it (the default)
+  deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
+                    is already live, unless --force
+  freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
+                    status, status --all and check show it
+  unfreeze          Allow deploys again
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
@@ -238,7 +245,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

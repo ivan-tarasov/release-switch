@@ -330,6 +330,40 @@ fresh="$(live_release)"
 serves "$fresh" || fail "server does not show $fresh"
 check "deploy removed the stale lock and went live with $fresh"
 
+step "A deploy with nothing new stops; --force builds anyway"
+releases_now="$(release_count)"
+deploy fixture > "$WORK/skip.log"
+cat "$WORK/skip.log"
+grep -q "Nothing new on develop: $fresh already runs" "$WORK/skip.log" || fail "no message for a deploy with nothing new"
+[ "$(release_count)" = "$releases_now" ] || fail "a deploy with nothing new made a release"
+[ "$(live_release)" = "$fresh" ] || fail "a deploy with nothing new changed the live release"
+sleep 1
+deploy fixture --force > /dev/null
+fresh="$(live_release)"
+[ "$(release_count)" = "$((releases_now + 1))" ] || fail "--force did not build a release"
+serves "$fresh" || fail "server does not show $fresh"
+check "nothing new: no release; --force: live with $fresh"
+
+step "Freeze stops deploys and rollbacks until unfreeze"
+deploy fixture freeze "moving hosts" > /dev/null
+if deploy fixture --force 2> "$WORK/freeze.log"; then
+    fail "deploy ran while frozen"
+fi
+grep -q "deploys are frozen since today at .*: moving hosts (run: deploy fixture unfreeze)" "$WORK/freeze.log" \
+    || fail "no freeze message for deploy"
+if deploy fixture rollback 2> /dev/null; then
+    fail "rollback ran while frozen"
+fi
+[ "$(live_release)" = "$fresh" ] || fail "the live release changed while frozen"
+deploy fixture status > "$WORK/freeze-status.log"
+grep -q "^Frozen: *since today at .*: moving hosts$" "$WORK/freeze-status.log" || fail "status does not show the freeze"
+deploy status --all > "$WORK/freeze-all.log" || true
+grep -qE "^fixture .*frozen" "$WORK/freeze-all.log" || fail "status --all does not note the freeze"
+deploy fixture unfreeze > /dev/null
+[ ! -e "$BASE/.frozen" ] || fail "unfreeze left the freeze file"
+deploy fixture > /dev/null || fail "deploy failed after unfreeze"
+check "freeze refused deploy and rollback, showed in status; unfreeze allowed deploys again"
+
 step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
@@ -366,16 +400,16 @@ export ALERTS="$WORK/alerts.log"
 : > "$ALERTS"
 # shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here.
 alert_cmd='printf "%s|%s\n" "$NOTIFY_EVENT" "$NOTIFY_TEXT" >> "$ALERTS"'
-if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" deploy fixture 2> /dev/null; then
+if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" deploy fixture --force 2> /dev/null; then
     fail "a deploy with a failing build succeeded"
 fi
 cat "$ALERTS"
 grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" || fail "no alert for the failed build"
 grep -qF '"text":"fixture: deploy ' "$WORK/hook.log" || fail "NOTIFY_URL got no JSON alert"
 grep -qF '"event":"deploy"' "$WORK/hook.log" || fail "the JSON alert has no event"
-NOTIFY_CMD="$alert_cmd" deploy fixture > /dev/null
+NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null
 [ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "a successful deploy sent an alert without NOTIFY_ON=all"
-NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:1/" NOTIFY_CMD="$alert_cmd" deploy fixture > /dev/null 2> "$WORK/notify.log" \
+NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:1/" NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null 2> "$WORK/notify.log" \
     || fail "an alert that cannot be sent failed the deploy"
 grep -q "could not send the alert to NOTIFY_URL" "$WORK/notify.log" || fail "no warning for an alert that cannot be sent"
 grep -qE "^deploy\|fixture: deploy [0-9-]+.*: ok \([0-9]+s\)$" "$ALERTS" || fail "NOTIFY_ON=all sent no alert for a good deploy"

@@ -297,14 +297,25 @@ find_release() {
     printf '%s\n' "$matches"
 }
 
-# The deploy time in a release name, in DISPLAY_TZ ("2026-11-05 13:30 EST"), or in UTC when unset.
+# The deploy time in a release name, in DISPLAY_TZ, or in UTC when unset: "today at 13:30 EST",
+# "yesterday at 13:30 EST", or "2026-11-05 13:30 EST" for older ones.
 release_time() {
     local stamp="${1//-/}"
 
     # shellcheck disable=SC2016 # PHP code, not shell.
     "$PHP_BIN" -r '
-        $d = DateTime::createFromFormat("YmdHis", $argv[1], new DateTimeZone("UTC"));
-        echo $d->setTimezone(new DateTimeZone($argv[2] !== "" ? $argv[2] : "UTC"))->format("Y-m-d H:i T");
+        $tz = new DateTimeZone($argv[2] !== "" ? $argv[2] : "UTC");
+        $d = DateTime::createFromFormat("YmdHis", $argv[1], new DateTimeZone("UTC"))->setTimezone($tz);
+        $day = $d->format("Y-m-d");
+        $today = new DateTime("now", $tz);
+
+        if ($day === $today->format("Y-m-d")) {
+            $day = "today at";
+        } elseif ($day === $today->modify("-1 day")->format("Y-m-d")) {
+            $day = "yesterday at";
+        }
+
+        echo $day, " ", $d->format("H:i T");
     ' "${stamp:0:14}" "$DISPLAY_TZ" 2>/dev/null || printf 'unknown time'
 }
 

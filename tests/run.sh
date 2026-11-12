@@ -226,7 +226,7 @@ step "Status"
 DISPLAY_TZ=America/Toronto deploy fixture status > "$WORK/status.log"
 cat "$WORK/status.log"
 grep -qE "^Live: +$latest$" "$WORK/status.log" || fail "status does not show the live release"
-grep -qE "deployed 20[0-9-]+ [0-9:]+ E[SD]T$" "$WORK/status.log" || fail "status does not show the time in DISPLAY_TZ only"
+grep -qE "deployed today at [0-9:]+ E[SD]T$" "$WORK/status.log" || fail "status does not show today's time in DISPLAY_TZ only"
 grep -qE "^Rollback: +$first$" "$WORK/status.log" || fail "status does not skip the bad $second"
 grep -qF "$second  (bad; rollback skips it)" "$WORK/status.log" || fail "status does not mark $second as bad"
 grep -qF "* $latest  (live)" "$WORK/status.log" || fail "status does not mark the live release"
@@ -260,6 +260,27 @@ grep -qE "^fixture +$latest " "$WORK/all.log" || fail "the second project change
 [ ! -e "$WORK/other" ] || fail "status --all created a base folder"
 rm "$WORK/projects/other.env"
 check "status --all shows each project with its own settings, and fails when one is broken"
+
+step "Deploy times: today, yesterday, older"
+# Two more projects with a live release from yesterday and from 3 days ago, at noon in Toronto.
+for age in 1 3; do
+    # shellcheck disable=SC2016 # PHP code, not shell.
+    stamp="$(php -r '$d = new DateTime("today 12:00", new DateTimeZone("America/Toronto"));
+        $d->modify("-" . $argv[1] . " day");
+        echo $d->format("Y-m-d"), " ", $d->setTimezone(new DateTimeZone("UTC"))->format("Ymd-His");' "$age")"
+    day="${stamp%% *}"
+    release="${stamp#* }-abc1234"
+    mkdir -p "$WORK/age$age/releases/$release"
+    ln -s "releases/$release" "$WORK/age$age/current"
+    printf 'DEPLOY_BASE="%s"\nDISPLAY_TZ=America/Toronto\n' "$WORK/age$age" > "$WORK/projects/age$age.env"
+done
+DISPLAY_TZ=America/Toronto deploy status --all > "$WORK/times.log"
+cat "$WORK/times.log"
+grep -qE "^fixture +[^ ]+ +today at [0-9]{2}:[0-9]{2} E[SD]T " "$WORK/times.log" || fail "a deploy from today does not say today"
+grep -qE "^age1 +[^ ]+ +yesterday at 12:00 E[SD]T " "$WORK/times.log" || fail "a deploy from yesterday does not say yesterday"
+grep -qE "^age3 +[^ ]+ +$day 12:00 E[SD]T " "$WORK/times.log" || fail "an older deploy does not show its date"
+rm "$WORK/projects/age1.env" "$WORK/projects/age3.env"
+check "deploy times say today and yesterday, and show the date for older ones"
 
 step "Rollback to a named release"
 if deploy fixture rollback v2026.11.99 2> "$WORK/ambiguous.log"; then

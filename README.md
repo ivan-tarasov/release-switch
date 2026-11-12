@@ -31,7 +31,9 @@ Each project has a base folder on the server:
 7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD` and `after_switch`;
 8. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
    If it does not, it switches back and sets the new release aside as `releases/.failed-<name>`;
-9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder.
+9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder. It always keeps
+   the release that was live before this deploy, since requests may still run in it; that one can
+   go on the next deploy.
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cleans up the same
@@ -184,7 +186,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `CHECK_URL` | (required) | A page that must answer 200 with the new version after the switch |
 | `REPO_URL` | origin of `current` | Repo to clone |
 | `DEPLOY_BRANCH` | `develop` | Branch to deploy |
-| `KEEP_RELEASES` | `5` | Releases to keep |
+| `KEEP_RELEASES` | `5` | Releases to keep. At least `2`: the live release and one to roll back to |
 | `CHECK_WAIT` | `150` | Seconds to wait for `CHECK_URL`. PHP's realpath cache can keep serving the old release for up to 120 s |
 | `CHECK_VERSION` | `1` | `0` to only wait for a 200, for a project that cannot send `X-App-Version` yet |
 | `PHP_BIN` | `php` | PHP binary, for the project's steps |
@@ -303,8 +305,8 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks,
-`PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, and that
-shared files survive.
+`PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
+`KEEP_RELEASES`, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.
 

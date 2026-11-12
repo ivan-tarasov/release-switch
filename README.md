@@ -54,6 +54,10 @@ deploy [project] [command]
   freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
                     status, status --all and check show it
   unfreeze          Allow deploys again
+  down [reason]     Run the down() step of the live release, e.g. to show a maintenance page
+                    during a risky data change. Until up, deploys and rollbacks do not check
+                    the site, check accepts a 503 and skips health(), and status shows it
+  up                Run the up() step, then check that the site serves the live release again
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
@@ -248,6 +252,16 @@ health() {
     }
     echo "database ok"
 }
+
+# Optional. Run by `down` and `up` in the live release. $DOWN_REASON holds the reason for down.
+# The flag must live in shared/ (Laravel keeps it in storage/), so a deploy while down stays down.
+down() {
+    "$PHP_BIN" artisan down --retry=60
+}
+
+up() {
+    "$PHP_BIN" artisan up
+}
 ```
 
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN` and `COMPOSER_BIN`.
@@ -262,7 +276,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
+with pending commits, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks, and that
 shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

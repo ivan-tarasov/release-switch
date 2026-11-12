@@ -147,7 +147,7 @@ lock_text() {
     printf 'PID %s, %s, %s min' "$pid" "${action:-unknown}" "$((($(date +%s) - ${started:-0}) / 60))"
 }
 
-# Takes the lock for $1 (deploy or rollback). A lock whose process is gone is removed first.
+# Takes the lock for $1 (deploy, rollback, down or up). A lock whose process is gone is removed first.
 acquire_lock() {
     local owner
     LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
@@ -577,13 +577,75 @@ prune() {
 # Set by freeze: "<UTC stamp>" on the first line, the reason on the second.
 FREEZE_FILE=".frozen"
 
-# "today at 11:00 EST: reason", or empty when deploys are not frozen.
-frozen_text() {
+# Set by down, the same way.
+DOWN_FILE=".down"
+
+# "since today at 11:00 EST: reason" from the file $1, or empty when it is not there.
+marker_text() {
     local stamp reason
 
-    [ -f "$DEPLOY_BASE/$FREEZE_FILE" ] || return 0
-    { read -r stamp; read -r reason; } < "$DEPLOY_BASE/$FREEZE_FILE" || true
+    [ -f "$DEPLOY_BASE/$1" ] || return 0
+    { read -r stamp; read -r reason; } < "$DEPLOY_BASE/$1" || true
     printf 'since %s: %s' "$(release_time "${stamp:-0}")" "${reason:-no reason given}"
+}
+
+frozen_text() {
+    marker_text "$FREEZE_FILE"
+}
+
+is_down() {
+    [ -f "$DEPLOY_BASE/$DOWN_FILE" ]
+}
+
+# Runs step $1 (down or up) from the live release's deploy.conf, in that release.
+run_live_step() {
+    local live
+    live="$(current_release)"
+    [ -n "$live" ] || fail "$DEPLOY_BASE/current is not a link; no live release"
+
+    RELEASE_DIR="$DEPLOY_BASE/releases/$live"
+    RELEASE_NAME="$live"
+    export RELEASE_DIR RELEASE_NAME
+    load_conf "$RELEASE_DIR"
+    declare -F "$1" > /dev/null || fail "deploy.conf of $live has no $1 step"
+
+    ACTION="$1"
+    LOG_RELEASE="$live"
+    STAGE="$1"
+    run_step "$1"
+    [ "$RUN_STATUS" -eq 0 ] || fail "$1 failed"
+}
+
+# Not named down and up: deploy.conf defines those.
+maintenance_down() {
+    resolve_base
+    acquire_lock down
+    DOWN_REASON="$1"
+    export DOWN_REASON
+    run_live_step down
+
+    printf '%s\n%s\n' "$(date -u +%Y%m%d%H%M%S)" "$1" > "$DEPLOY_BASE/$DOWN_FILE"
+    log_event down "$LOG_RELEASE" ok
+    ACTION=""
+    say "The site is down for maintenance: ${1:-no reason given}"
+    say "Deploys skip the site check until: deploy ${PROJECT:+$PROJECT }up"
+}
+
+maintenance_up() {
+    resolve_base
+    acquire_lock up
+    run_live_step up
+    rm -f "$DEPLOY_BASE/$DOWN_FILE"
+
+    if [ -n "$CHECK_URL" ]; then
+        say "Checking $CHECK_URL"
+        STAGE=check
+        release_is_serving "$LOG_RELEASE" || fail "up ran, but the site does not serve $LOG_RELEASE"
+    fi
+
+    log_event up "$LOG_RELEASE" ok
+    ACTION=""
+    say "The site is up again"
 }
 
 refuse_if_frozen() {
@@ -721,9 +783,11 @@ deploy() {
     run_step after_switch
     [ "$RUN_STATUS" -eq 0 ] || say "after_switch failed; carrying on"
 
-    say "Checking $CHECK_URL"
     STAGE=check
-    if ! release_is_serving "$NEW_RELEASE"; then
+    if is_down; then
+        # The maintenance page has no version to check.
+        say "Not checking $CHECK_URL: the site is down for maintenance"
+    elif say "Checking $CHECK_URL" && ! release_is_serving "$NEW_RELEASE"; then
         if [ -n "$PREVIOUS_RELEASE" ]; then
             STAGE="check, switched back to $PREVIOUS_RELEASE"
             say "Rolling back to $PREVIOUS_RELEASE"
@@ -777,8 +841,12 @@ rollback() {
 
     say "Rolled back from $live to $target (data changes stay applied)"
 
-    say "Checking $CHECK_URL"
-    release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
+    if is_down; then
+        say "Not checking $CHECK_URL: the site is down for maintenance"
+    else
+        say "Checking $CHECK_URL"
+        release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
+    fi
     log_event rollback "$target" "ok, from $live"
     ACTION=""
 }
@@ -835,6 +903,7 @@ status() {
     done
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || printf '\nFrozen:    %s\n' "$(frozen_text)"
+    ! is_down || printf '\nDown:      %s\n' "$(marker_text "$DOWN_FILE")"
 
     case "$(lock_state)" in
         free) printf '\nLock:      free\n' ;;
@@ -853,6 +922,8 @@ status() {
 
     if [ -n "$live" ] && [ "$PROBE_VERSION" = "$live" ]; then
         printf ' (matches live)\n'
+    elif is_down && [ "$PROBE_STATUS" = 503 ]; then
+        printf ' (down for maintenance)\n'
     else
         printf ' (NOT the live release)\n'
     fi
@@ -881,6 +952,8 @@ status_row() {
             site="200, matches live"
         elif [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
             site="200 (version not checked)"
+        elif is_down && [ "$PROBE_STATUS" = 503 ]; then
+            site="503, down for maintenance"
         else
             site="${PROBE_STATUS:-no answer}, NOT the live release"
             ok=1
@@ -898,6 +971,7 @@ status_row() {
     fi
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || notes+=("frozen")
+    ! is_down || notes+=("down")
 
     case "$(lock_state)" in
         stale) notes+=("stale lock") ;;
@@ -1085,7 +1159,12 @@ check() {
                 check_ok "shared: all present"
             fi
 
-            check_health "$dir"
+            # The app may stop its scheduler while down, so health() would fail for no real reason.
+            if is_down; then
+                check_ok "health: not checked, down for maintenance"
+            else
+                check_health "$dir"
+            fi
         fi
     fi
 
@@ -1098,12 +1177,15 @@ check() {
             check_ok "site: 200, matches live"
         elif [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
             check_ok "site: 200 (version not checked)"
+        elif is_down && [ "$PROBE_STATUS" = 503 ]; then
+            check_ok "site: 503, down for maintenance"
         else
             check_bad "site: $CHECK_URL answered ${PROBE_STATUS:-nothing}, version ${PROBE_VERSION:-none}"
         fi
     fi
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || check_ok "frozen $(frozen_text)"
+    ! is_down || check_ok "down for maintenance $(marker_text "$DOWN_FILE")"
 
     case "$(lock_state)" in
         free)
@@ -1272,6 +1354,9 @@ Commands:
                              branch or commit instead
   freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
   unfreeze                   Allow deploys again
+  down [reason]              Run the down() step of the live release, like a maintenance page.
+                             Deploys and check skip the site check until up
+  up                         Run the up() step and check the site again
   status                     Show the live release, the rollback target, pending commits, all
                              releases and the site
   status --all               One line per project, and one for the engine; fails if any site does
@@ -1362,6 +1447,13 @@ case "${1:-deploy}" in
         ;;
     unfreeze)
         unfreeze
+        ;;
+    down)
+        shift
+        maintenance_down "$*"
+        ;;
+    up)
+        maintenance_up
         ;;
     status)
         status

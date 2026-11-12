@@ -526,4 +526,21 @@ grep -qE "^release-switch +[0-9a-f]+ +today at .* +- +up to date$" "$WORK/engine
     || fail "status --all does not show the engine up to date"
 check "status --all shows the engine's commit and whether it is behind or changed"
 
+step "self log shows the engine's commits, and the ones not pulled yet"
+printf '# unpulled\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Unpulled engine"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+DISPLAY_TZ=America/Toronto PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" self log 2 > "$WORK/self-log.log"
+cat "$WORK/self-log.log"
+sed -n '/^Not pulled yet/,/^$/p' "$WORK/self-log.log" | grep -qE "^  [0-9a-f]+  20[0-9-]+ [0-9:]+ E[SD]T  Unpulled engine$" \
+    || fail "self log does not show the commit not pulled yet"
+sed -n '/^Installed in/,$p' "$WORK/self-log.log" | grep -qE "^  [0-9a-f]+  .*  Newest engine$" \
+    || fail "self log does not show the installed commits"
+[ "$(sed -n '/^Installed in/,$p' "$WORK/self-log.log" | grep -c '^  ')" = 2 ] || fail "self log 2 does not show 2 commits"
+if "$WORK/engine/deploy" self nope 2> "$WORK/self-log.log"; then
+    fail "an unknown self command succeeded"
+fi
+grep -q "unknown command: deploy self nope" "$WORK/self-log.log" || fail "no message for an unknown self command"
+check "self log lists installed and unpulled commits; an unknown self command fails"
+
 printf '\nAll deploy tests passed.\n'

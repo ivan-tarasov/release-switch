@@ -61,7 +61,7 @@ deploy [project] [command]
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
-                    commits and failed releases. A last line shows the engine: its commit, and
+                    commits and failed releases. A last line shows the engine: its version, and
                     whether the repo has newer ones (run `deploy self`) or it has local changes.
                     Exits with 1 if any site does not serve its live release, so it can run from
                     cron as a simple monitor. Pending commits come from
@@ -80,8 +80,10 @@ deploy [project] [command]
                     deploy shipped (20 by default)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
-  self-update       Update the engine itself: a fast-forward git pull of its own folder, then
-                    the new commits. Stops if the folder has local changes. Short form: self
+  self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
+                    the old and new versions, then each new release with its GitHub notes (or
+                    its commits when `gh` cannot read them) and the commits not released yet.
+                    Stops if the folder has local changes. Short form: self
   self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
   help              Commands and the settings in effect
   --version         The engine's version: its newest release tag, like v2026.11.1, with "+N" when

@@ -536,6 +536,50 @@ grep -q "E[SD]T " "$WORK/history.log" || fail "the log does not use DISPLAY_TZ"
 [ "$(deploy fixture log 2 | wc -l | tr -d ' ')" = 2 ] || fail "log 2 does not show 2 lines"
 check "the log shows deploys, failures and rollbacks"
 
+step "PHP_RELOAD_CMD runs after the switch; a failing one only warns"
+sleep 1
+PHP_RELOAD_CMD="readlink \"$BASE/current\" > \"$WORK/reload.txt\"; exit 3" deploy fixture --force > "$WORK/reload.log" \
+    || fail "a failing PHP_RELOAD_CMD failed the deploy"
+reloaded="$(live_release)"
+[ "$(cat "$WORK/reload.txt")" = "releases/$reloaded" ] || fail "PHP_RELOAD_CMD did not run after the switch"
+grep -q "PHP_RELOAD_CMD failed; carrying on" "$WORK/reload.log" || fail "no warning for a failing PHP_RELOAD_CMD"
+serves "$reloaded" || fail "server does not show $reloaded"
+check "PHP_RELOAD_CMD ran with $reloaded linked; its failure only warned"
+
+step "A hangup or TERM during PHP_RELOAD_CMD keeps the new release live"
+for signal in HUP:129 TERM:143; do
+    sleep 1
+    code=0
+    # shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here: $PPID is the deploy.
+    PHP_RELOAD_CMD='kill -'"${signal%:*}"' $PPID' deploy fixture --force > /dev/null 2> "$WORK/signal.log" || code=$?
+    [ "$code" = "${signal#*:}" ] || fail "${signal%:*} exited with $code, not ${signal#*:}"
+    hung="$(live_release)"
+    [ "$hung" != "$reloaded" ] || fail "${signal%:*} came before the switch"
+    [ -f "$BASE/releases/$hung/RELEASE" ] || fail "${signal%:*} deleted the live release $hung"
+    if grep -q "failed before the switch" "$WORK/signal.log"; then
+        fail "${signal%:*} says it failed before the switch"
+    fi
+    deploy fixture log 1 > "$WORK/signal-log.log"
+    [ -n "$(sed -nE "/deploy +$hung +failed: switch /p" "$WORK/signal-log.log")" ] \
+        || fail "the log does not say ${signal%:*} stopped $hung at the switch"
+    [ ! -d "$BASE/.deploy.lock" ] || fail "${signal%:*} left the lock behind"
+    serves "$hung" || fail "server does not show $hung after ${signal%:*}"
+done
+check "a signal after the switch left $hung live and in place, logged failed: switch and freed the lock"
+
+step "A plain rollback works when the live release folder is missing"
+rm -rf "${BASE:?}/releases/$hung"
+deploy fixture rollback > "$WORK/missing.log" 2>&1 || fail "rollback failed with the live folder missing"
+cat "$WORK/missing.log"
+back="$(live_release)"
+[ "$back" != "$hung" ] && [ -d "$BASE/releases/$back" ] || fail "rollback did not switch to a release on disk"
+grep -q "the folder of $hung was missing" "$WORK/missing.log" || fail "rollback does not say the live folder was missing"
+grep -q "Checking http" "$WORK/missing.log" || fail "rollback did not run the site check"
+serves "$back" || fail "server does not show $back"
+deploy fixture log 1 > "$WORK/missing-log.log"
+[ -n "$(sed -nE "/rollback +$back +ok, from $hung /p" "$WORK/missing-log.log")" ] || fail "the log does not say the rollback was ok"
+check "rolled back from the missing $hung to $back, checked the site and logged ok"
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

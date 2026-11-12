@@ -1,0 +1,40 @@
+name: PR rules
+
+# Checks every pull request into main against the repo rules (scripts/pr-check.mjs).
+# Drafts are skipped; marking one ready runs the check. Dependabot pull requests run it too, with
+# the same read-only token and no secrets.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, assigned, unassigned, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+# A started run always finishes: a cancelled run counts as a failed check.
+concurrency:
+  group: pr-rules-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  rules:
+    name: PR rules
+    if: '!github.event.pull_request.draft'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Test the check
+        run: node --test scripts/pr-check.test.mjs
+
+      - name: Check title, label, assignee and body
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: node scripts/pr-check.mjs

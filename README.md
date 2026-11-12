@@ -61,6 +61,8 @@ deploy [project] [command]
   log [count]       The last deploys and rollbacks, with results and times (20 by default)
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
+  self-update       Update the engine itself: a fast-forward git pull of its own folder, then
+                    the new commits. Stops if the folder has local changes. Short form: self
   help              Commands and the settings in effect
 ```
 
@@ -113,8 +115,8 @@ named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
 
 5. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
 
-To update the script: `git -C ~/release-switch pull`. Files in `projects/` other than
-`example.env` are not tracked, so a pull never touches them.
+To update the script: `deploy self-update` (or `git -C ~/release-switch pull`). Files in
+`projects/` other than `example.env` are not tracked, so a pull never touches them.
 
 ### Adding a project
 
@@ -234,6 +236,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, `check`, alerts, the log, the lock and stale locks, and that shared files survive.
+with pending commits, `check`, alerts, `self-update`, the log, the lock and stale locks, and that
+shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

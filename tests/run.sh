@@ -411,4 +411,33 @@ grep -q "E[SD]T " "$WORK/history.log" || fail "the log does not use DISPLAY_TZ"
 [ "$(deploy fixture log 2 | wc -l | tr -d ' ')" = 2 ] || fail "log 2 does not show 2 lines"
 check "the log shows deploys, failures and rollbacks"
 
+step "self-update pulls the engine"
+# A throwaway copy of the engine, so the test never pulls this checkout.
+mkdir "$WORK/engine-src"
+cp "$ROOT/deploy" "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" init --quiet -b main
+git -C "$WORK/engine-src" add deploy
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -m "engine"
+git init --quiet --bare "$WORK/engine.git"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+git clone --quiet --branch main "file://$WORK/engine.git" "$WORK/engine"
+"$WORK/engine/deploy" self-update > "$WORK/self.log"
+grep -q "Already up to date" "$WORK/self.log" || fail "self-update does not say it is up to date"
+printf '# newer\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newer engine"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+"$WORK/engine/deploy" self > "$WORK/self.log"
+cat "$WORK/self.log"
+grep -qE "^    [0-9a-f]+ Newer engine$" "$WORK/self.log" || fail "self does not list the new commit"
+tail -n1 "$WORK/engine/deploy" | grep -q "^# newer$" || fail "self did not update the engine"
+printf 'local change\n' >> "$WORK/engine/deploy"
+printf '# newest\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newest engine"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
+    fail "self-update ran over a local change"
+fi
+grep -q "could not update" "$WORK/self.log" || fail "no message when self-update cannot pull"
+check "self-update lists new commits, says when it is up to date, and stops on local changes"
+
 printf '\nAll deploy tests passed.\n'

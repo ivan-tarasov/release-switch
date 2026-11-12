@@ -3,6 +3,7 @@
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
 #   deploy [project] [deploy | status | check | log | rollback [name] | init <checkout> [--dry-run] | help]
+#   deploy self-update
 
 set -euo pipefail
 
@@ -970,6 +971,28 @@ EOF
 }
 
 # Shows the values in effect, so env overrides (e.g. from a shell profile) are visible.
+# Updates the engine itself: a fast-forward pull of its own checkout.
+self_update() {
+    local before after
+
+    git -C "$ENGINE_DIR" rev-parse --git-dir > /dev/null 2>&1 || fail "$ENGINE_DIR is not a git checkout"
+    before="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+
+    say "Updating the engine in $ENGINE_DIR"
+    git -C "$ENGINE_DIR" pull --quiet --ff-only \
+        || fail "could not update $ENGINE_DIR; it may have local changes or a branch that moved apart"
+    after="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
+
+    if [ "$before" = "$after" ]; then
+        say "Already up to date (${after:0:7})"
+
+        return
+    fi
+
+    say "Updated ${before:0:7} to ${after:0:7}:"
+    git -C "$ENGINE_DIR" log --format='    %h %s' "$before..$after"
+}
+
 usage() {
     local projects
     projects="$(list_projects | paste -sd ' ' -)"
@@ -994,6 +1017,7 @@ Commands:
                              it, like the sha or tag)
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
+  self-update, self          Update the engine: git pull in $ENGINE_DIR
   help                       Show this help
 
 Settings${PROJECT:+ for $PROJECT} (value now in effect):
@@ -1014,7 +1038,13 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
 EOF
 }
 
-# Before a project is loaded: each project loads its own settings.
+# Before a project is loaded: the engine itself, and commands where each project loads its own
+# settings.
+if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
+    self_update
+    exit 0
+fi
+
 if [ "${1:-}" = status ] && [ "${2:-}" = --all ]; then
     status_all
     exit 0

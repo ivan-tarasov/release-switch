@@ -430,7 +430,7 @@ git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
 cat "$WORK/self.log"
 grep -qE "^    [0-9a-f]+ Newer engine$" "$WORK/self.log" || fail "self does not list the new commit"
 tail -n1 "$WORK/engine/deploy" | grep -q "^# newer$" || fail "self did not update the engine"
-printf 'local change\n' >> "$WORK/engine/deploy"
+printf '# local change\n' >> "$WORK/engine/deploy"
 printf '# newest\n' >> "$WORK/engine-src/deploy"
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Newest engine"
 git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
@@ -439,5 +439,17 @@ if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
 fi
 grep -q "could not update" "$WORK/self.log" || fail "no message when self-update cannot pull"
 check "self-update lists new commits, says when it is up to date, and stops on local changes"
+
+step "status --all shows the engine"
+PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"
+cat "$WORK/engine-row.log"
+grep -qE "^release-switch +[0-9a-f]+ +today at .* +- +1 new, run deploy self, local changes$" "$WORK/engine-row.log" \
+    || fail "status --all does not show the engine behind and changed"
+git -C "$WORK/engine" checkout --quiet -- deploy
+"$WORK/engine/deploy" self > /dev/null
+PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"
+grep -qE "^release-switch +[0-9a-f]+ +today at .* +- +up to date$" "$WORK/engine-row.log" \
+    || fail "status --all does not show the engine up to date"
+check "status --all shows the engine's commit and whether it is behind or changed"
 
 printf '\nAll deploy tests passed.\n'

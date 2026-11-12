@@ -753,13 +753,51 @@ status_row() {
     failed="$(find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' 2>/dev/null | wc -l | tr -d ' ')"
     [ "$failed" -eq 0 ] || notes+=("$failed failed release(s)")
 
-    local IFS=,
-    printf '%s\t%s\t%s\t%s\t%s\n' "$PROJECT" "${live:-none}" "$time" "$site" "${notes[*]:--}"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$PROJECT" "${live:-none}" "$time" "$site" "$(join_notes ${notes[@]+"${notes[@]}"})"
 
     return "$ok"
 }
 
 # One row per project. Each runs in a subshell, so one project's settings never leak into the next.
+# The NOTES column: the notes joined with ", ", or "-" when there are none.
+join_notes() {
+    local text="" note
+
+    for note in "$@"; do
+        text+="${text:+, }$note"
+    done
+
+    printf '%s' "${text:--}"
+}
+
+# The engine's own row for status --all: its commit, when that commit was made, and whether the
+# repo has newer ones. Fetching only updates the engine's remote refs, never its files.
+engine_row() {
+    local sha stamp behind notes=()
+
+    if ! sha="$(git -C "$ENGINE_DIR" rev-parse --short HEAD 2>/dev/null)"; then
+        printf 'release-switch\t-\t-\t-\tnot a git checkout\n'
+
+        return
+    fi
+
+    stamp="$(TZ=UTC git -C "$ENGINE_DIR" log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S)"
+
+    if ! git -C "$ENGINE_DIR" fetch --quiet 2>/dev/null; then
+        notes+=("cannot reach the repo")
+    elif ! behind="$(git -C "$ENGINE_DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"; then
+        notes+=("no upstream branch")
+    elif [ "$behind" -gt 0 ]; then
+        notes+=("$behind new, run deploy self")
+    else
+        notes+=("up to date")
+    fi
+
+    [ -z "$(git -C "$ENGINE_DIR" status --porcelain --untracked-files=no)" ] || notes+=("local changes")
+
+    printf 'release-switch\t%s\t%s\t-\t%s\n' "$sha" "$(release_time "$stamp")" "$(join_notes "${notes[@]}")"
+}
+
 status_all() {
     local project row rows="" failed=0
 
@@ -774,6 +812,9 @@ status_all() {
     done
 
     [ -n "$rows" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"
+
+    # The first project's settings give the engine row its PHP and time zone.
+    rows+="$(load_project "$(list_projects | head -n1)" && apply_defaults && engine_row)"$'\n'
 
     rows="$(printf 'PROJECT\tLIVE\tDEPLOYED\tSITE\tNOTES\n%s' "$rows")"
 
@@ -1007,7 +1048,8 @@ Commands:
   deploy                     Build the newest commit and switch to it (the default)
   status                     Show the live release, the rollback target, pending commits, all
                              releases and the site
-  status --all               One line per project; fails if any site does not serve its live release
+  status --all               One line per project, and one for the engine; fails if any site does
+                             not serve its live release
   check                      Check the live release, its shared links, the site and the lock;
                              changes nothing. Problems go to stderr; exits with 1 on any
   check --all                The same for every project

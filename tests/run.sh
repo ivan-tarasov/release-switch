@@ -305,7 +305,7 @@ mkdir "$BASE/.deploy.lock"
 if deploy fixture 2> "$WORK/lock.log"; then
     fail "deploy ran while locked"
 fi
-grep -q "another deploy is running (no owner recorded)" "$WORK/lock.log" || fail "no lock message"
+grep -q "another deploy is running (no owner, [0-9]* s old)" "$WORK/lock.log" || fail "no lock message"
 # Held by this test's shell, which is alive.
 printf '%s %s deploy\n' "$$" "$(date +%s)" > "$BASE/.deploy.lock/owner"
 if deploy fixture 2> "$WORK/lock.log"; then
@@ -329,6 +329,59 @@ grep -q "Removing a stale lock: PID $dead is gone" "$WORK/stale.log" || fail "de
 fresh="$(live_release)"
 serves "$fresh" || fail "server does not show $fresh"
 check "deploy removed the stale lock and went live with $fresh"
+
+step "A lock with no owner blocks for 60 s, then is removed"
+mkdir "$BASE/.deploy.lock"
+if deploy fixture 2> "$WORK/lock.log"; then
+    fail "deploy ran while a young lock with no owner was there"
+fi
+grep -q "another deploy is running (no owner, [0-9]* s old)" "$WORK/lock.log" || fail "no message for a young lock with no owner"
+# touch -t reads local time; UTC on both sides keeps it right.
+TZ=UTC touch -t "$(php -r 'echo gmdate("YmdHi.s", time() - 120);')" "$BASE/.deploy.lock"
+deploy fixture status > "$WORK/lock-status.log"
+grep -q "^Lock: *stale (no owner, 1[0-9][0-9] s old" "$WORK/lock-status.log" || fail "status does not show a stale lock with no owner"
+# The deploy takes the lock, then stops: nothing new is on develop.
+deploy fixture > "$WORK/stale.log"
+grep -q "Removing a stale lock: no owner, 1[0-9][0-9] s old" "$WORK/stale.log" || fail "deploy did not remove the lock with no owner"
+grep -q "Nothing new on develop" "$WORK/stale.log" || fail "deploy did not run after removing the lock with no owner"
+[ ! -d "$BASE/.deploy.lock" ] || fail "deploy left the lock behind"
+check "a young lock with no owner blocks; an old one is removed with a message and the deploy runs"
+
+step "Two runs racing on one stale lock never both hold it"
+# Each run: the engine without its last line (main "$@"), then acquire_lock. A slow say() widens
+# the gap between finding the lock stale and removing it.
+mkdir "$WORK/race"
+sed '$d' "$ROOT/deploy" > "$WORK/race.sh"
+cat >> "$WORK/race.sh" <<'EOF'
+DEPLOY_BASE="$RACE" PHP_BIN=php
+say() { sleep "0.0$((RANDOM % 3))"; }
+touch "$RACE/ready.$1"
+until [ -e "$RACE/go" ]; do :; done
+acquire_lock deploy 2> /dev/null
+mkdir "$RACE/inside" 2> /dev/null || touch "$RACE/both"
+touch "$RACE/won"
+sleep 0.05
+rmdir "$RACE/inside" 2> /dev/null || true
+rm -rf "$LOCK_DIR"
+EOF
+for round in $(seq 50); do
+    rm -f "$WORK/race/ready."* "$WORK/race/go" "$WORK/race/won"
+    mkdir "$WORK/race/.deploy.lock"
+    printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$WORK/race/.deploy.lock/owner"
+    RACE="$WORK/race" bash "$WORK/race.sh" a &
+    racer_a=$!
+    RACE="$WORK/race" bash "$WORK/race.sh" b &
+    racer_b=$!
+    until [ -e "$WORK/race/ready.a" ] && [ -e "$WORK/race/ready.b" ]; do :; done
+    touch "$WORK/race/go"
+    # Not a bare wait: the web server is a child too. One run fails on the lock.
+    wait "$racer_a" || true
+    wait "$racer_b" || true
+    [ ! -e "$WORK/race/both" ] || fail "two runs held the lock at once in round $round"
+    [ -e "$WORK/race/won" ] || fail "no run took the stale lock in round $round"
+    [ ! -e "$WORK/race/.deploy.lock" ] || fail "the lock is left behind after round $round"
+done
+check "50 rounds of two runs on one stale lock: one holder at a time"
 
 step "A deploy with nothing new stops; --force builds anyway"
 releases_now="$(release_count)"
@@ -463,6 +516,13 @@ if deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
 fi
 rm -rf "$BASE/.deploy.lock"
 grep -q "^FAIL  fixture: lock: held for 45 min" "$WORK/check-err.log" || fail "check does not report a stuck deploy"
+mkdir "$BASE/.deploy.lock"
+TZ=UTC touch -t "$(php -r 'echo gmdate("YmdHi.s", time() - 120);')" "$BASE/.deploy.lock"
+if deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
+    fail "check passed with a stale lock with no owner"
+fi
+rm -rf "$BASE/.deploy.lock"
+grep -q "^FAIL  fixture: lock: stale (no owner, 1[0-9][0-9] s old)" "$WORK/check-err.log" || fail "check does not report a lock with no owner"
 if FIXTURE_UNHEALTHY=1 deploy fixture check > /dev/null 2> "$WORK/check-err.log"; then
     fail "check passed with a failing health()"
 fi

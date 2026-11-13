@@ -598,13 +598,14 @@ release_refs() {
     HAS_TAGS=0
     NO_RELEASE=0
 
-    if printf '%s\n' "$refs" | grep -q $'\trefs/tags/v'; then
-        HAS_TAGS=1
-    fi
+    # No grep -q in a pipe: with pipefail, an early exit can fail the pipeline.
+    case "$refs" in
+        *$'\trefs/tags/v'*) HAS_TAGS=1 ;;
+    esac
 
-    if printf '%s\n' "$refs" | grep -q $'\trefs/no-release/'"$1"'$'; then
-        NO_RELEASE=1
-    fi
+    case $'\n'"$refs"$'\n' in
+        *$'\trefs/no-release/'"$1"$'\n'*) NO_RELEASE=1 ;;
+    esac
 }
 
 # Shows the wait line. On a terminal it is rewritten in place; elsewhere each check gets a line.

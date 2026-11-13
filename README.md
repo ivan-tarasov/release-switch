@@ -108,7 +108,7 @@ deploy [project] [command]
                     it is N commits past it
 ```
 
-`project` is the name of a file in `projects/` (`projects/tarasov.ca.env` is `tarasov.ca`).
+`project` is the name of a file in `projects/` (`projects/tarasov.env` is `tarasov`).
 It can be left out when there is only one.
 
 ## Setup on a server
@@ -303,7 +303,7 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 In a terminal, each command runs on rails, like this:
 
 ```
-┌  release-switch v2026.11.1 · tarasov.ca · deploy
+┌  release-switch v2026.11.1 · tarasov · deploy
 │
 ◇  Cloning develop
 ◇  Running build

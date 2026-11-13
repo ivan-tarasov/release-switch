@@ -123,7 +123,7 @@ engine_version() {
     fi
 }
 
-# Opens the rails: "┌  release-switch v2026.11.1 · tarasov.ca · deploy".
+# Opens the rails: "┌  release-switch v2026.11.1 · tarasov · deploy".
 intro() {
     [ "$RAILS" -eq 1 ] || return 0
     printf '%s┌%s  %srelease-switch%s %s%s%s%s\n%s│%s\n' "$C_DIM" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_DIM" \

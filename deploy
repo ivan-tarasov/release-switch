@@ -54,6 +54,9 @@ fi
 # 1 once intro has opened the rails, so on_exit closes them.
 INTRO=0
 
+# 1 while the release tag wait line is open on a terminal, so later output starts on a new line.
+WAIT_LINE=0
+
 # Hides the user and password in URLs: https://user:token@host becomes https://***@host.
 # ssh://git@host stays, as git@ holds no secret.
 redact() {
@@ -350,6 +353,7 @@ on_exit() {
     # Cleanup runs to the end: no second signal, and no stop on a failed write to a closed terminal.
     trap '' INT TERM HUP
     set +e
+    end_wait_line
 
     # Never deletes the release that `current` points at, whatever the flags say.
     if [ -n "$NEW_RELEASE" ] && [ "$SWITCHED" -eq 0 ] && [ "$(current_release)" != "$NEW_RELEASE" ]; then
@@ -581,43 +585,94 @@ release_time() {
     ' "${stamp:0:14}" "$DISPLAY_TZ" 2>/dev/null || printf 'unknown time'
 }
 
-# The release tag on a commit (v2026.11.21), from the remote, since a shallow clone may lack it.
-release_tag() {
-    git ls-remote --tags "$REPO_URL" 2>/dev/null \
+# Reads the remote's release tags and the no-release marker of commit $1 in one call. Sets TAG to
+# the release tag on the commit (v2026.11.21), HAS_TAGS to 1 when the repo has any `v*` tag, and
+# NO_RELEASE to 1 when the release workflow marked the commit with refs/no-release/<sha>.
+release_refs() {
+    local refs
+    refs="$(git ls-remote "$REPO_URL" 'refs/tags/v*' "refs/no-release/$1" 2>/dev/null || true)"
+
+    TAG="$(printf '%s\n' "$refs" \
         | awk -v sha="$1" '$1 == sha { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
-        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+    HAS_TAGS=0
+    NO_RELEASE=0
+
+    if printf '%s\n' "$refs" | grep -q $'\trefs/tags/v'; then
+        HAS_TAGS=1
+    fi
+
+    if printf '%s\n' "$refs" | grep -q $'\trefs/no-release/'"$1"'$'; then
+        NO_RELEASE=1
+    fi
+}
+
+# Shows the wait line. On a terminal it is rewritten in place; elsewhere each check gets a line.
+wait_line() {
+    if [ -t 1 ]; then
+        printf '\r\033[K%s' "$(say "$1")"
+        WAIT_LINE=1
+    else
+        say "$1"
+    fi
+}
+
+# Ends the wait line on a terminal, so the next output starts on a new line.
+end_wait_line() {
+    if [ "$WAIT_LINE" -eq 1 ]; then
+        printf '\n'
+        WAIT_LINE=0
+    fi
 }
 
 # Sets TAG to the release tag on the cloned commit in $1. A commit under 5 minutes old in a repo
 # with release tags may not have its tag yet: waits up to RELEASE_WAIT seconds for it, unless $2 is 1.
+# A commit with a no-release marker never gets a tag, so the wait stops at once.
 wait_release_tag() {
-    local dir="$1" no_wait="$2" sha short age waited=0
+    local dir="$1" no_wait="$2" sha short age started elapsed=0 nap
     # Not a setting: lets the tests poll faster.
     local poll="${RELEASE_POLL:-5}"
 
     sha="$(git -C "$dir" rev-parse HEAD)"
     short="$(git -C "$dir" rev-parse --short HEAD)"
-    TAG="$(release_tag "$sha")"
+    release_refs "$sha"
 
     # A repo without release tags never gets one.
-    if [ -n "$TAG" ] || [ -z "$(git ls-remote --tags "$REPO_URL" 'v*' 2>/dev/null || true)" ]; then
+    if [ -n "$TAG" ] || [ "$HAS_TAGS" -eq 0 ]; then
+        return
+    fi
+
+    if [ "$NO_RELEASE" -eq 1 ]; then
+        say "no-release merge; deploying without a tag"
+
         return
     fi
 
     age=$(($(date +%s) - $(git -C "$dir" log -1 --format=%ct HEAD)))
 
     if [ "$no_wait" -eq 0 ] && [ "$RELEASE_WAIT" -gt 0 ] && [ "$age" -lt 300 ]; then
-        say "Waiting for the release tag on $short…"
+        started="$(date +%s)"
+        wait_line "Waiting for the release tag on $short (0 s of $RELEASE_WAIT)"
 
-        while [ -z "$TAG" ] && [ "$waited" -lt "$RELEASE_WAIT" ]; do
+        while [ -z "$TAG" ] && [ "$NO_RELEASE" -eq 0 ] && [ "$elapsed" -lt "$RELEASE_WAIT" ]; do
+            nap=$((RELEASE_WAIT - elapsed))
+            [ "$nap" -le "$poll" ] || nap="$poll"
             # In the background, so a signal stops the wait at once and on_exit frees the lock.
-            sleep "$poll" &
+            sleep "$nap" &
             wait $!
-            waited=$((waited + poll))
-            TAG="$(release_tag "$sha")"
+            release_refs "$sha"
+            elapsed=$(($(date +%s) - started))
+            [ "$elapsed" -le "$RELEASE_WAIT" ] || elapsed="$RELEASE_WAIT"
+            wait_line "Waiting for the release tag on $short ($elapsed s of $RELEASE_WAIT)"
         done
 
-        if [ -z "$TAG" ]; then
+        end_wait_line
+
+        if [ -n "$TAG" ]; then
+            return
+        elif [ "$NO_RELEASE" -eq 1 ]; then
+            say "no-release merge; deploying without a tag"
+        else
             warn "no release tag on $short after $RELEASE_WAIT s; deploying without one"
         fi
 

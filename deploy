@@ -3,7 +3,7 @@
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
 #   deploy [project] [deploy [--ref <ref>] [--force] | freeze [reason] | unfreeze | status | check
-#                     | log [count] | rollback [name] | init <checkout> [--dry-run] | help]
+#                     | log [count] | path [--base] | rollback [name] | init <checkout> [--dry-run] | help]
 #   deploy self-update | self [log [count]] | --version
 
 set -euo pipefail
@@ -489,6 +489,30 @@ current_release() {
     if [ -L "$DEPLOY_BASE/current" ]; then
         basename "$(readlink "$DEPLOY_BASE/current")"
     fi
+}
+
+# Prints the full path of the live release, or of DEPLOY_BASE with --base, and nothing else, so
+# `cd "$(deploy path <project>)"` works. Creates nothing and takes no lock.
+show_path() {
+    local base
+
+    case "${1:-}" in
+        "" | --base) ;;
+        *) fail "unknown project or option: $1 (usage: deploy path [project] [--base])" ;;
+    esac
+
+    [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/<project>.env"
+    [ -d "$DEPLOY_BASE" ] || fail "${PROJECT:-the project} has no base folder ($DEPLOY_BASE)"
+    base="$(cd "$DEPLOY_BASE" && pwd -P)"
+
+    if [ "${1:-}" = --base ]; then
+        printf '%s\n' "$base"
+
+        return
+    fi
+
+    [ -d "$base/current" ] || fail "${PROJECT:-the project} has no live release ($base/current is missing)"
+    (cd "$base/current" && pwd -P)
 }
 
 # Oldest first. Sorts on the timestamp digits alone, so older names without the dash
@@ -1605,6 +1629,8 @@ Commands:
                              with 1 on any
   check --all                The same for every project
   log [count]                The last deploys and rollbacks, with results (20 by default)
+  path [--base]              Print the full path of the live release, or of DEPLOY_BASE with
+                             --base, and nothing else: cd "\$(deploy path <project>)"
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
                              it, like the sha or tag)
@@ -1677,6 +1703,15 @@ main() {
         exit 0
     fi
 
+    # `deploy path <project>` reads like `deploy <project> path`. Its output is only the path, so
+    # never on the rails.
+    if [ "${1:-}" = path ] && [ $# -gt 1 ] && [ -f "$PROJECTS_DIR/$2.env" ]; then
+        set -- "$2" path "${@:3}"
+    fi
+    if [ "${1:-}" = path ] || { [ "${2:-}" = path ] && [ -f "$PROJECTS_DIR/$1.env" ]; }; then
+        RAILS=0
+    fi
+
     # The project: the first argument when it names a project file, else the only project there is.
     if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
         load_project "$1"
@@ -1735,6 +1770,9 @@ main() {
         log)
             resolve_base
             report "${PROJECT:+$PROJECT · }log" show_log "${2:-}"
+            ;;
+        path)
+            show_path "${2:-}"
             ;;
         rollback)
             rollback "${2:-}"

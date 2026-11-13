@@ -362,41 +362,67 @@ grep -q "Nothing new on develop" "$WORK/stale.log" || fail "deploy did not run a
 [ ! -d "$BASE/.deploy.lock" ] || fail "deploy left the lock behind"
 check "a young lock with no owner blocks; an old one is removed with a message and the deploy runs"
 
-step "Two runs racing on one stale lock never both hold it"
-# Each run: the engine without its last line (main "$@"), then acquire_lock. A slow say() widens
-# the gap between finding the lock stale and removing it.
+step "Three runs racing on one stale lock: one holder at a time, and one always takes it"
+# Each run: the engine without its last line (main "$@"), then acquire_lock. Random sleeps in
+# lock_state (before and after the check) and say() widen the gaps between finding the lock stale
+# and acting on it.
 mkdir "$WORK/race"
 sed '$d' "$ROOT/deploy" > "$WORK/race.sh"
 cat >> "$WORK/race.sh" <<'EOF'
 DEPLOY_BASE="$RACE" PHP_BIN=php
+eval "real_$(declare -f lock_state)"
+lock_state() {
+    local state
+    sleep "0.0$((RANDOM % 3))"
+    state="$(real_lock_state "$@")"
+    sleep "0.0$((RANDOM % 3))"
+    printf '%s\n' "$state"
+}
 say() { sleep "0.0$((RANDOM % 3))"; }
 touch "$RACE/ready.$1"
 until [ -e "$RACE/go" ]; do :; done
-acquire_lock deploy 2> /dev/null
+sleep "0.0$((RANDOM % 2))"
+acquire_lock deploy 2> "$RACE/err.$1"
 mkdir "$RACE/inside" 2> /dev/null || touch "$RACE/both"
 touch "$RACE/won"
 sleep 0.05
 rmdir "$RACE/inside" 2> /dev/null || true
 rm -rf "$LOCK_DIR"
 EOF
-for round in $(seq 50); do
-    rm -f "$WORK/race/ready."* "$WORK/race/go" "$WORK/race/won"
+for round in $(seq 40); do
+    rm -f "$WORK/race/ready."* "$WORK/race/err."* "$WORK/race/go" "$WORK/race/won"
     mkdir "$WORK/race/.deploy.lock"
     printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$WORK/race/.deploy.lock/owner"
-    RACE="$WORK/race" bash "$WORK/race.sh" a &
-    racer_a=$!
-    RACE="$WORK/race" bash "$WORK/race.sh" b &
-    racer_b=$!
-    until [ -e "$WORK/race/ready.a" ] && [ -e "$WORK/race/ready.b" ]; do :; done
+    racers=()
+    for name in a b c; do
+        RACE="$WORK/race" bash "$WORK/race.sh" "$name" &
+        racers+=("$!")
+    done
+    until [ -e "$WORK/race/ready.a" ] && [ -e "$WORK/race/ready.b" ] && [ -e "$WORK/race/ready.c" ]; do :; done
     touch "$WORK/race/go"
-    # Not a bare wait: the web server is a child too. One run fails on the lock.
-    wait "$racer_a" || true
-    wait "$racer_b" || true
+    # Not a bare wait: the web server is a child too. The losers fail on the lock.
+    for racer in "${racers[@]}"; do
+        wait "$racer" || true
+    done
     [ ! -e "$WORK/race/both" ] || fail "two runs held the lock at once in round $round"
     [ -e "$WORK/race/won" ] || fail "no run took the stale lock in round $round"
     [ ! -e "$WORK/race/.deploy.lock" ] || fail "the lock is left behind after round $round"
+    [ ! -e "$WORK/race/.deploy.lock.break" ] || fail "the break folder is left behind after round $round"
+    others="$(cat "$WORK/race/err."* | grep -v "another deploy is running" || true)"
+    [ -z "$others" ] || fail "a losing run failed for another reason in round $round: $others"
 done
-check "50 rounds of two runs on one stale lock: one holder at a time"
+check "40 rounds of three runs on one stale lock: one holder at a time, losers say another deploy runs"
+
+step "A stale lock removal that stopped half way is reported"
+mkdir "$BASE/.deploy.lock" "$BASE/.deploy.lock.break"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+TZ=UTC touch -t "$(php -r 'echo gmdate("YmdHi.s", time() - 120);')" "$BASE/.deploy.lock.break"
+if deploy fixture > "$WORK/break.log" 2>&1; then
+    fail "deploy ran past a stuck stale lock removal"
+fi
+grep -q "a stale lock removal stopped half way; remove .*\.deploy\.lock\.break" "$WORK/break.log" || fail "deploy does not name the stuck break folder"
+rm -rf "$BASE/.deploy.lock" "$BASE/.deploy.lock.break"
+check "a break folder older than 60 s blocks with a message that names it"
 
 step "A deploy with nothing new stops; --force builds anyway"
 releases_now="$(release_count)"

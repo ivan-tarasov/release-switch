@@ -22,6 +22,7 @@ NEW_RELEASE=""
 PREVIOUS_RELEASE=""
 SWITCHED=0
 LOCK_DIR=""
+LOCK_BREAK=""
 RELEASE_DIR=""
 RELEASE_NAME=""
 SHARED=()
@@ -300,50 +301,53 @@ lock_text() {
 
 # Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
-    local owner moved
+    local state
     LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
 
     # mkdir is atomic, and unlike flock it exists everywhere.
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        owner="$(lock_owner)"
+        state="$(lock_state)"
 
-        if [ "$(lock_state)" = stale ]; then
-            # Only one run wins the move; the others find no lock and go on to mkdir.
-            moved="$LOCK_DIR.stale.$$"
-            rm -rf "$moved"
+        # Only one run at a time removes a stale lock: the one that makes the break folder. The
+        # others fail, as that run is about to take the lock.
+        if [ "$state" = stale ] && mkdir "$LOCK_DIR.break" 2>/dev/null; then
+            LOCK_BREAK="$LOCK_DIR.break"
 
-            if mv "$LOCK_DIR" "$moved" 2>/dev/null; then
-                # The same owner (or still none, and old) means the same stale lock. Compared
-                # first, as it is quick: another run's lock goes back sooner.
-                if [ "$(lock_owner "$moved")" = "$owner" ] \
-                    && { [ -n "$owner" ] || [ "$(lock_state "$moved")" = stale ]; }; then
-                    say "Removing a stale lock: $(lock_text "$moved" | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
-                    rm -rf "$moved"
-                else
-                    # Another run took the lock just before the move. Give it back: mkdir claims
-                    # the path again, then its files go in. If a third run got there first, it
-                    # keeps the lock.
-                    if mkdir "$LOCK_DIR" 2>/dev/null; then
-                        mv "$moved"/* "$LOCK_DIR"/ 2>/dev/null || true
-                    fi
-
-                    rm -rf "$moved"
-                fi
+            # Checked again: another run may have replaced the lock since. While this run holds
+            # the break folder, nobody else removes a lock, so a stale one stays the same.
+            if [ "$(lock_state)" = stale ]; then
+                say "Removing a stale lock: $(lock_text | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
+                # Moved aside first, so the path frees at once and other runs never see half of it.
+                rm -rf "$LOCK_DIR.stale.$$"
+                mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null || true
+                rm -rf "$LOCK_DIR.stale.$$"
             fi
+        elif [ "$state" = stale ] && [ "$(lock_age "$LOCK_DIR.break")" -ge 60 ]; then
+            LOCK_DIR=""
+            fail "a stale lock removal stopped half way; remove $DEPLOY_BASE/.deploy.lock.break and $DEPLOY_BASE/.deploy.lock if no deploy is running"
         fi
 
         if ! mkdir "$LOCK_DIR" 2>/dev/null; then
             LOCK_DIR=""
+            release_lock_break
             fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not"
         fi
+
+        release_lock_break
     fi
 
-    # Written aside and renamed, so the owner file is never half written. Fails if another run
-    # moved the lock away meanwhile.
+    # Written aside and renamed, so the owner file is never half written.
     if ! printf '%s %s %s\n' "$$" "$(date +%s)" "$1" 2>/dev/null > "$LOCK_DIR/owner.$$" \
         || ! mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner" 2>/dev/null; then
         LOCK_DIR=""
         fail "lost the lock to another deploy while taking it"
+    fi
+}
+
+release_lock_break() {
+    if [ -n "$LOCK_BREAK" ]; then
+        rmdir "$LOCK_BREAK" 2>/dev/null || true
+        LOCK_BREAK=""
     fi
 }
 
@@ -367,6 +371,8 @@ on_exit() {
     if [ "$status" -ne 0 ] && [ -n "$ACTION" ]; then
         log_event "$ACTION" "$LOG_RELEASE" "failed: $STAGE"
     fi
+
+    release_lock_break
 
     if [ -n "$LOCK_DIR" ]; then
         rm -rf "$LOCK_DIR"

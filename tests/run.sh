@@ -140,15 +140,20 @@ deploy fixture init "$OLD"
 check "shared/ holds .env and data/; the old checkout links to them"
 
 # Serves whatever `current` points at. No realpath cache, so a switch shows on the next request.
-# /hook stands in for an alert webhook: it keeps each request body in hook.log.
+# /hook stands in for an alert webhook: it keeps each request body in hook.log. A staging slot
+# host (s1.localhost) gets that slot's folder, next to the base folder.
 cat > "$WORK/router.php" <<EOF
 <?php
 if (\$_SERVER['REQUEST_URI'] === '/hook') {
     file_put_contents('$WORK/hook.log', file_get_contents('php://input') . "\n", FILE_APPEND);
     return;
 }
-chdir('$BASE/current/public');
-require '$BASE/current/public/index.php';
+\$base = '$BASE';
+if (preg_match('/^(s[0-9]+)\\./', \$_SERVER['HTTP_HOST'] ?? '', \$m)) {
+    \$base = '$WORK/' . \$m[1];
+}
+chdir("\$base/current/public");
+require "\$base/current/public/index.php";
 EOF
 PHP_CLI_SERVER_WORKERS=4 php -d realpath_cache_size=0 -S "127.0.0.1:$PORT" "$WORK/router.php" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
@@ -851,6 +856,97 @@ if RELEASE_WAIT=soon deploy fixture --force > /dev/null 2> "$WORK/wait.log"; the
 fi
 grep -q "RELEASE_WAIT must be a whole number of seconds, not 'soon'" "$WORK/wait.log" || fail "no message for RELEASE_WAIT=soon"
 check "a repo without release tags did not wait; a bad RELEASE_WAIT is refused"
+
+step "Staging slots: a branch each, in their own folder and URL"
+SLOT="$WORK/s1"
+cat >> "$WORK/projects/fixture.env" <<EOF
+STAGING_SERVERS=2
+STAGING_URL="http://{slot}.localhost:$PORT/"
+EOF
+prod="$(live_release)"
+prod_log="$(wc -l < "$BASE/deploy.log")"
+slot_live() {
+    basename "$(readlink "$SLOT/current" 2>/dev/null)" 2>/dev/null || true
+}
+if deploy fixture@s1 2> "$WORK/slot.err"; then
+    fail "a slot with no branch deployed"
+fi
+grep -q "fixture@s1 has no branch yet; set one: deploy fixture@s1 --branch <name>" "$WORK/slot.err" \
+    || fail "no hint to set a branch"
+if deploy fixture@s1 --branch nope 2> "$WORK/slot.err"; then
+    fail "a branch missing from the repo deployed"
+fi
+grep -q "no branch nope in the repo" "$WORK/slot.err" || fail "no message for a missing branch"
+[ ! -e "$SLOT/BRANCH" ] || fail "a missing branch was stored"
+git clone --quiet --branch develop "$REPO" "$WORK/feature"
+git -C "$WORK/feature" checkout --quiet -b feature/x
+printf 'feature one\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature one"
+git -C "$WORK/feature" push --quiet origin feature/x
+if deploy fixture@s1 --branch feature/x 2> "$WORK/slot.err"; then
+    fail "a slot without its shared files deployed"
+fi
+grep -q "shared/.env is missing (run init, or create it)" "$WORK/slot.err" || fail "no message for missing shared files"
+# The fixture's preflight wants APP_ENV=production.
+mkdir -p "$SLOT/shared/data"
+printf 'APP_ENV=production\n' > "$SLOT/shared/.env"
+printf 'slot one\n' > "$SLOT/shared/data/note.txt"
+DEPLOY_RAILS=1 deploy fixture@s1 --branch feature/x > "$WORK/slot.log"
+cat "$WORK/slot.log"
+grep -q "release-switch .* · fixture@s1 · deploy" "$WORK/slot.log" || fail "the rails header does not name the slot"
+[ "$(cat "$SLOT/BRANCH")" = feature/x ] || fail "the slot did not store its branch"
+[ "$(cat "$SLOT/current/VERSION")" = "feature one" ] || fail "the slot does not run feature/x"
+[ "$(cat "$SLOT/current/slot")" = "s1 s1.localhost" ] || fail "DEPLOY_SLOT and DEPLOY_HOST did not reach the build"
+[ "$(curl --silent "http://s1.localhost:$PORT/")" = "slot one" ] || fail "the slot URL does not serve the slot"
+first_slot="$(slot_live)"
+grep -q $'\tdeploy@s1\t'"$first_slot"$'\tok\t' "$SLOT/deploy.log" || fail "deploy.log does not name the slot"
+[ "$(deploy path fixture@s1)" = "$SLOT/releases/$first_slot" ] || fail "path does not print the slot's release"
+check "fixture@s1 runs feature/x from $SLOT at s1.localhost; steps see the slot and its host"
+
+step "A plain slot deploy follows the stored branch"
+printf 'feature two\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature two"
+git -C "$WORK/feature" push --quiet origin feature/x
+deploy fixture@s1 > /dev/null
+[ "$(cat "$SLOT/current/VERSION")" = "feature two" ] || fail "a plain slot deploy did not follow feature/x"
+[ "$(slot_live)" != "$first_slot" ] || fail "a plain slot deploy built nothing new"
+deploy fixture@s1 > "$WORK/slot.log"
+grep -q "Nothing new on feature/x" "$WORK/slot.log" || fail "a slot deploy with nothing new built again"
+check "a plain deploy of fixture@s1 deployed the newest feature/x, then stopped with nothing new"
+
+step "Slots are listed, refused when wrong, and leave production alone"
+deploy fixture slots > "$WORK/slots.log"
+cat "$WORK/slots.log"
+grep -qE "^s1 +feature/x +[0-9a-f]{7,} +today at [0-9:]+ [A-Z]+ +http://s1\.localhost:$PORT/$" "$WORK/slots.log" \
+    || fail "slots does not show s1"
+grep -qE "^s2 +free +- +- +http://s2\.localhost:$PORT/$" "$WORK/slots.log" || fail "slots does not show s2 as free"
+STAGING_URL='' CHECK_URL="https://user:pass@example.com:8443/app" deploy fixture@s2 help \
+    | grep -qF "(https://***@s2.example.com:8443/app)" || fail "the slot URL is not sN. before the host"
+for bad in fixture@s3 fixture@x fixture@s0; do
+    if deploy "$bad" status > /dev/null 2>&1; then
+        fail "$bad was not refused"
+    fi
+done
+deploy fixture@s3 status 2> "$WORK/slot.err" || true
+grep -q "fixture has no s3; its slots are s1 to s2" "$WORK/slot.err" || fail "no message for s3"
+if STAGING_SERVERS=two deploy fixture status > /dev/null 2> "$WORK/slot.err"; then
+    fail "STAGING_SERVERS=two was not refused"
+fi
+grep -q "STAGING_SERVERS must be a whole number, not 'two'" "$WORK/slot.err" || fail "no message for STAGING_SERVERS=two"
+if STAGING_SERVERS=0 deploy fixture@s1 status > /dev/null 2> "$WORK/slot.err"; then
+    fail "a slot of a project without slots was not refused"
+fi
+grep -q "fixture has no staging slots" "$WORK/slot.err" || fail "no message for a project without slots"
+if deploy fixture --branch feature/x > /dev/null 2> "$WORK/slot.err"; then
+    fail "--branch on production was not refused"
+fi
+grep -qF -- "--branch is for staging slots" "$WORK/slot.err" || fail "no message for --branch on production"
+[ "$(live_release)" = "$prod" ] || fail "slot deploys changed the production release"
+serves "$prod" || fail "production does not serve $prod"
+[ "$(wc -l < "$BASE/deploy.log")" = "$prod_log" ] || fail "slot deploys wrote to the production deploy.log"
+[ ! -e "$BASE/BRANCH" ] || fail "production got a BRANCH file"
+[ "$(cat "$BASE/current/slot")" = " 127.0.0.1" ] || fail "production steps do not see an empty DEPLOY_SLOT and its host"
+check "slots lists s1 and a free s2; bad slots and values are refused; production is unchanged"
 
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.

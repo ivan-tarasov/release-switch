@@ -74,6 +74,9 @@ deploy [project] [command]
   deploy --ref <ref>
                     Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
                     to a release that rollback no longer keeps. Stops if it is already live
+  deploy --branch <name>
+                    On a staging slot only: follow that branch from now on and deploy it
+                    (see [Staging](#staging))
   freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
                     status, status --all and check show it
   unfreeze          Allow deploys again
@@ -88,7 +91,8 @@ deploy [project] [command]
                     whether the repo has newer ones (run `deploy self`) or it has local changes.
                     Exits with 1 if any site does not serve its live release, so it can run from
                     cron as a simple monitor. Pending commits come from
-                    the repo: a quick check, plus a commits-only clone when there are any
+                    the repo: a quick check, plus a commits-only clone when there are any.
+                    Production only: staging slots are not listed
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
@@ -98,12 +102,14 @@ deploy [project] [command]
                     or more, or with no owner for 60 s. Problems go to stderr
                     and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
                     only problems
-  check --all       The same for every project
+  check --all       The same for every project, production only
   log [count]       The last deploys and rollbacks, with results, times and the commits each
                     deploy shipped (20 by default)
   path [--base]     Print the full path of the live release, and nothing else, to copy or use
                     in `cd "$(deploy path <project>)"`. --base prints DEPLOY_BASE instead.
                     Fails if there is no live release. Also works as `deploy path <project>`
+  slots             One line per staging slot: its branch (or free), live commit, deploy time
+                    and URL
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
@@ -117,7 +123,8 @@ deploy [project] [command]
 ```
 
 `project` is the name of a file in `projects/` (`projects/tarasov.env` is `tarasov`).
-It can be left out when there is only one.
+It can be left out when there is only one. A staging slot is `<project>@sN`, like `tarasov@s1`,
+and takes the same commands: `deploy tarasov@s1 status`, `deploy path tarasov@s1`.
 
 ## Setup on a server
 
@@ -218,6 +225,8 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON: `text`, `project`, `event` |
 | `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` |
 | `NOTIFY_ON` | problems | `problems`, or `all` to also send successful deploys |
+| `STAGING_SERVERS` | `0` | Number of staging slots, `s1` to `sN` (see [Staging](#staging)) |
+| `STAGING_URL` | `sN.` before the host of `CHECK_URL` | Slot URL, with `{slot}` for `s1`, `s2`, ... e.g. `https://user:pass@{slot}.example.com/` |
 
 ### Alerts
 
@@ -239,6 +248,46 @@ For alerts on a down site, run `check` from cron. The alerts do the telling, so 
 
 ```cron
 */5 * * * * $HOME/release-switch/deploy check --all > /dev/null 2>&1
+```
+
+## Staging
+
+A project can have staging slots: small copies of the site next to production, each running a
+branch you pick. `STAGING_SERVERS=2` in the project file gives `s1` and `s2`.
+
+Each slot is a full deployment of its own, in the domain folder next to production. With
+`DEPLOY_BASE="$HOME/domains/example.com/www"`, slot `s1` lives in `$HOME/domains/example.com/s1`,
+with its own `releases/`, `shared/`, `current`, `deploy.log` and lock. A slot keeps 2 releases,
+does not wait for release tags and sends no alerts. Its URL is `sN.` before the host of
+`CHECK_URL` (`https://example.com/` gives `https://s1.example.com/`); set `STAGING_URL` with
+`{slot}` for anything else.
+
+To set up a slot:
+
+1. In cPanel, add the subdomain `s1.example.com` with the document root
+   `domains/example.com/s1/current/public`.
+2. Make the slot's shared files: every `SHARED` path of `deploy.conf` must exist in
+   `$HOME/domains/example.com/s1/shared/`, as for a first production deploy. Production's `.env`
+   is never copied. Give the slot its own `shared/.env`, with its own `APP_URL`
+   (`https://s1.example.com`), `APP_ENV=staging`, its own database, and mail to the log
+   (`MAIL_MAILER=log`).
+3. Deploy a branch to it: `deploy example@s1 --branch feature/login`. The slot stores the branch in
+   `s1/BRANCH` and deploys it.
+
+From then on, `deploy example@s1` deploys the newest commit of that branch, and stops when it is
+already live. `--branch` again switches the slot to another branch. `deploy example slots` lists
+the slots, with `free` for a slot that has no branch yet. `status`, `check`, `log`, `rollback`,
+`freeze`, `down`, `up` and `path` work on a slot the same way, as `deploy example@s1 <command>`.
+`--branch` on production is refused: production deploys `DEPLOY_BRANCH`.
+
+The steps of `deploy.conf` see `DEPLOY_SLOT` (`s1`, empty in production) and `DEPLOY_HOST` (the
+host of the check URL, like `s1.example.com`), e.g. to skip a step on staging:
+
+```bash
+after_switch() {
+    [ -z "$DEPLOY_SLOT" ] || return 0
+    "$PHP_BIN" artisan queue:restart
+}
 ```
 
 ## deploy.conf
@@ -298,7 +347,8 @@ up() {
 }
 ```
 
-The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN` and `COMPOSER_BIN`.
+The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMPOSER_BIN`,
+`DEPLOY_SLOT` and `DEPLOY_HOST`.
 
 The project must send the release name as a header, so the check knows the new code is live:
 
@@ -331,7 +381,8 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
-`KEEP_RELEASES`, and that shared files survive.
+`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, and that shared
+files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.
 

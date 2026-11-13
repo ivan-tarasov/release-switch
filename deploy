@@ -2,8 +2,9 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project] [deploy [--ref <ref>] [--force] [--no-wait] | freeze [reason] | unfreeze | status | check
-#                     | log [count] | path [--base] | rollback [name] | init <checkout> [--dry-run] | help]
+#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--force] [--no-wait] | freeze [reason]
+#                     | unfreeze | status | check | log [count] | path [--base] | rollback [name]
+#                     | init <checkout> [--dry-run] | slots | help]
 #   deploy self-update | self [log [count]] | --version
 
 set -euo pipefail
@@ -13,9 +14,13 @@ PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 
 # Settings a project file may set. Env vars of the same name win.
 SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION RELEASE_WAIT
-    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON)
+    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON STAGING_SERVERS STAGING_URL)
 
 PROJECT=""
+
+# The staging slot (s1, s2, ...) from <project>@sN, empty in production, and the branch it follows.
+DEPLOY_SLOT=""
+SLOT_BRANCH=""
 
 # Set while a deploy runs, so the exit trap knows what to clean up.
 NEW_RELEASE=""
@@ -182,10 +187,24 @@ list_projects() {
     done
 }
 
-# Reads projects/<name>.env, keeping any setting already set as an env var.
+# True when $1 names a project file, with or without a slot: tarasov or tarasov@s1.
+is_project() {
+    [ -f "$PROJECTS_DIR/${1%%@*}.env" ]
+}
+
+# Reads projects/<name>.env for <name> or <name>@sN, keeping any setting already set as an env var.
 load_project() {
     local name kept_names=() kept_values=() i
-    PROJECT="$1"
+    PROJECT="${1%%@*}"
+    DEPLOY_SLOT=""
+
+    case "$1" in
+        *@*)
+            DEPLOY_SLOT="${1#*@}"
+            [[ "$DEPLOY_SLOT" =~ ^s[1-9][0-9]*$ ]] \
+                || fail "'$DEPLOY_SLOT' is not a staging slot; use $PROJECT@s1, $PROJECT@s2, ..."
+            ;;
+    esac
 
     for name in "${SETTINGS[@]}"; do
         if [ -n "${!name+x}" ]; then
@@ -219,6 +238,8 @@ apply_defaults() {
     NOTIFY_URL="${NOTIFY_URL:-}"
     NOTIFY_CMD="${NOTIFY_CMD:-}"
     NOTIFY_ON="${NOTIFY_ON:-problems}"
+    STAGING_SERVERS="${STAGING_SERVERS:-0}"
+    STAGING_URL="${STAGING_URL:-}"
 
     case "$KEEP_RELEASES" in
         '' | *[!0-9]*) fail "KEEP_RELEASES must be a whole number, not '$KEEP_RELEASES'" ;;
@@ -229,14 +250,71 @@ apply_defaults() {
     case "$RELEASE_WAIT" in
         '' | *[!0-9]*) fail "RELEASE_WAIT must be a whole number of seconds, not '$RELEASE_WAIT'" ;;
     esac
+    case "$STAGING_SERVERS" in
+        '' | *[!0-9]*) fail "STAGING_SERVERS must be a whole number, not '$STAGING_SERVERS'" ;;
+    esac
     # 10# drops leading zeros, which bash math reads as octal.
     KEEP_RELEASES=$((10#$KEEP_RELEASES))
     CHECK_WAIT=$((10#$CHECK_WAIT))
     RELEASE_WAIT=$((10#$RELEASE_WAIT))
+    STAGING_SERVERS=$((10#$STAGING_SERVERS))
     [ "$KEEP_RELEASES" -ge 2 ] \
         || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
 
-    export DEPLOY_BASE PHP_BIN COMPOSER_BIN
+    DEPLOY_HOST="$(url_host "$CHECK_URL")"
+    export DEPLOY_BASE PHP_BIN COMPOSER_BIN DEPLOY_SLOT DEPLOY_HOST
+}
+
+# The host of URL $1, without scheme, user, port or path: https://u:p@example.com:8443/x gives example.com.
+url_host() {
+    printf '%s' "$1" | sed -E 's|^[^:/]+://||; s|[/?#].*$||; s|^.*@||; s|:[0-9]*$||'
+}
+
+# Turns the production settings into those of the slot in DEPLOY_SLOT: its own folder next to
+# production, its own URL, 2 releases, no tag wait and no alerts.
+apply_slot() {
+    local prod_base pattern='{slot}'
+
+    [ "$STAGING_SERVERS" -gt 0 ] \
+        || fail "$PROJECT has no staging slots (set STAGING_SERVERS in $PROJECTS_DIR/$PROJECT.env)"
+    [ "${DEPLOY_SLOT#s}" -le "$STAGING_SERVERS" ] \
+        || fail "$PROJECT has no $DEPLOY_SLOT; its slots are s1 to s$STAGING_SERVERS (STAGING_SERVERS=$STAGING_SERVERS)"
+    [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/$PROJECT.env"
+
+    prod_base="${DEPLOY_BASE%/}"
+    DEPLOY_BASE="$(dirname "$prod_base")/$DEPLOY_SLOT"
+    [ "$DEPLOY_BASE" != "$prod_base" ] \
+        || fail "$DEPLOY_SLOT would share the production folder $prod_base; give production a folder of its own"
+
+    # The first deploy of a slot clones what production runs.
+    if [ -z "$REPO_URL" ]; then
+        REPO_URL="$(git -C "$prod_base/current" remote get-url origin 2>/dev/null || true)"
+    fi
+
+    if [ -n "$STAGING_URL" ]; then
+        CHECK_URL="${STAGING_URL//"$pattern"/$DEPLOY_SLOT}"
+    elif [ -n "$CHECK_URL" ]; then
+        case "$CHECK_URL" in
+            *://*) ;;
+            *) fail "cannot find the host in CHECK_URL; set STAGING_URL with {slot}" ;;
+        esac
+        CHECK_URL="$(printf '%s' "$CHECK_URL" | sed -E "s|^([^:/]+://([^/@]*@)?)|\\1$DEPLOY_SLOT.|")"
+    fi
+
+    KEEP_RELEASES=2
+    RELEASE_WAIT=0
+    NOTIFY_URL=""
+    NOTIFY_CMD=""
+    SLOT_BRANCH=""
+
+    if [ -f "$DEPLOY_BASE/BRANCH" ]; then
+        SLOT_BRANCH="$(cat "$DEPLOY_BASE/BRANCH")"
+        DEPLOY_BRANCH="$SLOT_BRANCH"
+    fi
+
+    PROJECT="$PROJECT@$DEPLOY_SLOT"
+    DEPLOY_HOST="$(url_host "$CHECK_URL")"
+    export DEPLOY_BASE DEPLOY_SLOT DEPLOY_HOST
 }
 
 resolve_base() {
@@ -386,8 +464,8 @@ log_event() {
     local file="$DEPLOY_BASE/deploy.log" seconds
     seconds="$(($(date +%s) - STARTED))"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "${2:--}" "$3" "$seconds" \
-        "$(shipped_summary)" >> "$file"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1${DEPLOY_SLOT:+@$DEPLOY_SLOT}" "${2:--}" "$3" \
+        "$seconds" "$(shipped_summary)" >> "$file"
 
     # Failures and rollbacks always; a plain successful deploy only with NOTIFY_ON=all.
     if [ "$3" != ok ]; then
@@ -993,8 +1071,9 @@ unfreeze() {
 
 # Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
 # --force builds even when that commit is already live; --no-wait does not wait for a release tag.
+# On a staging slot, --branch <name> sets the branch the slot follows and deploys it.
 deploy() {
-    local force=0 ref="" no_wait=0
+    local force=0 ref="" no_wait=0 branch=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1006,11 +1085,25 @@ deploy() {
                 ref="$2"
                 shift
                 ;;
+            --branch=*) branch="${1#--branch=}" ;;
+            --branch)
+                [ -n "${2:-}" ] || fail "usage: deploy <project>@sN --branch <name>"
+                branch="$2"
+                shift
+                ;;
             *) fail "unknown option for deploy: $1" ;;
         esac
 
         shift
     done
+
+    if [ -z "$DEPLOY_SLOT" ]; then
+        [ -z "$branch" ] || fail "--branch is for staging slots (deploy ${PROJECT:-<project>}@s1 --branch $branch); production deploys DEPLOY_BRANCH ($DEPLOY_BRANCH), or use --ref"
+    elif [ -n "$branch" ]; then
+        [ -z "$ref" ] || fail "use --branch or --ref, not both"
+    elif [ -z "$SLOT_BRANCH" ]; then
+        fail "$PROJECT has no branch yet; set one: deploy $PROJECT --branch <name>"
+    fi
 
     resolve_base
     refuse_if_frozen
@@ -1026,6 +1119,17 @@ deploy() {
         [ -n "$PREVIOUS_RELEASE" ] || fail "set REPO_URL for the first deploy"
         REPO_URL="$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null)" \
             || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
+    fi
+
+    if [ -n "$branch" ]; then
+        # Exactly one ref, so a name with * cannot match many.
+        [ "$branch" = "${branch#-}" ] \
+            && [ "$(git ls-remote "$REPO_URL" "refs/heads/$branch" 2>/dev/null | cut -f2)" = "refs/heads/$branch" ] \
+            || fail "no branch $branch in the repo"
+        printf '%s\n' "$branch" > "$DEPLOY_BASE/BRANCH"
+        DEPLOY_BRANCH="$branch"
+        SLOT_BRANCH="$branch"
+        say "$PROJECT now follows $branch"
     fi
 
     local stamp sha live_sha="" tip err
@@ -1544,6 +1648,46 @@ check() {
     return "$CHECK_FAILED"
 }
 
+# One tab-separated row for `slots`: slot $1, its branch, live sha, deploy time and URL. Changes the
+# settings to the slot's, so it runs in a subshell.
+slot_row() {
+    local live="" sha="-" time="-"
+
+    DEPLOY_SLOT="$1"
+    apply_slot
+
+    [ ! -d "$DEPLOY_BASE" ] || live="$(current_release)"
+
+    if [ -n "$live" ]; then
+        sha="$(git -C "$DEPLOY_BASE/current" rev-parse --short HEAD 2>/dev/null || printf -- -)"
+        time="$(release_time "$live")"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\n' "$DEPLOY_SLOT" "${SLOT_BRANCH:-free}" "$sha" "$time" "$(redact "${CHECK_URL:--}")"
+}
+
+# One row per staging slot. Each runs in a subshell, so one slot's settings never leak into the next.
+show_slots() {
+    local i rows=""
+
+    [ -z "$DEPLOY_SLOT" ] || fail "slots lists every slot of a project: deploy ${PROJECT%@*} slots"
+    [ -n "$PROJECT" ] || fail "name a project: deploy <project> slots"
+    [ "$STAGING_SERVERS" -gt 0 ] \
+        || fail "$PROJECT has no staging slots (set STAGING_SERVERS in $PROJECTS_DIR/$PROJECT.env)"
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        rows+="$(slot_row "s$i")"$'\n'
+    done
+
+    rows="$(printf 'SLOT\tBRANCH\tLIVE\tDEPLOYED\tURL\n%s' "$rows")"
+
+    if command -v column > /dev/null; then
+        printf '%s\n' "$rows" | column -t -s $'\t'
+    else
+        printf '%s\n' "$rows"
+    fi
+}
+
 check_all() {
     local project failed=0
 
@@ -1715,7 +1859,8 @@ usage() {
 Usage: deploy [project] [command]
 
 Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
-The project can be left out when there is only one.
+The project can be left out when there is only one. A staging slot is named <project>@sN
+(tarasov@s1) and takes the same commands, with its own folder, URL and branch.
 
 Commands:
   deploy [--ref <ref>] [--force] [--no-wait]
@@ -1723,6 +1868,8 @@ Commands:
                              that commit is already live, unless --force. --ref deploys a tag,
                              branch or commit instead. A commit under 5 minutes old waits for
                              its release tag, unless --no-wait
+  deploy --branch <name>     On a slot only: follow that branch from now on and deploy it. A
+                             plain deploy of the slot then deploys the newest commit of it
   freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
   unfreeze                   Allow deploys again
   down [reason]              Run the down() step of the live release, like a maintenance page.
@@ -1731,17 +1878,19 @@ Commands:
   status                     Show the live release, the rollback target, pending commits, all
                              releases and the site
   status --all               One line per project, and one for the engine; fails if any site does
-                             not serve its live release
+                             not serve its live release. Production only, no slots
   check                      Check the live release, its shared links, its health() step, the
                              site and the lock; changes nothing. Problems go to stderr; exits
                              with 1 on any
-  check --all                The same for every project
+  check --all                The same for every project, production only
   log [count]                The last deploys and rollbacks, with results (20 by default)
   path [--base]              Print the full path of the live release, or of DEPLOY_BASE with
                              --base, and nothing else: cd "\$(deploy path <project>)"
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
                              it, like the sha or tag)
+  slots                      One line per staging slot: its branch (or free), live commit,
+                             deploy time and URL
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
   self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
@@ -1766,6 +1915,8 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   NOTIFY_URL      Webhook for alerts, gets JSON with "text" ($([ -n "$NOTIFY_URL" ] && printf set || printf 'not set'))
   NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT ($([ -n "$NOTIFY_CMD" ] && printf set || printf 'not set'))
   NOTIFY_ON       problems, or all to also send successful deploys ($NOTIFY_ON)
+  STAGING_SERVERS Staging slots s1..sN, each in <folder of DEPLOY_BASE>/sN ($STAGING_SERVERS)
+  STAGING_URL     Slot URL with {slot}; default: sN. before the host of CHECK_URL ($(redact "${STAGING_URL:-not set}"))
 EOF
 }
 
@@ -1814,15 +1965,15 @@ main() {
 
     # `deploy path <project>` reads like `deploy <project> path`. Its output is only the path, so
     # never on the rails.
-    if [ "${1:-}" = path ] && [ $# -gt 1 ] && [ -f "$PROJECTS_DIR/$2.env" ]; then
+    if [ "${1:-}" = path ] && [ $# -gt 1 ] && is_project "$2"; then
         set -- "$2" path "${@:3}"
     fi
-    if [ "${1:-}" = path ] || { [ "${2:-}" = path ] && [ -f "$PROJECTS_DIR/$1.env" ]; }; then
+    if [ "${1:-}" = path ] || { [ "${2:-}" = path ] && is_project "$1"; }; then
         RAILS=0
     fi
 
     # The project: the first argument when it names a project file, else the only project there is.
-    if [ $# -gt 0 ] && [ -f "$PROJECTS_DIR/$1.env" ]; then
+    if [ $# -gt 0 ] && is_project "$1"; then
         load_project "$1"
         shift
     elif [ "$(list_projects | wc -l)" -eq 1 ]; then
@@ -1830,6 +1981,7 @@ main() {
     fi
 
     apply_defaults
+    [ -z "$DEPLOY_SLOT" ] || apply_slot
 
     if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
         && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
@@ -1839,7 +1991,7 @@ main() {
 
     command="${1:-deploy}"
     case "$command" in
-        --force | --no-wait | --ref | --ref=*) command=deploy ;;
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=*) command=deploy ;;
     esac
 
     case "$command" in
@@ -1853,7 +2005,7 @@ main() {
             [ $# -eq 0 ] || shift
             deploy "$@"
             ;;
-        --force | --no-wait | --ref | --ref=*)
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=*)
             deploy "$@"
             ;;
         freeze)
@@ -1882,6 +2034,9 @@ main() {
             ;;
         path)
             show_path "${2:-}"
+            ;;
+        slots)
+            report "${PROJECT:+$PROJECT · }slots" show_slots
             ;;
         rollback)
             rollback "${2:-}"

@@ -20,7 +20,8 @@ Each project has a base folder on the server:
 
 1. stops if deploys are frozen (see `freeze`);
 2. takes a lock, so two deploys of one project never run at once. A lock left by a deploy that
-   died (its process is gone) is removed;
+   died (its process is gone) is removed, and so is a lock with no owner that is older than
+   60 seconds (a deploy died while taking it). The removal is safe when two deploys race for it;
 3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
    out (`--force` builds it anyway);
 4. clones the newest commit of the branch into a new release folder, and writes its name to
@@ -77,7 +78,7 @@ deploy [project] [command]
                     and clears the mark if that release had one
   check             A quick health check that changes nothing: the live release, its shared
                     links, the project's health() step, the site, and a lock held for 30 min
-                    or more. Problems go to stderr
+                    or more, or with no owner for 60 s. Problems go to stderr
                     and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
                     only problems
   check --all       The same for every project
@@ -307,7 +308,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock and stale locks,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

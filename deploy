@@ -237,39 +237,52 @@ resolve_base() {
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
 }
 
-# Who holds the lock: "<pid> <start, epoch seconds> <action>". Empty if nobody does, or the
-# owner file is not written yet.
+# Who holds the lock in folder $1 (default: the lock): "<pid> <start, epoch seconds> <action>".
+# Empty if nobody does, or the owner file is not written yet.
 lock_owner() {
-    cat "$DEPLOY_BASE/.deploy.lock/owner" 2>/dev/null || true
+    cat "${1:-$DEPLOY_BASE/.deploy.lock}/owner" 2>/dev/null || true
 }
 
-# One of: free, stale (its process is gone), held.
-lock_state() {
-    local pid
+# Seconds since the lock folder $1 was made. PHP, as stat and date differ between GNU and BSD.
+lock_age() {
+    # shellcheck disable=SC2016 # PHP code, not shell.
+    "$PHP_BIN" -r '$t = @filemtime($argv[1]); echo $t === false ? 0 : max(0, time() - $t);' "$1"
+}
 
-    if [ ! -d "$DEPLOY_BASE/.deploy.lock" ]; then
+# One of: free, stale, held. Stale: its process is gone, or it has had no owner for 60 s (the run
+# died while taking it). With no owner before that, a run is still taking it: held.
+lock_state() {
+    local dir="${1:-$DEPLOY_BASE/.deploy.lock}" pid
+
+    if [ ! -d "$dir" ]; then
         printf 'free\n'
 
         return
     fi
 
-    pid="$(lock_owner | cut -d' ' -f1)"
+    pid="$(lock_owner "$dir" | cut -d' ' -f1)"
 
-    if [ -n "$pid" ] && ! ps -p "$pid" > /dev/null 2>&1; then
+    if [ -n "$pid" ]; then
+        if ps -p "$pid" > /dev/null 2>&1; then
+            printf 'held\n'
+        else
+            printf 'stale\n'
+        fi
+    elif [ "$(lock_age "$dir")" -ge 60 ]; then
         printf 'stale\n'
     else
         printf 'held\n'
     fi
 }
 
-# "PID 123, deploy, 4 min", or a note when no owner is recorded.
+# "PID 123, deploy, 4 min", or "no owner, 12 s old" for folder $1 (default: the lock).
 lock_text() {
-    local pid started action
+    local dir="${1:-$DEPLOY_BASE/.deploy.lock}" pid started action
 
-    read -r pid started action <<< "$(lock_owner)"
+    read -r pid started action <<< "$(lock_owner "$dir")"
 
     if [ -z "${pid:-}" ]; then
-        printf 'no owner recorded'
+        printf 'no owner, %s s old' "$(lock_age "$dir")"
 
         return
     fi
@@ -277,19 +290,38 @@ lock_text() {
     printf 'PID %s, %s, %s min' "$pid" "${action:-unknown}" "$((($(date +%s) - ${started:-0}) / 60))"
 }
 
-# Takes the lock for $1 (deploy, rollback, down or up). A lock whose process is gone is removed first.
+# Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
-    local owner
+    local owner moved
     LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
 
     # mkdir is atomic, and unlike flock it exists everywhere.
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
         owner="$(lock_owner)"
 
-        # Read the owner twice, so a lock another deploy just took is left alone.
-        if [ "$(lock_state)" = stale ] && [ "$(lock_owner)" = "$owner" ]; then
-            say "Removing a stale lock: PID ${owner%% *} is gone"
-            rm -rf "$LOCK_DIR"
+        if [ "$(lock_state)" = stale ]; then
+            # Only one run wins the move; the others find no lock and go on to mkdir.
+            moved="$LOCK_DIR.stale.$$"
+            rm -rf "$moved"
+
+            if mv "$LOCK_DIR" "$moved" 2>/dev/null; then
+                # The same owner (or still none, and old) means the same stale lock. Compared
+                # first, as it is quick: another run's lock goes back sooner.
+                if [ "$(lock_owner "$moved")" = "$owner" ] \
+                    && { [ -n "$owner" ] || [ "$(lock_state "$moved")" = stale ]; }; then
+                    say "Removing a stale lock: $(lock_text "$moved" | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
+                    rm -rf "$moved"
+                else
+                    # Another run took the lock just before the move. Give it back: mkdir claims
+                    # the path again, then its files go in. If a third run got there first, it
+                    # keeps the lock.
+                    if mkdir "$LOCK_DIR" 2>/dev/null; then
+                        mv "$moved"/* "$LOCK_DIR"/ 2>/dev/null || true
+                    fi
+
+                    rm -rf "$moved"
+                fi
+            fi
         fi
 
         if ! mkdir "$LOCK_DIR" 2>/dev/null; then
@@ -298,7 +330,13 @@ acquire_lock() {
         fi
     fi
 
-    printf '%s %s %s\n' "$$" "$(date +%s)" "$1" > "$LOCK_DIR/owner"
+    # Written aside and renamed, so the owner file is never half written. Fails if another run
+    # moved the lock away meanwhile.
+    if ! printf '%s %s %s\n' "$$" "$(date +%s)" "$1" 2>/dev/null > "$LOCK_DIR/owner.$$" \
+        || ! mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner" 2>/dev/null; then
+        LOCK_DIR=""
+        fail "lost the lock to another deploy while taking it"
+    fi
 }
 
 on_exit() {
@@ -1067,7 +1105,7 @@ status() {
 
     case "$(lock_state)" in
         free) printf '\nLock:      free\n' ;;
-        stale) printf '\nLock:      stale (%s; the process is gone, the next deploy removes it)\n' "$(lock_text)" ;;
+        stale) printf '\nLock:      stale (%s; the next deploy removes it)\n' "$(lock_text)" ;;
         held) printf '\nLock:      held (%s)\n' "$(lock_text)" ;;
     esac
 
@@ -1352,7 +1390,12 @@ check() {
             check_ok "lock: free"
             ;;
         stale)
-            check_ok "lock: stale ($(lock_text)); the next deploy removes it"
+            # No owner: a run died while taking it.
+            if [ -z "$(lock_owner)" ]; then
+                check_bad "lock: stale ($(lock_text)); the next deploy removes it"
+            else
+                check_ok "lock: stale ($(lock_text)); the next deploy removes it"
+            fi
             ;;
         held)
             minutes="$(lock_text | sed -nE 's/.* ([0-9]+) min$/\1/p')"

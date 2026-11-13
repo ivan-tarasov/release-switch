@@ -49,11 +49,19 @@ Release names are in UTC, so they sort the same all year. The tag (`v2026.11.21`
 the commit has none.
 
 The release workflow tags a merge a few seconds after it lands, so a deploy right after a merge
-checks `git ls-remote --tags` every 5 seconds until the tag is there. It waits only when the
-commit is under 5 minutes old and the repo already has `v*` tags; a repo without them never
-waits. If no tag comes within `RELEASE_WAIT` seconds, or the commit is older, the deploy goes on
-without a tag and warns. This is normal for a `no-release` merge. `deploy --no-wait` skips the
-wait once, `RELEASE_WAIT=0` turns it off.
+checks `git ls-remote` every 5 seconds until the tag is there, and shows how long it has waited
+(`Waiting for the release tag on abc1234 (25 s of 90)`). It waits only when the commit is under
+5 minutes old and the repo already has `v*` tags; a repo without them never waits. If no tag comes
+within `RELEASE_WAIT` seconds, or the commit is older, the deploy goes on without a tag and warns.
+`deploy --no-wait` skips the wait once, `RELEASE_WAIT=0` turns it off.
+
+A `no-release` merge never gets a tag. git can't see pull request labels, so the release workflow
+marks such a merge with a ref `refs/no-release/<merge sha>` (not a tag) and keeps only the newest
+20 markers. When the commit has a marker, the deploy stops waiting at once and says
+`no-release merge; deploying without a tag`. To get this in a project repo, copy the
+`no-release-marker` job from this repo's `.github/workflows/release.yml` into the project's release
+workflow. It needs `contents: write` and the default `GITHUB_TOKEN`, nothing else. Without the job,
+a deploy after a `no-release` merge waits the full `RELEASE_WAIT`, as before.
 
 ## Commands
 
@@ -321,7 +329,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
@@ -348,7 +356,8 @@ PR=<N> GITHUB_REPOSITORY=ivan-tarasov/release-switch node scripts/pr-check.mjs
 ```
 
 When a pull request merges into `main`, the Release workflow tags the merge commit and makes a
-GitHub release with generated notes. A `no-release` pull request gets no tag.
+GitHub release with generated notes. A `no-release` pull request gets no tag, only a
+`refs/no-release/<merge sha>` marker (see above).
 The version is `vYEAR.MONTH.COUNT` from the merge date in UTC: the first release of November 2026
 is `v2026.11.1`, the next `v2026.11.2`. `deploy self` pulls the tags with the code, and
 `deploy --version` shows the one in use.

@@ -756,7 +756,8 @@ sleep 1
 commit "fixture wait timeout"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 RELEASE_WAIT=2 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
-grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+grep -q "Waiting for the release tag on $waiting (0 s of 2)" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+grep -q "Waiting for the release tag on $waiting (2 s of 2)" "$WORK/wait.log" || fail "the wait line shows no elapsed seconds"
 grep -q "no release tag on $waiting after 2 s; deploying without one" "$WORK/wait.log" || fail "no warning after the wait"
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the deploy after the wait deployed $(live_release)"
 check "the wait ran out after 2 s; $waiting deployed without a tag"
@@ -776,6 +777,39 @@ fi
 [[ "$(live_release)" =~ -v2026\.11\.100-[0-9a-f]{7,}$ ]] || fail "the tag pushed during the wait is not in $(live_release)"
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "the tag pushed during the wait is in $(live_release)"
+
+sleep 1
+commit "fixture no-release marker"
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+git -C "$REPO" update-ref "refs/no-release/$(git -C "$REPO" rev-parse develop)" develop
+started="$(date +%s)"
+RELEASE_WAIT=60 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
+[ "$(($(date +%s) - started))" -lt 20 ] || fail "a commit with a no-release marker waited for a tag"
+grep -q "no-release merge; deploying without a tag" "$WORK/wait.log" || fail "no line for the no-release marker"
+if grep -q "release tag" "$WORK/wait.log"; then
+    fail "a commit with a no-release marker waited or warned"
+fi
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the no-release commit deployed $(live_release)"
+check "a commit with a no-release marker deployed $waiting at once"
+
+sleep 1
+commit "fixture no-release marker during the wait"
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+(
+    sleep 2
+    git -C "$REPO" update-ref "refs/no-release/$(git -C "$REPO" rev-parse develop)" develop
+) &
+started="$(date +%s)"
+RELEASE_WAIT=60 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
+wait $!
+[ "$(($(date +%s) - started))" -lt 30 ] || fail "the wait went on after the no-release marker came"
+grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+grep -q "no-release merge; deploying without a tag" "$WORK/wait.log" || fail "no line for the no-release marker"
+if grep -q "no release tag" "$WORK/wait.log"; then
+    fail "a warning although the no-release marker came"
+fi
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the no-release commit deployed $(live_release)"
+check "the no-release marker pushed during the wait stopped it; $waiting deployed"
 
 sleep 1
 git init --quiet --bare "$WORK/notags.git"

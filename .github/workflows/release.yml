@@ -2,6 +2,8 @@ name: Release
 
 # Tags each pull request merged into main and makes a GitHub release, unless it is `no-release`.
 # Version: vYEAR.MONTH.COUNT from the merge date (scripts/release-tag.mjs).
+# A `no-release` merge gets a marker ref refs/no-release/<merge sha> instead, so a deploy stops
+# waiting for a tag that never comes. Only the newest 20 markers are kept.
 
 on:
   pull_request:
@@ -36,3 +38,35 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           MERGED_AT: ${{ github.event.pull_request.merged_at }}
         run: node scripts/release-tag.mjs
+
+  no-release-marker:
+    if: >-
+      github.event.pull_request.merged == true
+      && contains(github.event.pull_request.labels.*.name, 'no-release')
+    runs-on: ubuntu-latest
+
+    # One run at a time, so two runs never prune the same markers.
+    concurrency:
+      group: no-release-marker
+      cancel-in-progress: false
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Mark and prune
+        env:
+          MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "$MERGE_SHA"
+          git push origin "$MERGE_SHA:refs/no-release/$MERGE_SHA"
+
+          # Keeps the newest 20 markers, by the date of the marked commit.
+          git fetch --depth=1 origin '+refs/no-release/*:refs/no-release/*'
+          old="$(git for-each-ref --sort=-committerdate --format='%(refname)' refs/no-release/ | tail -n +21)"
+          for ref in $old; do
+            git push origin --delete "$ref"
+          done

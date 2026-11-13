@@ -70,7 +70,8 @@ release_count() {
 
 # Runs the engine for the test project, from a projects/ folder in the temp dir.
 run() {
-    env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 "$@"
+    # No wait for release tags unless a test asks for one.
+    env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT="${RELEASE_WAIT:-0}" "$@"
 }
 
 deploy() {
@@ -720,6 +721,76 @@ r4="$(live_release)"
     || fail "prune did not keep only $r3 and $r4"
 serves "$r4" || fail "server does not show $r4"
 check "prune kept $r1 after a rollback, then kept the newest 2 and deleted the oldest"
+
+step "A new untagged commit waits for its release tag"
+commit "fixture wait killed"
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+releases_now="$(release_count)"
+env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=30 RELEASE_POLL=1 "$ROOT/deploy" fixture \
+    > "$WORK/wait.log" 2>&1 &
+pid=$!
+tries=20
+until grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log"; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "deploy did not wait for the release tag"
+    sleep 0.5
+done
+kill -TERM "$pid"
+code=0
+wait "$pid" || code=$?
+[ "$code" = 143 ] || fail "a TERM during the wait exited with $code, not 143"
+[ ! -d "$BASE/.deploy.lock" ] || fail "a TERM during the wait left the lock behind"
+[ "$(release_count)" = "$releases_now" ] || fail "a TERM during the wait left the release folder behind"
+check "a TERM during the wait freed the lock and removed the clone"
+
+sleep 1
+RELEASE_WAIT=30 RELEASE_POLL=1 deploy fixture --no-wait > "$WORK/wait.log" 2>&1
+if grep -q "Waiting for the release tag" "$WORK/wait.log"; then
+    fail "--no-wait waited for the release tag"
+fi
+grep -q "no release tag on $waiting; deploying without one" "$WORK/wait.log" || fail "--no-wait gave no warning"
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "--no-wait deployed $(live_release)"
+check "--no-wait deployed $waiting without a tag and warned"
+
+sleep 1
+commit "fixture wait timeout"
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+RELEASE_WAIT=2 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
+grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+grep -q "no release tag on $waiting after 2 s; deploying without one" "$WORK/wait.log" || fail "no warning after the wait"
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the deploy after the wait deployed $(live_release)"
+check "the wait ran out after 2 s; $waiting deployed without a tag"
+
+sleep 1
+commit "fixture wait tagged"
+(
+    sleep 2
+    git -C "$REPO" tag v2026.11.100 develop
+) &
+RELEASE_WAIT=30 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
+wait $!
+grep -q "Waiting for the release tag on" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+if grep -q "no release tag" "$WORK/wait.log"; then
+    fail "a warning although the tag came"
+fi
+[[ "$(live_release)" =~ -v2026\.11\.100-[0-9a-f]{7,}$ ]] || fail "the tag pushed during the wait is not in $(live_release)"
+serves "$(live_release)" || fail "server does not show $(live_release)"
+check "the tag pushed during the wait is in $(live_release)"
+
+sleep 1
+git init --quiet --bare "$WORK/notags.git"
+commit "fixture no tags"
+git -C "$REPO" push --quiet "$WORK/notags.git" develop
+RELEASE_WAIT=30 RELEASE_POLL=1 REPO_URL="file://$WORK/notags.git" deploy fixture > "$WORK/wait.log" 2>&1
+if grep -q "release tag" "$WORK/wait.log"; then
+    fail "a repo without release tags waited or warned"
+fi
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7,}$ ]] || fail "a repo without release tags deployed $(live_release)"
+if RELEASE_WAIT=soon deploy fixture --force > /dev/null 2> "$WORK/wait.log"; then
+    fail "RELEASE_WAIT=soon was not refused"
+fi
+grep -q "RELEASE_WAIT must be a whole number of seconds, not 'soon'" "$WORK/wait.log" || fail "no message for RELEASE_WAIT=soon"
+check "a repo without release tags did not wait; a bad RELEASE_WAIT is refused"
 
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.

@@ -2,7 +2,7 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project] [deploy [--ref <ref>] [--force] | freeze [reason] | unfreeze | status | check
+#   deploy [project] [deploy [--ref <ref>] [--force] [--no-wait] | freeze [reason] | unfreeze | status | check
 #                     | log [count] | path [--base] | rollback [name] | init <checkout> [--dry-run] | help]
 #   deploy self-update | self [log [count]] | --version
 
@@ -12,7 +12,7 @@ ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 
 # Settings a project file may set. Env vars of the same name win.
-SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION
+SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION RELEASE_WAIT
     PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON)
 
 PROJECT=""
@@ -207,6 +207,7 @@ apply_defaults() {
     KEEP_RELEASES="${KEEP_RELEASES:-5}"
     CHECK_WAIT="${CHECK_WAIT:-150}"
     CHECK_VERSION="${CHECK_VERSION:-1}"
+    RELEASE_WAIT="${RELEASE_WAIT:-90}"
     PHP_BIN="${PHP_BIN:-php}"
     COMPOSER_BIN="${COMPOSER_BIN:-composer}"
     PHP_RELOAD_CMD="${PHP_RELOAD_CMD:-}"
@@ -221,9 +222,13 @@ apply_defaults() {
     case "$CHECK_WAIT" in
         '' | *[!0-9]*) fail "CHECK_WAIT must be a whole number of seconds, not '$CHECK_WAIT'" ;;
     esac
+    case "$RELEASE_WAIT" in
+        '' | *[!0-9]*) fail "RELEASE_WAIT must be a whole number of seconds, not '$RELEASE_WAIT'" ;;
+    esac
     # 10# drops leading zeros, which bash math reads as octal.
     KEEP_RELEASES=$((10#$KEEP_RELEASES))
     CHECK_WAIT=$((10#$CHECK_WAIT))
+    RELEASE_WAIT=$((10#$RELEASE_WAIT))
     [ "$KEEP_RELEASES" -ge 2 ] \
         || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
 
@@ -583,6 +588,45 @@ release_tag() {
         | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true
 }
 
+# Sets TAG to the release tag on the cloned commit in $1. A commit under 5 minutes old in a repo
+# with release tags may not have its tag yet: waits up to RELEASE_WAIT seconds for it, unless $2 is 1.
+wait_release_tag() {
+    local dir="$1" no_wait="$2" sha short age waited=0
+    # Not a setting: lets the tests poll faster.
+    local poll="${RELEASE_POLL:-5}"
+
+    sha="$(git -C "$dir" rev-parse HEAD)"
+    short="$(git -C "$dir" rev-parse --short HEAD)"
+    TAG="$(release_tag "$sha")"
+
+    # A repo without release tags never gets one.
+    if [ -n "$TAG" ] || [ -z "$(git ls-remote --tags "$REPO_URL" 'v*' 2>/dev/null || true)" ]; then
+        return
+    fi
+
+    age=$(($(date +%s) - $(git -C "$dir" log -1 --format=%ct HEAD)))
+
+    if [ "$no_wait" -eq 0 ] && [ "$RELEASE_WAIT" -gt 0 ] && [ "$age" -lt 300 ]; then
+        say "Waiting for the release tag on $short…"
+
+        while [ -z "$TAG" ] && [ "$waited" -lt "$RELEASE_WAIT" ]; do
+            # In the background, so a signal stops the wait at once and on_exit frees the lock.
+            sleep "$poll" &
+            wait $!
+            waited=$((waited + poll))
+            TAG="$(release_tag "$sha")"
+        done
+
+        if [ -z "$TAG" ]; then
+            warn "no release tag on $short after $RELEASE_WAIT s; deploying without one"
+        fi
+
+        return
+    fi
+
+    warn "no release tag on $short; deploying without one"
+}
+
 # Commits on DEPLOY_BRANCH after the live one. Sets PENDING_COUNT (empty when unknown),
 # PENDING_LOG (newest first) and PENDING_NOTE (why the count is unknown).
 pending_commits() {
@@ -886,16 +930,17 @@ unfreeze() {
 }
 
 # Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
-# --force builds even when that commit is already live.
+# --force builds even when that commit is already live; --no-wait does not wait for a release tag.
 deploy() {
-    local force=0 ref=""
+    local force=0 ref="" no_wait=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --force) force=1 ;;
+            --no-wait) no_wait=1 ;;
             --ref=*) ref="${1#--ref=}" ;;
             --ref)
-                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force]"
+                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait]"
                 ref="$2"
                 shift
                 ;;
@@ -921,7 +966,7 @@ deploy() {
             || fail "set REPO_URL; $DEPLOY_BASE/current has no origin remote"
     fi
 
-    local stamp sha tag live_sha="" tip err
+    local stamp sha live_sha="" tip err
 
     [ -z "$PREVIOUS_RELEASE" ] || live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
 
@@ -967,9 +1012,9 @@ deploy() {
         fi
     fi
     sha="$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse --short HEAD)"
-    tag="$(release_tag "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)")"
+    wait_release_tag "$DEPLOY_BASE/releases/$stamp" "$no_wait"
 
-    NEW_RELEASE="$stamp${tag:+-$tag}-$sha"
+    NEW_RELEASE="$stamp${TAG:+-$TAG}-$sha"
     LOG_RELEASE="$NEW_RELEASE"
     mv "$DEPLOY_BASE/releases/$stamp" "$DEPLOY_BASE/releases/$NEW_RELEASE"
     RELEASE_DIR="$DEPLOY_BASE/releases/$NEW_RELEASE"
@@ -1611,10 +1656,11 @@ Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
 The project can be left out when there is only one.
 
 Commands:
-  deploy [--ref <ref>] [--force]
+  deploy [--ref <ref>] [--force] [--no-wait]
                              Build the newest commit and switch to it (the default). Stops if
                              that commit is already live, unless --force. --ref deploys a tag,
-                             branch or commit instead
+                             branch or commit instead. A commit under 5 minutes old waits for
+                             its release tag, unless --no-wait
   freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
   unfreeze                   Allow deploys again
   down [reason]              Run the down() step of the live release, like a maintenance page.
@@ -1650,6 +1696,7 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   KEEP_RELEASES   Releases to keep, 2 or more ($KEEP_RELEASES)
   CHECK_WAIT      Seconds to wait for CHECK_URL ($CHECK_WAIT)
   CHECK_VERSION   0 to only wait for a 200 ($CHECK_VERSION)
+  RELEASE_WAIT    Seconds to wait for a new commit's release tag, 0 for none ($RELEASE_WAIT)
   PHP_BIN         PHP binary ($PHP_BIN)
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
   PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
@@ -1730,7 +1777,7 @@ main() {
 
     command="${1:-deploy}"
     case "$command" in
-        --force | --ref | --ref=*) command=deploy ;;
+        --force | --no-wait | --ref | --ref=*) command=deploy ;;
     esac
 
     case "$command" in
@@ -1744,7 +1791,7 @@ main() {
             [ $# -eq 0 ] || shift
             deploy "$@"
             ;;
-        --force | --ref | --ref=*)
+        --force | --no-wait | --ref | --ref=*)
             deploy "$@"
             ;;
         freeze)

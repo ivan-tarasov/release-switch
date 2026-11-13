@@ -25,7 +25,8 @@ Each project has a base folder on the server:
 3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
    out (`--force` builds it anyway);
 4. clones the newest commit of the branch into a new release folder, and writes its name to
-   `RELEASE` in the release root;
+   `RELEASE` in the release root. A commit under 5 minutes old with no release tag yet, in a repo
+   that has release tags, waits up to `RELEASE_WAIT` seconds for its tag (see below);
 5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
 6. runs the project's `preflight`, `build` and `verify` steps there;
@@ -47,6 +48,13 @@ A deploy also lists the commits it ships, in its output, the log and the alert.
 Release names are in UTC, so they sort the same all year. The tag (`v2026.11.21`) is left out when
 the commit has none.
 
+The release workflow tags a merge a few seconds after it lands, so a deploy right after a merge
+checks `git ls-remote --tags` every 5 seconds until the tag is there. It waits only when the
+commit is under 5 minutes old and the repo already has `v*` tags; a repo without them never
+waits. If no tag comes within `RELEASE_WAIT` seconds, or the commit is older, the deploy goes on
+without a tag and warns. This is normal for a `no-release` merge. `deploy --no-wait` skips the
+wait once, `RELEASE_WAIT=0` turns it off.
+
 ## Commands
 
 ```
@@ -54,6 +62,7 @@ deploy [project] [command]
 
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
                     is already live, unless --force
+  deploy --no-wait  Do not wait for the release tag of a new commit
   deploy --ref <ref>
                     Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
                     to a release that rollback no longer keeps. Stops if it is already live
@@ -192,6 +201,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `DEPLOY_BRANCH` | `develop` | Branch to deploy |
 | `KEEP_RELEASES` | `5` | Releases to keep. At least `2`: the live release and one to roll back to |
 | `CHECK_WAIT` | `150` | Seconds to wait for `CHECK_URL`. PHP's realpath cache can keep serving the old release for up to 120 s |
+| `RELEASE_WAIT` | `90` | Seconds to wait for the release tag of a commit under 5 minutes old. `0` to never wait |
 | `CHECK_VERSION` | `1` | `0` to only wait for a 200, for a project that cannot send `X-App-Version` yet |
 | `PHP_BIN` | `php` | PHP binary, for the project's steps |
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
@@ -311,7 +321,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, and that shared files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

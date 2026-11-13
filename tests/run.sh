@@ -282,6 +282,20 @@ grep -qE "^age3 +[^ ]+ +$day 12:00 E[SD]T " "$WORK/times.log" || fail "an older 
 rm "$WORK/projects/age1.env" "$WORK/projects/age3.env"
 check "deploy times say today and yesterday, and show the date for older ones"
 
+step "Path prints the live release and the base folder"
+[ "$(deploy path fixture)" = "$BASE/releases/$(live_release)" ] || fail "path does not print the live release"
+[ "$(deploy fixture path)" = "$BASE/releases/$(live_release)" ] || fail "path after the project differs"
+[ "$(DEPLOY_RAILS=1 deploy path fixture --base)" = "$BASE" ] || fail "path --base does not print only the base folder"
+mkdir -p "$WORK/empty-base"
+printf 'DEPLOY_BASE="%s"\n' "$WORK/empty-base" > "$WORK/projects/empty.env"
+if deploy path empty > "$WORK/path.out" 2> "$WORK/path.err"; then
+    fail "path succeeded with no live release"
+fi
+[ ! -s "$WORK/path.out" ] || fail "path printed to stdout with no live release"
+grep -q "has no live release" "$WORK/path.err" || fail "path does not say there is no live release"
+rm "$WORK/projects/empty.env"
+check "path prints the live release, --base the base folder; no live release fails"
+
 step "Rollback to a named release"
 if deploy fixture rollback v2026.11.99 2> "$WORK/ambiguous.log"; then
     fail "rollback to a part shared by two releases succeeded"

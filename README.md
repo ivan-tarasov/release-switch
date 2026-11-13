@@ -84,6 +84,9 @@ deploy [project] [command]
   check --all       The same for every project
   log [count]       The last deploys and rollbacks, with results, times and the commits each
                     deploy shipped (20 by default)
+  path [--base]     Print the full path of the live release, and nothing else, to copy or use
+                    in `cd "$(deploy path <project>)"`. --base prints DEPLOY_BASE instead.
+                    Fails if there is no live release. Also works as `deploy path <project>`
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows

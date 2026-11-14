@@ -1035,6 +1035,105 @@ cat "$WORK/slots.log"
 grep -qE "^s2 +PR #7 +[0-9a-f]{7,} +today at " "$WORK/slots.log" || fail "slots does not show PR #7"
 check "a plain deploy picked up the new PR commit, then stopped; status and slots show PR #7"
 
+step "stage reuses the slot on the branch, picks a free one, and fails when all are busy"
+deploy fixture stage feature/x > "$WORK/stage.log"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s1.localhost:$PORT/" ] || fail "stage feature/x did not end with the s1 URL"
+grep -q "Nothing new on feature/x" "$WORK/stage.log" || fail "stage feature/x did not reuse s1"
+[ "$(deploy fixture stage --pr 7 | tail -n1)" = "http://s2.localhost:$PORT/" ] || fail "stage --pr 7 did not reuse s2"
+git -C "$WORK/feature" checkout --quiet -b feature/y develop
+printf 'feature y\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature y"
+git -C "$WORK/feature" push --quiet origin feature/y
+if deploy fixture stage feature/y > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage deployed with all slots busy"
+fi
+cat "$WORK/stage.err"
+grep -qE "^s2 +PR #7 " "$WORK/stage.err" || fail "a busy stage does not show the slots"
+grep -q "all 2 slots are busy; free one first: deploy fixture@sN free" "$WORK/stage.err" || fail "no hint to free a slot"
+if deploy fixture@s1 stage feature/y > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage on a slot name was not refused"
+fi
+grep -q "stage works on the whole project, not one slot" "$WORK/stage.err" || fail "no message for stage on a slot"
+if STAGING_SERVERS=0 deploy fixture stage feature/y > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage without slots was not refused"
+fi
+grep -q "fixture has no staging slots" "$WORK/stage.err" || fail "no message for stage without slots"
+
+deploy fixture@s2 free > "$WORK/stage.log"
+grep -q "fixture@s2 is free now (it followed PR #7)" "$WORK/stage.log" || fail "free does not say what it did"
+[ ! -e "$SLOT2/BRANCH" ] || fail "free kept the BRANCH file"
+[ -n "$(slot2_live)" ] || fail "free removed the slot's site"
+grep -q $'\tfree@s2\t' "$SLOT2/deploy.log" || fail "free is not in the slot's deploy.log"
+deploy fixture@s2 free | grep -q "fixture@s2 is already free" || fail "freeing a free slot does not say so"
+deploy fixture stage feature/y > "$WORK/stage.log"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage feature/y did not pick the free s2"
+[ "$(cat "$SLOT2/current/VERSION")" = "feature y" ] || fail "s2 does not run feature/y"
+deploy fixture slots | grep -qE "^s2 +feature/y " || fail "slots does not show s2 on feature/y"
+check "stage reused s1 and s2, failed while both were busy, and took s2 once free freed it"
+
+step "slots update redeploys moved branches, skips gone ones, and goes on after a failure"
+s1_before="$(slot_live)"
+printf 'feature y two\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature y two"
+git -C "$WORK/feature" push --quiet origin feature/y
+deploy fixture slots update > "$WORK/update.log"
+cat "$WORK/update.log"
+[ "$(slot_live)" = "$s1_before" ] || fail "slots update rebuilt an unchanged s1"
+[ "$(cat "$SLOT2/current/VERSION")" = "feature y two" ] || fail "slots update did not redeploy s2"
+grep -qE "^s1 +feature/x +unchanged$" "$WORK/update.log" || fail "the summary does not show s1 unchanged"
+grep -qE "^s2 +feature/y +updated, [0-9a-f]{7,} to [0-9a-f]{7,}$" "$WORK/update.log" || fail "the summary does not show s2 updated"
+if grep -q '◇' "$WORK/update.log"; then
+    fail "slots update drew rails without a terminal"
+fi
+
+# s1 moves but cannot deploy; s2's branch is deleted.
+git -C "$WORK/feature" checkout --quiet feature/x
+printf 'feature three\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature three"
+git -C "$WORK/feature" push --quiet origin feature/x
+git -C "$WORK/feature" push --quiet origin --delete feature/y
+mv "$SLOT/shared/.env" "$WORK/s1.env"
+deploy fixture slots > "$WORK/slots.log"
+cat "$WORK/slots.log"
+grep -qE "^s2 +feature/y \(gone\) +[0-9a-f]{7,} " "$WORK/slots.log" || fail "slots does not mark the deleted feature/y"
+grep -qE "^s1 +feature/x +[0-9a-f]{7,} " "$WORK/slots.log" || fail "slots marks feature/x"
+REPO_URL="file://$WORK/nope.git" deploy fixture slots | grep -qE "^s2 +feature/y +[0-9a-f]{7,} " \
+    || fail "slots marks a branch gone when the repo cannot be read"
+printf 'pr/8\n' > "$SLOT2/BRANCH"
+deploy fixture slots | grep -qE "^s2 +PR #8 \(gone\) " || fail "slots does not mark a missing PR"
+printf 'feature/y\n' > "$SLOT2/BRANCH"
+if deploy fixture slots update > "$WORK/update.log" 2>&1; then
+    fail "slots update succeeded with a failing slot"
+fi
+cat "$WORK/update.log"
+mv "$WORK/s1.env" "$SLOT/shared/.env"
+grep -qE "^s1 +feature/x +failed$" "$WORK/update.log" || fail "the summary does not show s1 failed"
+grep -qE "^s2 +feature/y +branch gone$" "$WORK/update.log" || fail "the summary does not show s2 branch gone"
+grep -q "1 slot(s) failed to update" "$WORK/update.log" || fail "no message for the failed slot"
+[ "$(slot_live)" = "$s1_before" ] || fail "the failed s1 changed its release"
+[ "$(cat "$SLOT2/BRANCH")" = feature/y ] || fail "slots update freed s2"
+[ ! -e "$SLOT/.deploy.lock" ] && [ ! -e "$SLOT2/.deploy.lock" ] || fail "slots update left a lock behind"
+deploy fixture slots update > "$WORK/update.log"
+grep -qE "^s1 +feature/x +updated, " "$WORK/update.log" || fail "s1 did not update once fixed"
+grep -qE "^s2 +feature/y +branch gone$" "$WORK/update.log" || fail "a gone branch failed slots update"
+check "slots update redeployed only moved branches, skipped and kept the gone feature/y, and went on past a failing s1"
+
+step "stage reuses a slot whose branch is gone when none is free"
+git -C "$WORK/feature" checkout --quiet -b feature/z develop
+printf 'feature z\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature z"
+git -C "$WORK/feature" push --quiet origin feature/z
+deploy fixture stage feature/z > "$WORK/stage.log"
+cat "$WORK/stage.log"
+grep -q "fixture@s2 follows feature/y, which is gone from the repo, so it takes feature/z" "$WORK/stage.log" \
+    || fail "stage does not say which gone branch it replaces"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage feature/z did not take s2"
+[ "$(cat "$SLOT2/current/VERSION")" = "feature z" ] || fail "s2 does not run feature/z"
+deploy fixture@s2 free > /dev/null
+deploy fixture slots update > "$WORK/update.log"
+grep -qE "^s2 +free +skipped$" "$WORK/update.log" || fail "the summary does not skip the free s2"
+check "stage took s2 from the gone feature/y; slots update skips a free slot"
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

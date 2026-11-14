@@ -113,8 +113,14 @@ deploy [project] [command]
   path [--base]     Print the full path of the live release, and nothing else, to copy or use
                     in `cd "$(deploy path <project>)"`. --base prints DEPLOY_BASE instead.
                     Fails if there is no live release. Also works as `deploy path <project>`
-  slots             One line per staging slot: its branch (PR #N, or free), live commit,
-                    deploy time and URL
+  slots             One line per staging slot: its branch (PR #N, or free; `(gone)` when the
+                    repo no longer has it), live commit, deploy time and URL
+  slots update      Redeploy each slot whose branch has new commits; skip a slot whose branch
+                    is gone. For cron (see [Staging](#staging))
+  stage <branch>    Deploy a branch to the slot that already follows it, else to the first free
+                    slot, else to one whose branch is gone, and print its URL last. Also
+                    `stage --pr <number>`
+  free              On a staging slot only: forget its branch, so `stage` can use the slot
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
@@ -292,6 +298,32 @@ release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), an
 `PR #281`. `--pr` is refused on production, and together with `--branch` or `--ref`. Neither
 `--pr` nor `--ref` waits for a release tag.
 
+### Sharing the slots
+
+`deploy example stage feature/login` picks a slot for you: the one that already follows
+`feature/login`, else the first free one (no `BRANCH` file). It deploys the branch there, as
+`deploy example@sN --branch feature/login` would, and prints the slot's URL as the last line.
+`deploy example stage --pr 281` does the same for a pull request. With no free slot, it takes the
+first slot whose branch is gone from the repo, and says which branch it replaces. When all slots
+are busy, it fails and shows the `slots` list.
+
+`deploy example@s1 free` forgets the slot's branch, so `stage` can use it again. The site and its
+releases stay until then. It takes the slot's lock, so it never runs during a deploy of the slot.
+
+`slots` marks a branch the repo no longer has (deleted after the merge) as `feature/x (gone)` or
+`PR #7 (gone)`, from one `git ls-remote` for all slots. When the repo cannot be read, it marks
+nothing.
+
+`deploy example slots update` redeploys each slot whose branch or PR head has new commits; a slot
+with nothing new is left as it is. A slot whose branch is gone is skipped and keeps its branch
+until `free` or `stage` reuses it; that is not a failure. A failing slot does not stop the others,
+but the run exits with 1. It ends with one line per slot: `updated`, `unchanged`, `branch gone`,
+`failed`, or `skipped` for a free slot. Run it from cron to keep the slots up to date:
+
+```cron
+*/5 * * * * $HOME/release-switch/deploy example slots update > /dev/null
+```
+
 The steps of `deploy.conf` see `DEPLOY_SLOT` (`s1`, empty in production) and `DEPLOY_HOST` (the
 host of the check URL, like `s1.example.com`), e.g. to skip a step on staging:
 
@@ -393,7 +425,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
-`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, and that shared
+`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free` and `slots update`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

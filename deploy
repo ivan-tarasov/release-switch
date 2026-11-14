@@ -5,7 +5,8 @@
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait]
 #                     | freeze [reason]
 #                     | unfreeze | status | check | log [count] | path [--base] | rollback [name]
-#                     | init <checkout> [--dry-run] | slots | help]
+#                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
+#                     | free | help]
 #   deploy self-update | self [log [count]] | --version
 
 set -euo pipefail
@@ -1737,8 +1738,8 @@ check() {
     return "$CHECK_FAILED"
 }
 
-# One tab-separated row for `slots`: slot $1, its branch, live sha, deploy time and URL. Changes the
-# settings to the slot's, so it runs in a subshell.
+# One tab-separated row for `slots`: slot $1, its branch, live sha, deploy time and URL. The branch
+# gets "(gone)" when $2 is 1. Changes the settings to the slot's, so it runs in a subshell.
 slot_row() {
     local live="" sha="-" time="-"
 
@@ -1753,20 +1754,72 @@ slot_row() {
     fi
 
     [ -z "$SLOT_PR" ] || SLOT_BRANCH="PR #$SLOT_PR"
+    [ "${2:-0}" -eq 0 ] || SLOT_BRANCH="$SLOT_BRANCH (gone)"
     printf '%s\t%s\t%s\t%s\t%s\n' "$DEPLOY_SLOT" "${SLOT_BRANCH:-free}" "$sha" "$time" "$(redact "${CHECK_URL:--}")"
+}
+
+# For commands on all slots of a project ($1: slots, stage, ...): refuses a slot name and a
+# project without slots.
+require_slots() {
+    [ -z "$DEPLOY_SLOT" ] || fail "$1 works on the whole project, not one slot: deploy ${PROJECT%@*} $1"
+    [ -n "$PROJECT" ] || fail "name a project: deploy <project> $1"
+    [ "$STAGING_SERVERS" -gt 0 ] \
+        || fail "$PROJECT has no staging slots (set STAGING_SERVERS in $PROJECTS_DIR/$PROJECT.env)"
+}
+
+# The remote ref of slot branch $1: refs/pull/<N>/head for pr/<N>, else refs/heads/<name>.
+slot_ref() {
+    if is_pr_branch "$1"; then
+        printf 'refs/pull/%s/head' "${1#pr/}"
+    else
+        printf 'refs/heads/%s' "$1"
+    fi
+}
+
+# Reads the branch of each slot into SLOT_BRANCHES (s1 first, empty when free), and sets SLOT_GONE
+# to 1 for each one the repo no longer has. One git ls-remote for all; when it cannot read the repo,
+# no branch counts as gone.
+read_slot_branches() {
+    local i branch refs=() found repo
+    SLOT_BRANCHES=()
+    SLOT_GONE=()
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        branch="$(DEPLOY_SLOT="s$i" && apply_slot && printf '%s' "$SLOT_BRANCH")"
+        SLOT_BRANCHES+=("$branch")
+        [ -z "$branch" ] || refs+=("$(slot_ref "$branch")")
+    done
+
+    repo="${REPO_URL:-$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null || true)}"
+
+    if [ ${#refs[@]} -eq 0 ] || [ -z "$repo" ] \
+        || ! found="$(git ls-remote "$repo" "${refs[@]}" 2>/dev/null | cut -f2)"; then
+        found=""
+        repo=""
+    fi
+
+    for branch in "${SLOT_BRANCHES[@]}"; do
+        if [ -z "$branch" ] || [ -z "$repo" ]; then
+            SLOT_GONE+=(0)
+            continue
+        fi
+
+        case $'\n'"$found"$'\n' in
+            *$'\n'"$(slot_ref "$branch")"$'\n'*) SLOT_GONE+=(0) ;;
+            *) SLOT_GONE+=(1) ;;
+        esac
+    done
 }
 
 # One row per staging slot. Each runs in a subshell, so one slot's settings never leak into the next.
 show_slots() {
     local i rows=""
 
-    [ -z "$DEPLOY_SLOT" ] || fail "slots lists every slot of a project: deploy ${PROJECT%@*} slots"
-    [ -n "$PROJECT" ] || fail "name a project: deploy <project> slots"
-    [ "$STAGING_SERVERS" -gt 0 ] \
-        || fail "$PROJECT has no staging slots (set STAGING_SERVERS in $PROJECTS_DIR/$PROJECT.env)"
+    require_slots slots
+    read_slot_branches
 
     for ((i = 1; i <= STAGING_SERVERS; i++)); do
-        rows+="$(slot_row "s$i")"$'\n'
+        rows+="$(slot_row "s$i" "${SLOT_GONE[$((i - 1))]}")"$'\n'
     done
 
     rows="$(printf 'SLOT\tBRANCH\tLIVE\tDEPLOYED\tURL\n%s' "$rows")"
@@ -1776,6 +1829,154 @@ show_slots() {
     else
         printf '%s\n' "$rows"
     fi
+}
+
+# Deploys a branch (or --pr <N>) to the slot that already follows it, else to the first free slot,
+# else to the first slot whose branch is gone from the repo. Then prints the slot's URL last.
+stage() {
+    local branch="" pr="" want i slot="" free="" gone="" usage="usage: deploy <project> stage <branch> | --pr <number>"
+
+    require_slots stage
+
+    case "${1:-}" in
+        --pr) pr="${2:-}" && shift ;;
+        --pr=*) pr="${1#--pr=}" ;;
+        -*) fail "$usage" ;;
+        *) branch="${1:-}" ;;
+    esac
+    [ $# -le 1 ] && [ -n "$branch$pr" ] || fail "$usage"
+    [ -z "$pr" ] || [[ "$pr" =~ ^[1-9][0-9]*$ ]] || fail "--pr takes a pull request number, not '$pr'"
+    want="${branch:-pr/$pr}"
+    read_slot_branches
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        if [ "${SLOT_BRANCHES[$((i - 1))]}" = "$want" ]; then
+            slot="s$i"
+            break
+        elif [ -z "${SLOT_BRANCHES[$((i - 1))]}" ]; then
+            [ -n "$free" ] || free="s$i"
+        elif [ "${SLOT_GONE[$((i - 1))]}" -eq 1 ]; then
+            [ -n "$gone" ] || gone="s$i"
+        fi
+    done
+
+    if [ -z "$slot$free" ] && [ -n "$gone" ]; then
+        say "No free slot; $PROJECT@$gone follows ${SLOT_BRANCHES[$((${gone#s} - 1))]}, which is gone from the repo, so it takes $want"
+    fi
+
+    slot="${slot:-${free:-$gone}}"
+
+    if [ -z "$slot" ]; then
+        show_slots | rail >&2
+        fail "all $STAGING_SERVERS slots are busy; free one first: deploy $PROJECT@sN free"
+    fi
+
+    DEPLOY_SLOT="$slot"
+    apply_slot
+
+    if [ -n "$pr" ]; then
+        deploy --pr "$pr"
+    else
+        deploy --branch "$branch"
+    fi
+
+    if [ "$RAILS" -eq 1 ]; then
+        say "$PROJECT: $(redact "$CHECK_URL")"
+    else
+        redact "$CHECK_URL"
+        printf '\n'
+    fi
+}
+
+# Forgets the branch of the slot; its site and releases stay until the slot is used again.
+free_slot() {
+    local followed
+
+    if [ ! -f "$DEPLOY_BASE/BRANCH" ]; then
+        say "$PROJECT is already free"
+
+        return
+    fi
+
+    resolve_base
+    acquire_lock free
+    # Read again under the lock: a deploy may have changed it since.
+    followed="$(cat "$DEPLOY_BASE/BRANCH" 2>/dev/null || true)"
+    ! is_pr_branch "$followed" || followed="PR #${followed#pr/}"
+
+    rm -f "$DEPLOY_BASE/BRANCH"
+    log_event free "$(current_release)" "ok, was ${followed:-nothing}"
+    say "$PROJECT is free now (it followed ${followed:-nothing}); its site and releases stay until the slot is used again"
+}
+
+# Deploys slot $1 for `slots update`, in a subshell of its own. A plain deploy skips a branch with
+# nothing new.
+slot_update() {
+    # A subshell does not keep the traps, and on_exit must free the slot's lock.
+    trap on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    INTRO=0
+    DEPLOY_SLOT="$1"
+    apply_slot
+    deploy
+}
+
+# Redeploys every slot whose branch has new commits, for cron. A slot whose branch is gone from the
+# repo is skipped. A failing slot does not stop the others, but the run then exits with 1.
+slots_update() {
+    local i slot label before after code result rows="" failed=0
+
+    require_slots "slots update"
+    read_slot_branches
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        slot="s$i"
+        IFS=$'\t' read -r _ label before _ <<< "$(slot_row "$slot")"
+
+        if [ "$label" = free ]; then
+            rows+="$slot"$'\t'"free"$'\t'"skipped"$'\n'
+            continue
+        fi
+
+        if [ "${SLOT_GONE[$((i - 1))]}" -eq 1 ]; then
+            warn "$PROJECT@$slot: $label is gone from the repo; skipped (deploy $PROJECT@$slot free, or stage another branch)"
+            rows+="$slot"$'\t'"$label"$'\t'"branch gone"$'\n'
+            continue
+        fi
+
+        say "Updating $PROJECT@$slot ($label)"
+        set +e
+        (
+            set -e
+            slot_update "$slot"
+        )
+        code=$?
+        set -e
+        IFS=$'\t' read -r _ _ after _ <<< "$(slot_row "$slot")"
+
+        if [ "$code" -ne 0 ]; then
+            result="failed"
+            failed=$((failed + 1))
+        elif [ "$before" = "$after" ]; then
+            result="unchanged"
+        else
+            result="updated, $before to $after"
+        fi
+
+        rows+="$slot"$'\t'"$label"$'\t'"$result"$'\n'
+    done
+
+    say "Summary"
+
+    if command -v column > /dev/null; then
+        printf '%s' "$rows" | column -t -s $'\t' | rail
+    else
+        printf '%s' "$rows" | rail
+    fi
+
+    [ "$failed" -eq 0 ] || fail "$failed slot(s) failed to update"
 }
 
 check_all() {
@@ -1981,8 +2182,17 @@ Commands:
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
                              it, like the sha or tag)
-  slots                      One line per staging slot: its branch (PR #N, or free), live commit,
-                             deploy time and URL
+  slots                      One line per staging slot: its branch (PR #N, or free; "(gone)" when
+                             the repo no longer has it), live commit, deploy time and URL
+  slots update               Redeploy each slot whose branch has new commits, for cron. Skips a
+                             slot whose branch is gone from the repo. Exits with 1 if any slot
+                             failed
+  stage <branch>, stage --pr <number>
+                             Deploy to the slot that already follows it, else to the first free
+                             one, else to one whose branch is gone, and print the slot's URL
+                             last. Fails when all slots are busy
+  free                       On a slot only: forget its branch, so stage can use it. The site
+                             and releases stay until the slot is used again
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
   self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
@@ -2087,8 +2297,11 @@ main() {
     esac
 
     case "$command" in
-        deploy | freeze | unfreeze | down | up | rollback | init)
+        deploy | freeze | unfreeze | down | up | rollback | init | stage | free)
             intro "${PROJECT:+$PROJECT · }$command"
+            ;;
+        slots)
+            [ "${2:-}" != update ] || intro "${PROJECT:+$PROJECT · }slots update"
             ;;
     esac
 
@@ -2128,7 +2341,19 @@ main() {
             show_path "${2:-}"
             ;;
         slots)
-            report "${PROJECT:+$PROJECT · }slots" show_slots
+            case "${2:-}" in
+                "") report "${PROJECT:+$PROJECT · }slots" show_slots ;;
+                update) slots_update ;;
+                *) fail "unknown command: deploy ${PROJECT:-<project>} slots $2 (try: slots, slots update)" ;;
+            esac
+            ;;
+        stage)
+            shift
+            stage "$@"
+            ;;
+        free)
+            [ -n "$DEPLOY_SLOT" ] || fail "free works on one slot: deploy ${PROJECT:-<project>}@sN free"
+            free_slot
             ;;
         rollback)
             rollback "${2:-}"

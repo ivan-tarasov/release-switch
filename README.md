@@ -121,6 +121,10 @@ deploy [project] [command]
                     slot, else to one whose branch is gone, and print its URL last. Also
                     `stage --pr <number>`
   free              On a staging slot only: forget its branch, so `stage` can use the slot
+  copy-from <project> [--yes] [path ...]
+                    On a staging slot only: copy production's `SHARED` data into the slot,
+                    every path but `.env`, or only the named ones. Asks first; `--yes` skips
+                    the question (see [Staging](#staging))
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
@@ -325,6 +329,25 @@ but the run exits with 1. It ends with one line per slot: `updated`, `unchanged`
 */5 * * * * $HOME/release-switch/deploy example slots update > /dev/null
 ```
 
+### Copying production data
+
+`deploy example@s1 copy-from example` copies production's data into the slot: each `SHARED` path
+from production's `shared/` into the slot's `shared/`, except `.env` (and any `*.env` or `.env.*`),
+so the slot keeps its own settings. Name paths to copy only those:
+`deploy example@s1 copy-from example database/database.sqlite`. Each must be in `SHARED`, and
+`.env` is always refused. `SHARED` comes from the slot's live `deploy.conf`, or production's when
+the slot has no live release yet; the output says which.
+
+It lists what it will copy, with sizes, and asks `y/N` first. `--yes` skips the question; without a
+terminal (a pipe or cron) `--yes` is required. It copies from production of the same project only,
+never from another project or a slot, and never into production. Production's files are only read.
+It holds the slot's lock for the whole copy. Each path is copied to a temp name next to it and then
+renamed into place, so a failed copy never leaves half a file; a path missing in production keeps
+the slot's own, with a warning. The slot's `deploy.log` gets a `copy-from` line.
+
+A SQLite file is a safe copy only while production is idle: a write during the copy can leave the
+copy broken. For MySQL or Postgres this copies files only (like `storage/`), not the database.
+
 The steps of `deploy.conf` see `DEPLOY_SLOT` (`s1`, empty in production) and `DEPLOY_HOST` (the
 host of the check URL, like `s1.example.com`), e.g. to skip a step on staging:
 
@@ -426,7 +449,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
-`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free` and `slots update`, and that shared
+`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

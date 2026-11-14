@@ -711,6 +711,67 @@ deploy fixture log 1 > "$WORK/missing-log.log"
 [ -n "$(sed -nE "/rollback +$back +ok, from $hung /p" "$WORK/missing-log.log")" ] || fail "the log does not say the rollback was ok"
 check "rolled back from the missing $hung to $back, checked the site and logged ok"
 
+# Starts a deploy with a slow build, waits until the build runs, then kills it with SIGKILL, like
+# CloudLinux limits or the OOM killer. Sets KILLED to the half-built release left behind.
+kill_build() {
+    local pid sub tries=40
+
+    rm -f "$WORK/slow.pid"
+    env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 FIXTURE_SLOW_BUILD="$WORK/slow.pid" \
+        "$ROOT/deploy" fixture --force > "$WORK/killed.log" 2>&1 &
+    pid=$!
+    until [ -s "$WORK/slow.pid" ]; do
+        tries=$((tries - 1))
+        [ "$tries" -gt 0 ] || fail "the slow build did not start"
+        sleep 0.5
+    done
+    sub="$(cat "$WORK/slow.pid")"
+    kill -9 "$pid"
+    # The build step runs in a subshell, which a real SIGKILL of the whole job takes down too.
+    pkill -9 -P "$sub" 2>/dev/null || true
+    kill -9 "$sub" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    KILLED="$(find "$BASE/releases" -mindepth 2 -maxdepth 2 -name .building -exec dirname {} \; | sed 's#.*/##')"
+    [ -n "$KILLED" ] || fail "a killed build left no release with .building in it"
+}
+
+step "A build killed with SIGKILL is never listed, and the next rollback or deploy removes it"
+before="$(live_release)"
+sleep 1
+kill_build
+[ "$(live_release)" = "$before" ] || fail "a killed build changed the live release"
+deploy fixture status > "$WORK/killed-status.log" 2>&1 || true
+if grep -qF "$KILLED" "$WORK/killed-status.log"; then
+    fail "status lists the killed build $KILLED"
+fi
+if deploy fixture rollback "$KILLED" > "$WORK/killed-rollback.log" 2>&1; then
+    fail "rollback switched to the killed build $KILLED"
+fi
+grep -q "no release matches '$KILLED'" "$WORK/killed-rollback.log" || fail "rollback to $KILLED gave no clear error"
+grep -q "Removing unfinished build $KILLED" "$WORK/killed-rollback.log" || fail "rollback did not remove $KILLED"
+[ ! -e "$BASE/releases/$KILLED" ] || fail "rollback left the killed build $KILLED"
+[ "$(live_release)" = "$before" ] || fail "rollback to a killed build changed the live release"
+check "the killed build $KILLED was not listed, rollback refused it and removed it"
+
+sleep 1
+kill_build
+mkdir "$BASE/releases/.building-20260101-000000"
+sleep 1
+deploy fixture --force > "$WORK/after-kill.log" 2>&1 || fail "the deploy after a killed build failed"
+grep -q "Removing unfinished build $KILLED" "$WORK/after-kill.log" || fail "the deploy did not say it removed $KILLED"
+grep -q "Removing unfinished build .building-20260101-000000" "$WORK/after-kill.log" \
+    || fail "the deploy did not remove a leftover clone"
+[ ! -e "$BASE/releases/$KILLED" ] && [ ! -e "$BASE/releases/.building-20260101-000000" ] \
+    || fail "the deploy left an unfinished build behind"
+after="$(live_release)"
+[ "$after" != "$before" ] && [ "$after" != "$KILLED" ] || fail "the deploy after a killed build did not switch"
+[ "$(cat "$BASE/releases/$after/RELEASE")" = "$after" ] || fail "RELEASE of $after does not hold its name"
+[ "$(cat "$BASE/releases/$after/built_path")" = "$BASE/releases/$after" ] \
+    || fail "the build of $after ran in $(cat "$BASE/releases/$after/built_path"), not under its final name"
+[ ! -e "$BASE/releases/$after/.building" ] || fail "$after still has .building after the switch"
+serves "$after" || fail "server does not show $after"
+check "the next deploy removed the leftovers and built $after under its final name"
+
 step "KEEP_RELEASES below 2 or not a number, and CHECK_WAIT not a number, are refused"
 releases_now="$(release_count)"
 if KEEP_RELEASES=1 deploy fixture --force > /dev/null 2> "$WORK/keep.log"; then

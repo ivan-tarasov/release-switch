@@ -675,12 +675,38 @@ show_path() {
 
 # Oldest first. Sorts on the timestamp digits alone, so older names without the dash
 # (20261105171708-<sha>) mix with newer ones (20261105-171708-<tag>-<sha>).
+# Skips unfinished builds: .building-* folders and releases that still hold BUILDING_FILE.
 list_releases() {
+    local name
+
     if [ -d "$DEPLOY_BASE/releases" ]; then
         find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; \
+            | while IFS= read -r name; do
+                [ -e "$DEPLOY_BASE/releases/$name/$BUILDING_FILE" ] || printf '%s\n' "$name"
+            done \
             | awk '{ key = $0; sub(/^[0-9]{8}-/, substr($0, 1, 8), key); print substr(key, 1, 14) "\t" $0 }' \
             | sort | cut -f2
     fi
+}
+
+# A deploy builds a release under its final name with this file in it, and removes the file
+# right before the switch. Laravel caches (config:cache, view:cache) keep absolute paths, so the
+# folder is never renamed after the build. A build killed hard (SIGKILL, OOM) keeps the file.
+BUILDING_FILE=".building"
+
+# Removes builds that a killed deploy left: .building-<stamp> clones and releases that still
+# hold BUILDING_FILE. Only under the lock, so no running deploy owns them.
+remove_unfinished() {
+    local dir live
+    live="$(current_release)"
+
+    for dir in "$DEPLOY_BASE"/releases/.building-* "$DEPLOY_BASE"/releases/*/"$BUILDING_FILE"; do
+        [ -e "$dir" ] || continue
+        [ "${dir##*/}" != "$BUILDING_FILE" ] || dir="${dir%/*}"
+        [ "${dir##*/}" != "$live" ] || continue
+        say "Removing unfinished build ${dir##*/}"
+        rm -rf "$dir"
+    done
 }
 
 # A plain rollback leaves this file in the release it leaves, so the next one skips it.
@@ -1240,33 +1266,35 @@ deploy() {
     stamp="$(date -u +%Y%m%d-%H%M%S)"
 
     say "Cloning ${ref:-$(branch_label)}"
-    NEW_RELEASE="$stamp"
+    # Under the lock, so any .building-* folder or BUILDING_FILE left is from a killed run.
+    remove_unfinished
+    NEW_RELEASE=".building-$stamp"
 
     if [ -z "$ref" ] && [ -n "$SLOT_PR" ]; then
         # A clone never fetches refs/pull/*, so the head is fetched on its own. Errors are redacted.
-        if ! err="$({ git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" \
-            && git -C "$DEPLOY_BASE/releases/$stamp" fetch --quiet origin "$(branch_ref)" \
-            && git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach FETCH_HEAD; } 2>&1)"; then
+        if ! err="$({ git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" \
+            && git -C "$DEPLOY_BASE/releases/.building-$stamp" fetch --quiet origin "$(branch_ref)" \
+            && git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach FETCH_HEAD; } 2>&1)"; then
             [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
             fail "could not fetch PR #$SLOT_PR from $REPO_URL"
         fi
     elif [ -z "$ref" ]; then
         # Git may print the URL with its token, so its errors are shown redacted.
-        if ! err="$(git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>&1)"; then
+        if ! err="$(git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>&1)"; then
             [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
             fail "could not clone $REPO_URL"
         fi
     else
         # Any tag, branch or commit: the whole history, with file contents fetched on checkout.
-        git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>/dev/null \
+        git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>/dev/null \
             || fail "could not clone $REPO_URL"
-        git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach "$ref" 2>/dev/null \
-            || git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach "origin/$ref" 2>/dev/null \
+        git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "$ref" 2>/dev/null \
+            || git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "origin/$ref" 2>/dev/null \
             || fail "no tag, branch or commit $ref in the repo"
 
         if [ "$force" -eq 0 ] && [ -n "$live_sha" ] \
-            && [ "$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse HEAD)" = "$live_sha" ]; then
-            rm -rf "${DEPLOY_BASE:?}/releases/$stamp"
+            && [ "$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse HEAD)" = "$live_sha" ]; then
+            rm -rf "${DEPLOY_BASE:?}/releases/.building-$stamp"
             NEW_RELEASE=""
             say "$PREVIOUS_RELEASE already runs $ref"
             say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--ref $ref --force"
@@ -1274,19 +1302,20 @@ deploy() {
             return
         fi
     fi
-    sha="$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse --short HEAD)"
+    sha="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse --short HEAD)"
 
     if [ -z "$ref" ] && [ -n "$SLOT_PR" ]; then
         TAG="pr$SLOT_PR"
     else
         # A named ref is picked by hand: it keeps its tag in the name, but never waits for one.
         [ -z "$ref" ] || no_wait=1
-        wait_release_tag "$DEPLOY_BASE/releases/$stamp" "$no_wait"
+        wait_release_tag "$DEPLOY_BASE/releases/.building-$stamp" "$no_wait"
     fi
 
     NEW_RELEASE="$stamp${TAG:+-$TAG}-$sha"
     LOG_RELEASE="$NEW_RELEASE"
-    mv "$DEPLOY_BASE/releases/$stamp" "$DEPLOY_BASE/releases/$NEW_RELEASE"
+    touch "$DEPLOY_BASE/releases/.building-$stamp/$BUILDING_FILE"
+    mv "$DEPLOY_BASE/releases/.building-$stamp" "$DEPLOY_BASE/releases/$NEW_RELEASE"
     RELEASE_DIR="$DEPLOY_BASE/releases/$NEW_RELEASE"
     RELEASE_NAME="$NEW_RELEASE"
     export RELEASE_DIR RELEASE_NAME
@@ -1310,6 +1339,7 @@ deploy() {
     done
 
     STAGE=switch
+    rm -f "$RELEASE_DIR/$BUILDING_FILE"
     say "Switching current to $NEW_RELEASE"
     switch_to "$NEW_RELEASE"
 
@@ -1344,6 +1374,7 @@ rollback() {
     refuse_if_frozen
     require_check_url
     acquire_lock rollback
+    remove_unfinished
 
     local live target
     live="$(current_release)"

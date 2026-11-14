@@ -24,8 +24,10 @@ Each project has a base folder on the server:
    60 seconds (a deploy died while taking it). The removal is safe when two deploys race for it;
 3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
    out (`--force` builds it anyway);
-4. clones the newest commit of the branch into a new release folder, and writes its name to
-   `RELEASE` in the release root. A commit under 5 minutes old with no release tag yet, in a repo
+4. clones the newest commit of the branch into `releases/.building-<stamp>`, renames it to its
+   final name with a `.building` file in it, and writes its name to `RELEASE` in the release root.
+   The build runs under the final name, as Laravel caches keep absolute paths; the `.building`
+   file goes right before the switch. A commit under 5 minutes old with no release tag yet, in a repo
    that has release tags, waits up to `RELEASE_WAIT` seconds for its tag (see below);
 5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
@@ -39,7 +41,8 @@ Each project has a base folder on the server:
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cleans up the same
-way and exits with 130, 143 or 129. Once `current` points at the new release, it is never deleted:
+way and exits with 130, 143 or 129. A build killed hard (SIGKILL, OOM) keeps its `.building` mark:
+it is never listed or rolled back to, and the next deploy or rollback removes it. Once `current` points at the new release, it is never deleted:
 it stays live, and the log says at which stage the deploy stopped.
 Migrations and other data changes are not undone by a switch back or a rollback.
 Every deploy and rollback, and how it ended, goes to `deploy.log` (see `deploy <project> log`).

@@ -15,6 +15,7 @@ BASE="$WORK/base"
 OLD="$WORK/old"
 REPO="$WORK/remote.git"
 SERVER_PID=""
+STALL_PID=""
 
 cleanup() {
     # The workers are children of the server; they outlive it if only it is killed.
@@ -22,6 +23,8 @@ cleanup() {
         pkill -P "$SERVER_PID" 2>/dev/null || true
         kill "$SERVER_PID" 2>/dev/null || true
     fi
+
+    [ -z "$STALL_PID" ] || kill "$STALL_PID" 2>/dev/null || true
 
     # DEPLOY_TEST_KEEP=1 keeps the temp folder for a look after a failure.
     if [ -z "${DEPLOY_TEST_KEEP:-}" ]; then
@@ -710,6 +713,114 @@ serves "$back" || fail "server does not show $back"
 deploy fixture log 1 > "$WORK/missing-log.log"
 [ -n "$(sed -nE "/rollback +$back +ok, from $hung /p" "$WORK/missing-log.log")" ] || fail "the log does not say the rollback was ok"
 check "rolled back from the missing $hung to $back, checked the site and logged ok"
+
+step "A step past STEP_TIMEOUT fails the deploy, stops all it started and frees the lock"
+before="$(live_release)"
+sleep 1
+rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep"
+started="$(date +%s)"
+if STEP_TIMEOUT=2 FIXTURE_SLOW_BUILD="$WORK/slow.pid" deploy fixture --force > /dev/null 2> "$WORK/timeout.log"; then
+    fail "a build past STEP_TIMEOUT succeeded"
+fi
+cat "$WORK/timeout.log"
+[ $(($(date +%s) - started)) -lt 15 ] || fail "the timeout took $(($(date +%s) - started)) s"
+grep -q "build ran past STEP_TIMEOUT (2 s)" "$WORK/timeout.log" || fail "no clear message for the timeout"
+grep -q "failed before the switch; $before is still live" "$WORK/timeout.log" || fail "no word that $before is still live"
+[ "$(live_release)" = "$before" ] || fail "a timed out build changed the live release"
+[ ! -d "$BASE/.deploy.lock" ] || fail "a timed out build left the lock behind"
+[ -s "$WORK/slow.pid.sleep" ] || fail "the slow build did not start its sleep"
+if kill -0 "$(cat "$WORK/slow.pid")" 2>/dev/null || kill -0 "$(cat "$WORK/slow.pid.sleep")" 2>/dev/null; then
+    fail "the timed out build or its sleep still runs"
+fi
+if STEP_TIMEOUT=1 FIXTURE_SLOW_BUILD="$WORK/slow.pid" DEPLOY_RAILS=1 deploy fixture --force > /dev/null 2> "$WORK/timeout.log"; then
+    fail "a build past STEP_TIMEOUT succeeded on the rails"
+fi
+grep -q "^■  build ran past STEP_TIMEOUT (1 s)$" "$WORK/timeout.log" || fail "the timeout is not marked on the rails"
+kill -0 "$(cat "$WORK/slow.pid.sleep")" 2>/dev/null && fail "the timed out build on the rails left its sleep"
+STEP_TIMEOUT=0 FIXTURE_BUILD_SLEEP=2 deploy fixture --force > /dev/null || fail "STEP_TIMEOUT=0 stopped a build"
+[ "$(live_release)" != "$before" ] || fail "the deploy with STEP_TIMEOUT=0 did not switch"
+if STEP_TIMEOUT=10m deploy fixture --force > /dev/null 2> "$WORK/timeout.log"; then
+    fail "STEP_TIMEOUT=10m was not refused"
+fi
+grep -q "STEP_TIMEOUT must be a whole number of seconds, not '10m'" "$WORK/timeout.log" || fail "no message for STEP_TIMEOUT=10m"
+if STEP_TIMEOUT=1 FIXTURE_HEALTH_SLEEP=5 DEPLOY_RAILS=1 deploy fixture check > "$WORK/timeout.log" 2>&1; then
+    fail "check passed with a health() past STEP_TIMEOUT"
+fi
+grep -q "health: ran past STEP_TIMEOUT (1 s)$" "$WORK/timeout.log" || fail "check does not report the slow health()"
+check "a slow build failed after STEP_TIMEOUT with its sleep stopped, also on the rails; 0 is no limit; a bad value and a slow health() are reported"
+
+step "A TERM during a step stops the step and its watchdog"
+sleep 1
+rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep"
+# An odd STEP_TIMEOUT, so the watchdog's sleep is easy to find.
+env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 STEP_TIMEOUT=97 FIXTURE_SLOW_BUILD="$WORK/slow.pid" \
+    "$ROOT/deploy" fixture --force > /dev/null 2>&1 &
+pid=$!
+tries=40
+until [ -s "$WORK/slow.pid.sleep" ]; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "the slow build did not start"
+    sleep 0.5
+done
+kill -TERM "$pid"
+code=0
+wait "$pid" || code=$?
+[ "$code" = 143 ] || fail "TERM during a step exited with $code, not 143"
+kill -0 "$(cat "$WORK/slow.pid.sleep")" 2>/dev/null && fail "TERM left the step's sleep running"
+pgrep -f "sleep 97" > /dev/null && fail "TERM left the watchdog running"
+[ ! -d "$BASE/.deploy.lock" ] || fail "TERM during a step left the lock behind"
+STEP_TIMEOUT=97 deploy fixture --force > /dev/null || fail "a deploy with STEP_TIMEOUT=97 failed"
+pgrep -f "sleep 97" > /dev/null && fail "a good deploy left a watchdog running"
+check "TERM stopped the step and its watchdog and freed the lock; a good deploy leaves no watchdog"
+
+step "A slow PHP_RELOAD_CMD only warns"
+sleep 1
+started="$(date +%s)"
+STEP_TIMEOUT=3 PHP_RELOAD_CMD="sleep 20" deploy fixture --force > /dev/null 2> "$WORK/reload.log" \
+    || fail "a slow PHP_RELOAD_CMD failed the deploy"
+[ $(($(date +%s) - started)) -lt 15 ] || fail "the slow PHP_RELOAD_CMD held the deploy for $(($(date +%s) - started)) s"
+grep -q "PHP_RELOAD_CMD ran past 3 s; carrying on" "$WORK/reload.log" || fail "no warning for a slow PHP_RELOAD_CMD"
+serves "$(live_release)" || fail "server does not show $(live_release)"
+check "the slow PHP_RELOAD_CMD was stopped and the deploy went on"
+
+step "A git remote that never answers fails fast"
+# A TCP port that takes connections and never says a word, like a stalled network.
+# shellcheck disable=SC2016 # PHP code, not shell.
+php -r '$s = stream_socket_server("tcp://127.0.0.1:0");
+    file_put_contents($argv[1], parse_url("tcp://" . stream_socket_get_name($s, false), PHP_URL_PORT));
+    $held = [];
+    while ($c = @stream_socket_accept($s, -1)) { $held[] = $c; }' "$WORK/stall.port" &
+STALL_PID=$!
+tries=20
+until [ -s "$WORK/stall.port" ]; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "the silent port did not open"
+    sleep 0.5
+done
+stall="$(cat "$WORK/stall.port")"
+before="$(live_release)"
+started="$(date +%s)"
+if REPO_URL="http://127.0.0.1:$stall/repo.git" GIT_HTTP_LOW_SPEED_TIME=2 deploy fixture --force > /dev/null 2>&1; then
+    fail "a deploy from a silent HTTP remote succeeded"
+fi
+[ $(($(date +%s) - started)) -lt 20 ] || fail "the silent HTTP remote held the deploy for $(($(date +%s) - started)) s"
+# The user's own SSH command: logged, then run, with its ConnectTimeout before the engine's.
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "%s"\nexec ssh "$@"\n' "$WORK/ssh.log" > "$WORK/ssh"
+chmod +x "$WORK/ssh"
+started="$(date +%s)"
+if REPO_URL="ssh://git@127.0.0.1:$stall/repo.git" GIT_SSH_COMMAND="$WORK/ssh -o ConnectTimeout=2" \
+    deploy fixture --force > /dev/null 2>&1; then
+    fail "a deploy from a silent SSH remote succeeded"
+fi
+[ $(($(date +%s) - started)) -lt 20 ] || fail "the silent SSH remote held the deploy for $(($(date +%s) - started)) s"
+grep -q -- "^-o ConnectTimeout=2 -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3 " \
+    "$WORK/ssh.log" || fail "the SSH command lost its own options or got no time limits: $(head -n1 "$WORK/ssh.log")"
+[ "$(live_release)" = "$before" ] || fail "a silent remote changed the live release"
+[ ! -d "$BASE/.deploy.lock" ] || fail "a silent remote left the lock behind"
+kill "$STALL_PID" 2>/dev/null || true
+wait "$STALL_PID" 2>/dev/null || true
+STALL_PID=""
+check "silent HTTP and SSH remotes failed in seconds; the SSH command kept its options"
 
 # Starts a deploy with a slow build, waits until the build runs, then kills it with SIGKILL, like
 # CloudLinux limits or the OOM killer. Sets KILLED to the half-built release left behind.

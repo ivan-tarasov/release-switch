@@ -324,6 +324,13 @@ resolve_base() {
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
 }
 
+# A real folder at current (a web panel makes one for a new document root) would get the release
+# link inside it, and the site would never serve the release.
+refuse_current_folder() {
+    [ ! -e "$DEPLOY_BASE/current" ] || [ -L "$DEPLOY_BASE/current" ] \
+        || fail "$DEPLOY_BASE/current is a folder, not a link; move it away (a web panel may have made it for the document root)"
+}
+
 # Who holds the lock in folder $1 (default: the lock): "<pid> <start, epoch seconds> <action>".
 # Empty if nobody does, or the owner file is not written yet.
 lock_owner() {
@@ -1106,6 +1113,7 @@ deploy() {
     fi
 
     resolve_base
+    refuse_current_folder
     refuse_if_frozen
     require_check_url
     acquire_lock deploy
@@ -1236,6 +1244,7 @@ deploy() {
 
 rollback() {
     resolve_base
+    refuse_current_folder
     refuse_if_frozen
     require_check_url
     acquire_lock rollback

@@ -113,14 +113,16 @@ deploy [project] [command]
   path [--base]     Print the full path of the live release, and nothing else, to copy or use
                     in `cd "$(deploy path <project>)"`. --base prints DEPLOY_BASE instead.
                     Fails if there is no live release. Also works as `deploy path <project>`
-  slots             One line per staging slot: its branch (PR #N, or free; `(gone)` when the
-                    repo no longer has it), live commit, deploy time and URL
-  slots update      Redeploy each slot whose branch has new commits; skip a slot whose branch
-                    is gone. For cron (see [Staging](#staging))
+  slots             One line per staging slot: its branch (PR #N, or `free (develop)`; `(gone)`
+                    when the repo no longer has it), live commit, deploy time and URL
+  slots update      Redeploy each slot whose branch has new commits, free slots from
+                    `DEPLOY_BRANCH`; skip a slot whose branch is gone. For cron (see
+                    [Staging](#staging))
   stage <branch>    Deploy a branch to the slot that already follows it, else to the first free
                     slot, else to one whose branch is gone, and print its URL last. Also
                     `stage --pr <number>`
-  free              On a staging slot only: forget its branch, so `stage` can use the slot
+  free              On a staging slot only: forget its branch, so `stage` can use the slot,
+                    and deploy the newest `DEPLOY_BRANCH` to it
   copy-from <project> [--yes] [path ...]
                     On a staging slot only: copy production's `SHARED` data into the slot,
                     every path but `.env`, or only the named ones. Asks first; `--yes` skips
@@ -287,11 +289,13 @@ To set up a slot:
    (`https://s1.example.com`), `APP_ENV=staging`, its own database, and mail to the log
    (`MAIL_MAILER=log`).
 3. Deploy a branch to it: `deploy example@s1 --branch feature/login`. The slot stores the branch in
-   `s1/BRANCH` and deploys it.
+   `s1/BRANCH` and deploys it. Or deploy it with no branch, `deploy example@s1`: a free slot runs
+   production's `DEPLOY_BRANCH`.
 
 From then on, `deploy example@s1` deploys the newest commit of that branch, and stops when it is
 already live. `--branch` again switches the slot to another branch. `deploy example slots` lists
-the slots, with `free` for a slot that has no branch yet. `status`, `check`, `log`, `rollback`,
+the slots, with `free (develop)` for a free slot (`DEPLOY_BRANCH` is `develop`), or `free` and `-`
+for one never deployed. `status`, `check`, `log`, `rollback`,
 `freeze`, `down`, `up` and `path` work on a slot the same way, as `deploy example@s1 <command>`.
 `--branch` on production is refused: production deploys `DEPLOY_BRANCH`.
 
@@ -312,18 +316,22 @@ first slot whose branch is gone from the repo, and says which branch it replaces
 are busy, it fails and shows the `slots` list. It takes each slot under the slot's lock, so two `stage` runs at
 once never pick the same slot.
 
-`deploy example@s1 free` forgets the slot's branch, so `stage` can use it again. The site and its
-releases stay until then. It takes the slot's lock, so it never runs during a deploy of the slot.
+`deploy example@s1 free` forgets the slot's branch, so `stage` can use it again, and deploys the
+newest commit of `DEPLOY_BRANCH` to it, so a free slot always runs something current. The slot
+stays free (no `BRANCH` file), and a plain `deploy example@s1` keeps it on the newest
+`DEPLOY_BRANCH`. It takes the slot's lock, so it never runs during a deploy of the slot.
 
 `slots` marks a branch the repo no longer has (deleted after the merge) as `feature/x (gone)` or
 `PR #7 (gone)`, from one `git ls-remote` for all slots. When the repo cannot be read, it marks
 nothing.
 
-`deploy example slots update` redeploys each slot whose branch or PR head has new commits; a slot
-with nothing new is left as it is. A slot whose branch is gone is skipped and keeps its branch
-until `free` or `stage` reuses it; that is not a failure. A failing slot does not stop the others,
-but the run exits with 1. It ends with one line per slot: `updated`, `unchanged`, `branch gone`,
-`failed`, or `skipped` for a free slot. Run it from cron to keep the slots up to date:
+`deploy example slots update` redeploys each slot whose branch or PR head has new commits, and each
+free slot whose `DEPLOY_BRANCH` has; a slot with nothing new is left as it is. A free slot never
+deployed gets its first release, so give each slot its shared files before adding it to
+`STAGING_SERVERS`. A slot whose branch is gone is skipped and keeps its branch until `free` or
+`stage` reuses it; that is not a failure. A failing slot does not stop the others, but the run
+exits with 1. It ends with one line per slot: `updated`, `deployed`, `unchanged`, `branch gone` or
+`failed`. Run it from cron to keep the slots up to date:
 
 ```cron
 */5 * * * * $HOME/release-switch/deploy example slots update > /dev/null

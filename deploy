@@ -26,8 +26,10 @@ DEPLOY_SLOT=""
 SLOT_BRANCH=""
 SLOT_PR=""
 
-# The production folder of a slot's project, set by apply_slot.
+# The production folder and DEPLOY_BRANCH of a slot's project, set by apply_slot. A free slot
+# deploys that branch.
 PROD_BASE=""
+PROD_DEPLOY_BRANCH=""
 
 # The temp copy copy-from is writing, so on_exit removes it when the run stops.
 COPY_TMP=""
@@ -318,6 +320,8 @@ apply_slot() {
     NOTIFY_CMD=""
     SLOT_BRANCH=""
     SLOT_PR=""
+
+    PROD_DEPLOY_BRANCH="$DEPLOY_BRANCH"
 
     if [ -f "$DEPLOY_BASE/BRANCH" ]; then
         SLOT_BRANCH="$(cat "$DEPLOY_BASE/BRANCH")"
@@ -1133,7 +1137,8 @@ unfreeze() {
 # Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
 # --force builds even when that commit is already live; --no-wait does not wait for a release tag.
 # On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
-# does the same for the head of that pull request. --ref and --pr never wait for a release tag.
+# does the same for the head of that pull request. A free slot deploys DEPLOY_BRANCH and stays free.
+# --ref and --pr never wait for a release tag.
 deploy() {
     local force=0 ref="" no_wait=0 branch="" pr=""
 
@@ -1175,8 +1180,6 @@ deploy() {
     elif [ -n "$pr" ]; then
         [ -z "$ref" ] || fail "use --pr or --ref, not both"
         [[ "$pr" =~ ^[1-9][0-9]*$ ]] || fail "--pr takes a pull request number, not '$pr'"
-    elif [ -z "$SLOT_BRANCH" ]; then
-        fail "$PROJECT has no branch yet; set one: deploy $PROJECT --branch <name>"
     fi
 
     resolve_base
@@ -1751,7 +1754,7 @@ check() {
 }
 
 # One tab-separated row for `slots`: slot $1, its branch, live sha, deploy time and URL. The branch
-# gets "(gone)" when $2 is 1. Changes the settings to the slot's, so it runs in a subshell.
+# gets "(gone)" when $2 is 1; a free slot with a live release shows "free (<DEPLOY_BRANCH>)". Changes the settings to the slot's, so it runs in a subshell.
 slot_row() {
     local live="" sha="-" time="-"
 
@@ -1767,6 +1770,7 @@ slot_row() {
 
     [ -z "$SLOT_PR" ] || SLOT_BRANCH="PR #$SLOT_PR"
     [ "${2:-0}" -eq 0 ] || SLOT_BRANCH="$SLOT_BRANCH (gone)"
+    [ -n "$SLOT_BRANCH" ] || [ -z "$live" ] || SLOT_BRANCH="free ($DEPLOY_BRANCH)"
     printf '%s\t%s\t%s\t%s\t%s\n' "$DEPLOY_SLOT" "${SLOT_BRANCH:-free}" "$sha" "$time" "$(redact "${CHECK_URL:--}")"
 }
 
@@ -1936,25 +1940,28 @@ claim_slot() {
     return 1
 }
 
-# Forgets the branch of the slot; its site and releases stay until the slot is used again.
+# Forgets the branch of the slot, then deploys the newest DEPLOY_BRANCH to it, under one lock.
 free_slot() {
     local followed
 
-    if [ ! -f "$DEPLOY_BASE/BRANCH" ]; then
-        say "$PROJECT is already free"
-
-        return
-    fi
-
     resolve_base
     acquire_lock free
-    # Read again under the lock: a deploy may have changed it since.
+    # Read under the lock: a deploy may have changed it since.
     followed="$(cat "$DEPLOY_BASE/BRANCH" 2>/dev/null || true)"
-    ! is_pr_branch "$followed" || followed="PR #${followed#pr/}"
 
-    rm -f "$DEPLOY_BASE/BRANCH"
-    log_event free "$(current_release)" "ok, was ${followed:-nothing}"
-    say "$PROJECT is free now (it followed ${followed:-nothing}); its site and releases stay until the slot is used again"
+    if [ -z "$followed" ]; then
+        say "$PROJECT is already free; deploying $DEPLOY_BRANCH"
+    else
+        ! is_pr_branch "$followed" || followed="PR #${followed#pr/}"
+        rm -f "$DEPLOY_BASE/BRANCH"
+        DEPLOY_BRANCH="$PROD_DEPLOY_BRANCH"
+        SLOT_BRANCH=""
+        SLOT_PR=""
+        log_event free "$(current_release)" "ok, was $followed"
+        say "$PROJECT is free now (it followed $followed); deploying $DEPLOY_BRANCH"
+    fi
+
+    deploy
 }
 
 # True when SHARED path $1 is an env file: .env, *.env or .env.*. copy-from never copies one.
@@ -2114,8 +2121,8 @@ slot_update() {
     deploy
 }
 
-# Redeploys every slot whose branch has new commits, for cron. A slot whose branch is gone from the
-# repo is skipped. A failing slot does not stop the others, but the run then exits with 1.
+# Redeploys every slot whose branch has new commits, for cron; a free slot follows DEPLOY_BRANCH. A
+# slot whose branch is gone from the repo is skipped. A failing slot does not stop the others, but the run then exits with 1.
 slots_update() {
     local i slot label before after code result rows="" failed=0
 
@@ -2126,10 +2133,8 @@ slots_update() {
         slot="s$i"
         IFS=$'\t' read -r _ label before _ <<< "$(slot_row "$slot")"
 
-        if [ "$label" = free ]; then
-            rows+="$slot"$'\t'"free"$'\t'"skipped"$'\n'
-            continue
-        fi
+        # A free slot never deployed gets its first release too.
+        [ "$label" != free ] || label="free ($DEPLOY_BRANCH)"
 
         if [ "${SLOT_GONE[$((i - 1))]}" -eq 1 ]; then
             warn "$PROJECT@$slot: $label is gone from the repo; skipped (deploy $PROJECT@$slot free, or stage another branch)"
@@ -2152,6 +2157,8 @@ slots_update() {
             failed=$((failed + 1))
         elif [ "$before" = "$after" ]; then
             result="unchanged"
+        elif [ "$before" = - ]; then
+            result="deployed, $after"
         else
             result="updated, $before to $after"
         fi
@@ -2373,17 +2380,19 @@ Commands:
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
                              it, like the sha or tag)
-  slots                      One line per staging slot: its branch (PR #N, or free; "(gone)" when
-                             the repo no longer has it), live commit, deploy time and URL
-  slots update               Redeploy each slot whose branch has new commits, for cron. Skips a
-                             slot whose branch is gone from the repo. Exits with 1 if any slot
-                             failed
+  slots                      One line per staging slot: its branch (PR #N, or free (DEPLOY_BRANCH);
+                             "(gone)" when the repo no longer has it), live commit, deploy time
+                             and URL
+  slots update               Redeploy each slot whose branch has new commits, for cron; a free
+                             slot follows DEPLOY_BRANCH, even one never deployed. Skips a slot
+                             whose branch is gone from the repo. Exits with 1 if any slot failed
   stage <branch>, stage --pr <number>
                              Deploy to the slot that already follows it, else to the first free
                              one, else to one whose branch is gone, and print the slot's URL
                              last. Fails when all slots are busy
-  free                       On a slot only: forget its branch, so stage can use it. The site
-                             and releases stay until the slot is used again
+  free                       On a slot only: forget its branch, so stage can use it, and deploy
+                             the newest DEPLOY_BRANCH. A plain deploy of a free slot does the
+                             same, and the slot stays free
   copy-from <project> [--yes] [path ...]
                              On a slot only: copy production's SHARED data into the slot's
                              shared/, all paths but .env, or only the named ones. Asks first;

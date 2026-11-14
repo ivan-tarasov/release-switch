@@ -6,7 +6,7 @@
 #                     | freeze [reason]
 #                     | unfreeze | status | check | log [count] | path [--base] | rollback [name]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
-#                     | free | help]
+#                     | free | copy-from <project> [--yes] [path ...] | help]
 #   deploy self-update | self [log [count]] | --version
 
 set -euo pipefail
@@ -25,6 +25,12 @@ PROJECT=""
 DEPLOY_SLOT=""
 SLOT_BRANCH=""
 SLOT_PR=""
+
+# The production folder of a slot's project, set by apply_slot.
+PROD_BASE=""
+
+# The temp copy copy-from is writing, so on_exit removes it when the run stops.
+COPY_TMP=""
 
 # Set while a deploy runs, so the exit trap knows what to clean up.
 NEW_RELEASE=""
@@ -286,6 +292,7 @@ apply_slot() {
     [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/$PROJECT.env"
 
     prod_base="${DEPLOY_BASE%/}"
+    PROD_BASE="$prod_base"
     DEPLOY_BASE="$(dirname "$prod_base")/$DEPLOY_SLOT"
     [ "$DEPLOY_BASE" != "$prod_base" ] \
         || fail "$DEPLOY_SLOT would share the production folder $prod_base; give production a folder of its own"
@@ -498,6 +505,8 @@ on_exit() {
             warn "failed before the switch; ${PREVIOUS_RELEASE:-the old release} is still live"
         fi
     fi
+
+    [ -z "$COPY_TMP" ] || rm -rf "$COPY_TMP"
 
     if [ "$status" -ne 0 ] && [ -n "$ACTION" ]; then
         log_event "$ACTION" "$LOG_RELEASE" "failed: $STAGE"
@@ -1948,6 +1957,149 @@ free_slot() {
     say "$PROJECT is free now (it followed ${followed:-nothing}); its site and releases stay until the slot is used again"
 }
 
+# True when SHARED path $1 is an env file: .env, *.env or .env.*. copy-from never copies one.
+is_env_path() {
+    case "${1##*/}" in
+        .env | *.env | .env.*) return 0 ;;
+    esac
+
+    return 1
+}
+
+# Copies SHARED paths from production's shared/ into the slot's shared/, never an env file. Asks
+# first on a terminal, unless --yes. Each path is copied to a temp name and renamed into place.
+copy_from() {
+    local source="" yes=0 arg conf conf_label shared_text path wanted=() paths=() from to old size answer
+    local usage="usage: deploy <project>@sN copy-from <project> [--yes] [path ...]"
+
+    for arg in "$@"; do
+        case "$arg" in
+            --yes | -y) yes=1 ;;
+            -*) fail "$usage" ;;
+            *)
+                if [ -z "$source" ]; then
+                    source="$arg"
+                else
+                    wanted+=("${arg%/}")
+                fi
+                ;;
+        esac
+    done
+
+    [ -n "$source" ] || fail "$usage"
+    case "$source" in
+        *@*) fail "copy-from copies from production only, not from a slot: deploy $PROJECT copy-from ${PROJECT%@*}" ;;
+    esac
+    [ "$source" = "${PROJECT%@*}" ] \
+        || fail "copy-from copies from production of the same project only: deploy $PROJECT copy-from ${PROJECT%@*}"
+    [ -d "$PROD_BASE/shared" ] || fail "$source has no shared folder ($PROD_BASE/shared)"
+    PROD_BASE="$(cd "$PROD_BASE" && pwd -P)"
+
+    resolve_base
+
+    if [ -f "$DEPLOY_BASE/current/deploy.conf" ]; then
+        conf="$DEPLOY_BASE/current/deploy.conf"
+        conf_label="the slot's live release"
+    elif [ -f "$PROD_BASE/current/deploy.conf" ]; then
+        conf="$PROD_BASE/current/deploy.conf"
+        conf_label="production's live release (the slot has none yet)"
+    else
+        fail "no live deploy.conf in $PROJECT or $source to read SHARED from"
+    fi
+
+    # Only SHARED is needed, so the steps are not loaded into this shell.
+    # shellcheck source=/dev/null
+    shared_text="$(SHARED=() && . "$conf" && printf '%s\n' ${SHARED[@]+"${SHARED[@]}"})" \
+        || fail "cannot read SHARED from $conf"
+    say "SHARED from $conf_label"
+
+    if [ ${#wanted[@]} -eq 0 ]; then
+        while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            is_env_path "$path" || paths+=("$path")
+        done <<< "$shared_text"
+    else
+        for path in "${wanted[@]}"; do
+            ! is_env_path "$path" || fail "copy-from never copies $path; give the slot its own"
+
+            case $'\n'"$shared_text"$'\n' in
+                *$'\n'"$path"$'\n'*) paths+=("$path") ;;
+                *) fail "$path is not in SHARED ($(printf '%s' "$shared_text" | paste -sd ' ' -))" ;;
+            esac
+        done
+    fi
+
+    [ ${#paths[@]} -gt 0 ] || fail "SHARED has nothing to copy apart from env files"
+
+    say "Copying from $source ($PROD_BASE/shared) into $PROJECT ($DEPLOY_BASE/shared):"
+    for path in "${paths[@]}"; do
+        from="$PROD_BASE/shared/$path"
+
+        if [ -e "$from" ]; then
+            size="$(du -sh "$from" 2>/dev/null | cut -f1)"
+            printf '  %s  %s\n' "${size:-?}" "$path"
+        else
+            printf '  -  %s (missing in %s; the slot keeps its own)\n' "$path" "$source"
+        fi
+    done | rail
+
+    if [ "$yes" -eq 0 ]; then
+        [ -t 0 ] && [ -t 1 ] || fail "not a terminal, so copy-from cannot ask; add --yes to copy"
+        printf '%s' "$(say "Copy these into $PROJECT? Its files are replaced [y/N] ")"
+        read -r answer || answer=""
+
+        case "$answer" in
+            y | Y | yes | YES) ;;
+            *)
+                say "Nothing copied"
+
+                return
+                ;;
+        esac
+    fi
+
+    acquire_lock copy-from
+    ACTION=copy-from
+    LOG_RELEASE="$(current_release)"
+    STAGE=copy
+    mkdir -p "$DEPLOY_BASE/shared"
+
+    local copied=()
+    for path in "${paths[@]}"; do
+        from="$PROD_BASE/shared/$path"
+        to="$DEPLOY_BASE/shared/$path"
+
+        if [ ! -e "$from" ]; then
+            warn "$path is missing in $source; the slot keeps its own"
+            continue
+        fi
+
+        STAGE="copy $path"
+        mkdir -p "$(dirname "$to")"
+        COPY_TMP="$to.copy-from.$$"
+        old="$to.old.$$"
+        rm -rf "$COPY_TMP" "$old"
+        cp -a "$from" "$COPY_TMP" || fail "could not copy $path; the slot's $path is unchanged"
+
+        # A folder cannot be renamed over another, so the old one moves aside first.
+        if [ -d "$to" ]; then
+            mv "$to" "$old"
+            mv "$COPY_TMP" "$to" || { mv "$old" "$to"; fail "could not put $path in place; the slot's $path is unchanged"; }
+            rm -rf "$old"
+        else
+            mv -f "$COPY_TMP" "$to" || fail "could not put $path in place; the slot's $path is unchanged"
+        fi
+
+        COPY_TMP=""
+        copied+=("$path")
+        say "Copied $path"
+    done
+
+    log_event copy-from "$LOG_RELEASE" "ok, from $source: $(join_notes ${copied[@]+"${copied[@]}"})"
+    ACTION=""
+    say "Copied into $PROJECT: $(join_notes ${copied[@]+"${copied[@]}"})"
+}
+
 # Deploys slot $1 for `slots update`, in a subshell of its own. A plain deploy skips a branch with
 # nothing new.
 slot_update() {
@@ -2232,6 +2384,10 @@ Commands:
                              last. Fails when all slots are busy
   free                       On a slot only: forget its branch, so stage can use it. The site
                              and releases stay until the slot is used again
+  copy-from <project> [--yes] [path ...]
+                             On a slot only: copy production's SHARED data into the slot's
+                             shared/, all paths but .env, or only the named ones. Asks first;
+                             --yes skips that, and without a terminal it is required
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
   self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
@@ -2336,7 +2492,7 @@ main() {
     esac
 
     case "$command" in
-        deploy | freeze | unfreeze | down | up | rollback | init | stage | free)
+        deploy | freeze | unfreeze | down | up | rollback | init | stage | free | copy-from)
             intro "${PROJECT:+$PROJECT · }$command"
             ;;
         slots)
@@ -2393,6 +2549,12 @@ main() {
         free)
             [ -n "$DEPLOY_SLOT" ] || fail "free works on one slot: deploy ${PROJECT:-<project>}@sN free"
             free_slot
+            ;;
+        copy-from)
+            [ -n "$DEPLOY_SLOT" ] \
+                || fail "copy-from copies into a staging slot, never into production: deploy ${PROJECT:-<project>}@sN copy-from ${PROJECT:-<project>}"
+            shift
+            copy_from "$@"
             ;;
         rollback)
             rollback "${2:-}"

@@ -1159,6 +1159,91 @@ kill "$holder" 2>/dev/null || true
 rm -rf "$SLOT2/.deploy.lock"
 check "stage skipped a locked free slot, failed with no slot left, and refused a locked slot on its branch"
 
+step "copy-from copies production data into a slot, never .env"
+printf 'APP_ENV=production\n# slot s1 only\n' > "$SLOT/shared/.env"
+printf 'slot data\n' > "$SLOT/shared/data/note.txt"
+printf 'slot only\n' > "$SLOT/shared/data/slot-only.txt"
+slot_data_kept() {
+    [ "$(cat "$SLOT/shared/data/note.txt")" = "slot data" ] && [ -f "$SLOT/shared/data/slot-only.txt" ]
+}
+if deploy fixture copy-from fixture --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from into production was not refused"
+fi
+grep -q "copy-from copies into a staging slot, never into production" "$WORK/copy.err" || fail "no message for production as the target"
+if deploy fixture@s1 copy-from other --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from another project was not refused"
+fi
+grep -q "copies from production of the same project only" "$WORK/copy.err" || fail "no message for another project"
+if deploy fixture@s1 copy-from fixture@s2 --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from a slot was not refused"
+fi
+grep -q "copies from production only, not from a slot" "$WORK/copy.err" || fail "no message for a slot as the source"
+if deploy fixture@s1 copy-from fixture .env --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from .env was not refused"
+fi
+grep -q "copy-from never copies .env" "$WORK/copy.err" || fail "no message for .env"
+if deploy fixture@s1 copy-from fixture nope --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from a path not in SHARED was not refused"
+fi
+grep -q "nope is not in SHARED (.env data)" "$WORK/copy.err" || fail "no message for a path not in SHARED"
+if deploy fixture@s1 copy-from fixture < /dev/null > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from without a terminal or --yes copied"
+fi
+grep -q "not a terminal, so copy-from cannot ask; add --yes" "$WORK/copy.err" || fail "no message for a pipe without --yes"
+mkdir "$SLOT/.deploy.lock"
+printf '%s %s deploy\n' "$$" "$(date +%s)" > "$SLOT/.deploy.lock/owner"
+if deploy fixture@s1 copy-from fixture --yes > /dev/null 2> "$WORK/copy.err"; then
+    fail "copy-from ran while the slot was locked"
+fi
+grep -q "another deploy is running (PID $$" "$WORK/copy.err" || fail "no lock message for copy-from"
+rm -rf "$SLOT/.deploy.lock"
+slot_data_kept || fail "a refused copy-from changed the slot's data"
+deploy fixture@s1 copy-from fixture --yes > "$WORK/copy.log"
+cat "$WORK/copy.log"
+grep -q "SHARED from the slot's live release" "$WORK/copy.log" || fail "copy-from does not say where SHARED comes from"
+grep -qE "^  [0-9.]+[A-Z]?  data$" "$WORK/copy.log" || fail "copy-from does not list data with its size"
+grep -q "Copied into fixture@s1: data" "$WORK/copy.log" || fail "copy-from does not say what it copied"
+diff -r "$BASE/shared/data" "$SLOT/shared/data" > /dev/null || fail "the slot's data is not production's"
+[ ! -e "$SLOT/shared/data/slot-only.txt" ] || fail "the slot's old data/ was merged, not replaced"
+[ "$(cat "$SLOT/shared/.env")" = $'APP_ENV=production\n# slot s1 only' ] || fail "copy-from changed the slot's .env"
+[ -z "$(find "$SLOT/shared" -maxdepth 1 \( -name '*.copy-from.*' -o -name '*.old.*' \))" ] \
+    || fail "copy-from left a temp copy behind"
+[ ! -e "$SLOT/.deploy.lock" ] || fail "copy-from left the lock behind"
+grep -q $'\tcopy-from@s1\t'"$(slot_live)"$'\tok, from fixture: data\t' "$SLOT/deploy.log" || fail "copy-from is not in the slot's deploy.log"
+mv "$BASE/shared/data" "$WORK/prod-data"
+printf 'slot data\n' > "$SLOT/shared/data/note.txt"
+deploy fixture@s1 copy-from fixture data --yes > "$WORK/copy.log" 2>&1
+mv "$WORK/prod-data" "$BASE/shared/data"
+grep -q "data is missing in fixture; the slot keeps its own" "$WORK/copy.log" || fail "no warning for a missing source path"
+[ "$(cat "$SLOT/shared/data/note.txt")" = "slot data" ] || fail "a missing source path changed the slot's data"
+check "copy-from replaced the slot's data/ with production's, kept its .env, logged it, and refused production, other sources, .env, unknown paths, a pipe and a held lock"
+
+step "copy-from asks on a terminal"
+# Runs the engine on a terminal made by script; the answer comes once the prompt is up.
+on_terminal() {
+    local answer="$1"
+    shift
+
+    if script --version > /dev/null 2>&1; then
+        { sleep 2; printf '%s\n' "$answer"; sleep 2; } | script -qec "$(printf '%q ' "$@")" /dev/null
+    else
+        { sleep 2; printf '%s\n' "$answer"; sleep 2; } | script -q /dev/null "$@"
+    fi
+}
+if command -v script > /dev/null; then
+    on_terminal n env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture > "$WORK/copy.log" 2>&1
+    cat "$WORK/copy.log"
+    grep -q "Copy these into fixture@s1? Its files are replaced \[y/N\]" "$WORK/copy.log" || fail "copy-from does not ask on a terminal"
+    grep -q "Nothing copied" "$WORK/copy.log" || fail "copy-from does not stop on n"
+    [ "$(cat "$SLOT/shared/data/note.txt")" = "slot data" ] || fail "copy-from copied after n"
+    on_terminal y env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture > "$WORK/copy.log" 2>&1
+    grep -q "Copied into fixture@s1: data" "$WORK/copy.log" || fail "copy-from does not copy on y"
+    diff -r "$BASE/shared/data" "$SLOT/shared/data" > /dev/null || fail "copy-from on y did not copy data/"
+    check "copy-from asked on a terminal: n copied nothing, y copied data/"
+else
+    check "skipped: no script command to make a terminal"
+fi
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

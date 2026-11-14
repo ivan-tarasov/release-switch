@@ -326,10 +326,12 @@ stays free (no `BRANCH` file), and a plain `deploy example@s1` keeps it on the n
 nothing.
 
 `deploy example slots update` redeploys each slot whose branch or PR head has new commits, and each
-free slot whose `DEPLOY_BRANCH` has; a slot with nothing new is left as it is. A slot whose branch is gone is skipped and keeps its branch
-until `free` or `stage` reuses it; that is not a failure. A failing slot does not stop the others,
-but the run exits with 1. It ends with one line per slot: `updated`, `unchanged`, `branch gone`,
-`failed`, or `skipped, never deployed` for a free slot with no release yet. Run it from cron to keep the slots up to date:
+free slot whose `DEPLOY_BRANCH` has; a slot with nothing new is left as it is. A free slot never
+deployed gets its first release, so give each slot its shared files before adding it to
+`STAGING_SERVERS`. A slot whose branch is gone is skipped and keeps its branch until `free` or
+`stage` reuses it; that is not a failure. A failing slot does not stop the others, but the run
+exits with 1. It ends with one line per slot: `updated`, `deployed`, `unchanged`, `branch gone` or
+`failed`. Run it from cron to keep the slots up to date:
 
 ```cron
 */5 * * * * $HOME/release-switch/deploy example slots update > /dev/null

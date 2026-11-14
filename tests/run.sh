@@ -1155,7 +1155,21 @@ commit "develop again"
 deploy fixture@s2 > /dev/null
 [ "$(cat "$SLOT2/current/VERSION")" = "develop again" ] || fail "a plain deploy did not move the free s2"
 [ ! -e "$SLOT2/BRANCH" ] || fail "a plain deploy of the free s2 stored a branch"
-check "stage took s2 from the gone feature/y; slots update and a plain deploy keep the free s2 on the newest develop"
+# A new s3, never deployed: slots update gives it its first release once it has its shared files.
+if STAGING_SERVERS=3 deploy fixture slots update > "$WORK/update.log" 2>&1; then
+    fail "slots update succeeded with an s3 that has no shared files"
+fi
+grep -qE "^s3 +free \(develop\) +failed$" "$WORK/update.log" || fail "the summary does not show the new s3 failed"
+mkdir -p "$WORK/s3/shared/data"
+printf 'APP_ENV=production\n' > "$WORK/s3/shared/.env"
+printf 'slot three\n' > "$WORK/s3/shared/data/note.txt"
+STAGING_SERVERS=3 deploy fixture slots update > "$WORK/update.log"
+cat "$WORK/update.log"
+grep -qE "^s3 +free \(develop\) +deployed, [0-9a-f]{7,}$" "$WORK/update.log" || fail "the summary does not show s3 deployed"
+[ "$(cat "$WORK/s3/current/VERSION")" = "develop again" ] || fail "slots update did not deploy develop to the new s3"
+[ ! -e "$WORK/s3/BRANCH" ] || fail "slots update stored a branch for the new s3"
+rm -rf "$WORK/s3"
+check "stage took s2 from the gone feature/y; slots update and a plain deploy keep the free s2 on the newest develop; slots update deployed a new s3"
 
 step "stage takes each slot under its lock, so two runs never pick the same one"
 deploy fixture@s1 free > /dev/null

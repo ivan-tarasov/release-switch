@@ -880,11 +880,13 @@ prod_log="$(wc -l < "$BASE/deploy.log")"
 slot_live() {
     basename "$(readlink "$SLOT/current" 2>/dev/null)" 2>/dev/null || true
 }
-if deploy fixture@s1 2> "$WORK/slot.err"; then
-    fail "a slot with no branch deployed"
+# A slot with no branch deploys develop; this one has no shared files yet.
+if deploy fixture@s1 > "$WORK/slot.err" 2>&1; then
+    fail "a slot without its shared files deployed develop"
 fi
-grep -q "fixture@s1 has no branch yet; set one: deploy fixture@s1 --branch <name>" "$WORK/slot.err" \
-    || fail "no hint to set a branch"
+grep -q "Cloning develop" "$WORK/slot.err" || fail "a slot with no branch did not try develop"
+grep -q "shared/.env is missing" "$WORK/slot.err" || fail "no message for the slot's missing shared files"
+[ ! -e "$SLOT/BRANCH" ] || fail "a plain deploy of a free slot stored a branch"
 if deploy fixture@s1 --branch nope 2> "$WORK/slot.err"; then
     fail "a branch missing from the repo deployed"
 fi
@@ -1059,17 +1061,26 @@ if STAGING_SERVERS=0 deploy fixture stage feature/y > /dev/null 2> "$WORK/stage.
 fi
 grep -q "fixture has no staging slots" "$WORK/stage.err" || fail "no message for stage without slots"
 
+develop_sha="$(git -C "$REPO" rev-parse develop)"
 deploy fixture@s2 free > "$WORK/stage.log"
-grep -q "fixture@s2 is free now (it followed PR #7)" "$WORK/stage.log" || fail "free does not say what it did"
+cat "$WORK/stage.log"
+grep -q "fixture@s2 is free now (it followed PR #7); deploying develop" "$WORK/stage.log" || fail "free does not say what it did"
 [ ! -e "$SLOT2/BRANCH" ] || fail "free kept the BRANCH file"
-[ -n "$(slot2_live)" ] || fail "free removed the slot's site"
+[ "$(git -C "$SLOT2/current" rev-parse HEAD)" = "$develop_sha" ] || fail "free did not deploy the newest develop"
+[ "$(cat "$SLOT2/current/VERSION")" = "$(git -C "$REPO" show develop:VERSION)" ] || fail "s2 does not run develop"
 grep -q $'\tfree@s2\t' "$SLOT2/deploy.log" || fail "free is not in the slot's deploy.log"
-deploy fixture@s2 free | grep -q "fixture@s2 is already free" || fail "freeing a free slot does not say so"
+[ ! -e "$SLOT2/.deploy.lock" ] || fail "free left the lock behind"
+deploy fixture@s2 free > "$WORK/stage.log"
+grep -q "fixture@s2 is already free; deploying develop" "$WORK/stage.log" || fail "freeing a free slot does not say so"
+grep -q "Nothing new on develop" "$WORK/stage.log" || fail "freeing a free slot on the newest develop built again"
+deploy fixture slots > "$WORK/slots.log"
+grep -qE "^s2 +free \(develop\) +${develop_sha:0:7}[0-9a-f]* +today at " "$WORK/slots.log" \
+    || fail "slots does not show s2 as free (develop) with its live commit"
 deploy fixture stage feature/y > "$WORK/stage.log"
 [ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage feature/y did not pick the free s2"
 [ "$(cat "$SLOT2/current/VERSION")" = "feature y" ] || fail "s2 does not run feature/y"
 deploy fixture slots | grep -qE "^s2 +feature/y " || fail "slots does not show s2 on feature/y"
-check "stage reused s1 and s2, failed while both were busy, and took s2 once free freed it"
+check "stage reused s1 and s2, failed while both were busy; free put s2 on develop, and stage took it"
 
 step "slots update redeploys moved branches, skips gone ones, and goes on after a failure"
 s1_before="$(slot_live)"
@@ -1130,9 +1141,21 @@ grep -q "fixture@s2 follows feature/y, which is gone from the repo, so it takes 
 [ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage feature/z did not take s2"
 [ "$(cat "$SLOT2/current/VERSION")" = "feature z" ] || fail "s2 does not run feature/z"
 deploy fixture@s2 free > /dev/null
+[ ! -e "$SLOT2/BRANCH" ] || fail "free kept the BRANCH file"
+before="$(git -C "$SLOT2/current" rev-parse --short HEAD)"
+commit "develop for free slots"
 deploy fixture slots update > "$WORK/update.log"
-grep -qE "^s2 +free +skipped$" "$WORK/update.log" || fail "the summary does not skip the free s2"
-check "stage took s2 from the gone feature/y; slots update skips a free slot"
+cat "$WORK/update.log"
+[ "$(cat "$SLOT2/current/VERSION")" = "develop for free slots" ] || fail "slots update did not move the free s2"
+grep -qE "^s2 +free \(develop\) +updated, ${before}[0-9a-f]* to [0-9a-f]{7,}$" "$WORK/update.log" \
+    || fail "the summary does not show the free s2 updated"
+deploy fixture slots update > "$WORK/update.log"
+grep -qE "^s2 +free \(develop\) +unchanged$" "$WORK/update.log" || fail "slots update rebuilt an unchanged free s2"
+commit "develop again"
+deploy fixture@s2 > /dev/null
+[ "$(cat "$SLOT2/current/VERSION")" = "develop again" ] || fail "a plain deploy did not move the free s2"
+[ ! -e "$SLOT2/BRANCH" ] || fail "a plain deploy of the free s2 stored a branch"
+check "stage took s2 from the gone feature/y; slots update and a plain deploy keep the free s2 on the newest develop"
 
 step "stage takes each slot under its lock, so two runs never pick the same one"
 deploy fixture@s1 free > /dev/null

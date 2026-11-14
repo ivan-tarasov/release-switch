@@ -16,7 +16,8 @@ PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 
 # Settings a project file may set. Env vars of the same name win.
 SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION RELEASE_WAIT
-    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON STAGING_SERVERS STAGING_URL)
+    PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON STAGING_SERVERS STAGING_URL
+    STEP_TIMEOUT)
 
 PROJECT=""
 
@@ -50,6 +51,12 @@ ACTION=""
 LOG_RELEASE=""
 STAGE=""
 STARTED="$(date +%s)"
+
+# The process group run_limited is running, and its watchdog, so on_exit can stop them.
+LIMIT_PID=""
+LIMIT_DOG=""
+# 1 while run_limited keeps the real stderr in fd 4.
+LIMIT_FD=0
 
 # The last fail() message, for the alert.
 FAIL_MESSAGE=""
@@ -252,6 +259,7 @@ apply_defaults() {
     NOTIFY_ON="${NOTIFY_ON:-problems}"
     STAGING_SERVERS="${STAGING_SERVERS:-0}"
     STAGING_URL="${STAGING_URL:-}"
+    STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
 
     case "$KEEP_RELEASES" in
         '' | *[!0-9]*) fail "KEEP_RELEASES must be a whole number, not '$KEEP_RELEASES'" ;;
@@ -265,11 +273,15 @@ apply_defaults() {
     case "$STAGING_SERVERS" in
         '' | *[!0-9]*) fail "STAGING_SERVERS must be a whole number, not '$STAGING_SERVERS'" ;;
     esac
+    case "$STEP_TIMEOUT" in
+        '' | *[!0-9]*) fail "STEP_TIMEOUT must be a whole number of seconds, not '$STEP_TIMEOUT'" ;;
+    esac
     # 10# drops leading zeros, which bash math reads as octal.
     KEEP_RELEASES=$((10#$KEEP_RELEASES))
     CHECK_WAIT=$((10#$CHECK_WAIT))
     RELEASE_WAIT=$((10#$RELEASE_WAIT))
     STAGING_SERVERS=$((10#$STAGING_SERVERS))
+    STEP_TIMEOUT=$((10#$STEP_TIMEOUT))
     [ "$KEEP_RELEASES" -ge 2 ] \
         || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
 
@@ -499,6 +511,7 @@ on_exit() {
     # Cleanup runs to the end: no second signal, and no stop on a failed write to a closed terminal.
     trap '' INT TERM HUP
     set +e
+    limit_stop
     end_wait_line
 
     # Never deletes the release that `current` points at, whatever the flags say.
@@ -566,8 +579,14 @@ notify() {
     fi
 
     if [ -n "$NOTIFY_CMD" ]; then
-        NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" sh -c "$NOTIFY_CMD" > /dev/null 2>&1 \
-            || warn "NOTIFY_CMD failed"
+        if ! run_limited "$(short_limit 30)" env NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" \
+            sh -c "$NOTIFY_CMD" > /dev/null 2>&1; then
+            if [ "$TIMED_OUT" -eq 1 ]; then
+                warn "NOTIFY_CMD ran past $(short_limit 30) s"
+            else
+                warn "NOTIFY_CMD failed"
+            fi
+        fi
     fi
 }
 
@@ -923,8 +942,12 @@ switch_to() {
     # Set here, before the reload, so a signal from now on never deletes the live release.
     SWITCHED=1
 
-    if [ -n "$PHP_RELOAD_CMD" ]; then
-        sh -c "$PHP_RELOAD_CMD" || say "PHP_RELOAD_CMD failed; carrying on"
+    if [ -n "$PHP_RELOAD_CMD" ] && ! run_limited "$(short_limit 60)" sh -c "$PHP_RELOAD_CMD"; then
+        if [ "$TIMED_OUT" -eq 1 ]; then
+            warn "PHP_RELOAD_CMD ran past $(short_limit 60) s; carrying on"
+        else
+            say "PHP_RELOAD_CMD failed; carrying on"
+        fi
     fi
 }
 
@@ -946,35 +969,136 @@ load_conf() {
     declare -F build > /dev/null || fail "deploy.conf has no build step"
 }
 
-# Runs one step of deploy.conf in the release folder, if the project has it. Sets RUN_STATUS.
+# Runs "$@" with a time limit of $1 seconds (0: none), in a process group of its own, so a
+# timeout stops everything the command started. Returns its exit code; sets TIMED_OUT to 1 when
+# the limit stopped it. Its stdin is /dev/null: a background group must never read the terminal.
+run_limited() {
+    local limit="$1" started status
+    shift
+    TIMED_OUT=0
+    started="$(date +%s)"
+
+    # A pipeline subshell, as in `report`, does not get the EXIT trap that stops the group. Signals
+    # ignored, as in on_exit, stay ignored.
+    if [ "$BASH_SUBSHELL" -gt 0 ] && [ "$(trap -p INT)" != "trap -- '' SIGINT" ]; then
+        trap 'limit_stop; exit 130' INT
+        trap 'limit_stop; exit 143' TERM
+        trap 'limit_stop; exit 129' HUP
+    fi
+
+    # Job control gives each background job its own process group. Its job notices ("Terminated")
+    # go to stderr, so that is hidden until the jobs are reaped; the command keeps the real one.
+    exec 4>&2 2>/dev/null
+    LIMIT_FD=1
+    set -m
+    "$@" < /dev/null 2>&4 4>&- &
+    LIMIT_PID=$!
+
+    if [ "$limit" -gt 0 ]; then
+        (
+            sleep "$limit"
+            kill -TERM -- "-$LIMIT_PID" 2>/dev/null || exit 0
+
+            # A few seconds to exit cleanly, then forced.
+            for _ in 1 2 3; do
+                sleep 1
+                kill -0 -- "-$LIMIT_PID" 2>/dev/null || exit 0
+            done
+            kill -KILL -- "-$LIMIT_PID" 2>/dev/null
+        ) < /dev/null > /dev/null 2>&1 4>&- &
+        LIMIT_DOG=$!
+    fi
+    set +m
+
+    wait "$LIMIT_PID" && status=0 || status=$?
+
+    if [ "$limit" -gt 0 ] && [ "$status" -ne 0 ] && [ $(($(date +%s) - started)) -ge "$limit" ]; then
+        TIMED_OUT=1
+        # Lets the watchdog finish stopping the rest of the group.
+        wait "$LIMIT_DOG" || true
+        LIMIT_DOG=""
+    fi
+
+    # On success the group stays: a step may start a worker that should outlive it.
+    LIMIT_PID=""
+    limit_stop
+
+    return "$status"
+}
+
+# Stops what run_limited is running: the watchdog, and the command's whole process group. Gives
+# back the real stderr.
+limit_stop() {
+    if [ -n "$LIMIT_DOG" ]; then
+        kill -KILL -- "-$LIMIT_DOG" 2>/dev/null || true
+        wait "$LIMIT_DOG" 2>/dev/null || true
+        LIMIT_DOG=""
+    fi
+
+    if [ -n "$LIMIT_PID" ]; then
+        kill -KILL -- "-$LIMIT_PID" 2>/dev/null || true
+        wait "$LIMIT_PID" 2>/dev/null || true
+        LIMIT_PID=""
+    fi
+
+    if [ "$LIMIT_FD" -eq 1 ]; then
+        exec 2>&4 4>&-
+        LIMIT_FD=0
+    fi
+}
+
+# The time limit for PHP_RELOAD_CMD and NOTIFY_CMD: $1 seconds, or STEP_TIMEOUT when smaller.
+short_limit() {
+    if [ "$STEP_TIMEOUT" -gt 0 ] && [ "$STEP_TIMEOUT" -lt "$1" ]; then
+        printf '%s' "$STEP_TIMEOUT"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# Runs one step of deploy.conf in the release folder, if the project has it. Sets RUN_STATUS, and
+# RUN_ERROR to the message for a failed step.
 run_step() {
     local status
 
     RUN_STATUS=0
+    RUN_ERROR=""
     declare -F "$1" > /dev/null || return 0
     say "Running $1"
 
     # Off here, so `set -e` inside the subshell stops the step at its first failing command.
     set +e
+    run_limited "$STEP_TIMEOUT" step_body "$1"
+    status=$?
+    set -e
+
+    # A plain return would trip `set -e` in the caller; it reads RUN_STATUS instead.
+    RUN_STATUS="$status"
+
+    if [ "$TIMED_OUT" -eq 1 ]; then
+        RUN_ERROR="$1 ran past STEP_TIMEOUT ($STEP_TIMEOUT s)"
+    elif [ "$status" -ne 0 ]; then
+        RUN_ERROR="$1 failed"
+    fi
+}
+
+# The body of run_step, in its own process group. On the rails, the step's exit code comes back
+# through the pipe to rail.
+step_body() {
     if [ "$RAILS" -eq 1 ]; then
         (
             set -e
             cd "$RELEASE_DIR"
             "$1"
         ) 2>&1 | rail
-        status="${PIPESTATUS[0]}"
-    else
-        (
-            set -e
-            cd "$RELEASE_DIR"
-            "$1"
-        )
-        status=$?
+        return "${PIPESTATUS[0]}"
     fi
-    set -e
 
-    # A plain return would trip `set -e` in the caller; it reads RUN_STATUS instead.
-    RUN_STATUS="$status"
+    (
+        set -e
+        cd "$RELEASE_DIR"
+        "$1"
+    )
 }
 
 link_shared() {
@@ -1102,7 +1226,7 @@ run_live_step() {
     LOG_RELEASE="$live"
     STAGE="$1"
     run_step "$1"
-    [ "$RUN_STATUS" -eq 0 ] || fail "$1 failed"
+    [ "$RUN_STATUS" -eq 0 ] || fail "$RUN_ERROR"
 }
 
 # Not named down and up: deploy.conf defines those.
@@ -1335,7 +1459,7 @@ deploy() {
     for step in preflight build verify; do
         STAGE="$step"
         run_step "$step"
-        [ "$RUN_STATUS" -eq 0 ] || fail "$step failed"
+        [ "$RUN_STATUS" -eq 0 ] || fail "$RUN_ERROR"
     done
 
     STAGE=switch
@@ -1344,7 +1468,7 @@ deploy() {
     switch_to "$NEW_RELEASE"
 
     run_step after_switch
-    [ "$RUN_STATUS" -eq 0 ] || say "after_switch failed; carrying on"
+    [ "$RUN_STATUS" -eq 0 ] || say "$RUN_ERROR; carrying on"
 
     STAGE=check
     if is_down; then
@@ -1667,27 +1791,33 @@ check_health() {
 
     # Off here, so `set -e` inside the subshell stops the step at its first failing command.
     set +e
-    (
-        set -e
-        cd "$dir"
-        RELEASE_DIR="$dir"
-        RELEASE_NAME="$(basename "$dir")"
-        export RELEASE_DIR RELEASE_NAME
-        # shellcheck source=/dev/null
-        . ./deploy.conf > /dev/null 2>&1
-        health
-    ) > "$output" 2>&1
+    run_limited "$STEP_TIMEOUT" health_body "$dir" > "$output" 2>&1
     status=$?
     set -e
 
     last="$(sed '/^[[:space:]]*$/d' "$output" | tail -n1)"
     rm -f "$output"
 
-    if [ "$status" -eq 0 ]; then
+    if [ "$TIMED_OUT" -eq 1 ]; then
+        check_bad "health: ran past STEP_TIMEOUT ($STEP_TIMEOUT s)"
+    elif [ "$status" -eq 0 ]; then
         check_ok "health: ${last:-ok}"
     else
         check_bad "health: ${last:-failed with exit code $status}"
     fi
+}
+
+health_body() {
+    (
+        set -e
+        cd "$1"
+        RELEASE_DIR="$1"
+        RELEASE_NAME="$(basename "$1")"
+        export RELEASE_DIR RELEASE_NAME
+        # shellcheck source=/dev/null
+        . ./deploy.conf > /dev/null 2>&1
+        health
+    )
 }
 
 # A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
@@ -2447,7 +2577,8 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   RELEASE_WAIT    Seconds to wait for a new commit's release tag, 0 for none ($RELEASE_WAIT)
   PHP_BIN         PHP binary ($PHP_BIN)
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
-  PHP_RELOAD_CMD  Run after each switch (${PHP_RELOAD_CMD:-none})
+  PHP_RELOAD_CMD  Run after each switch, up to 60 s (${PHP_RELOAD_CMD:-none})
+  STEP_TIMEOUT    Seconds a deploy.conf step may run, 0 for no limit ($STEP_TIMEOUT)
   DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
   NOTIFY_URL      Webhook for alerts, gets JSON with "text" ($([ -n "$NOTIFY_URL" ] && printf set || printf 'not set'))
   NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT ($([ -n "$NOTIFY_CMD" ] && printf set || printf 'not set'))
@@ -2455,6 +2586,26 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   STAGING_SERVERS Staging slots s1..sN, each in <folder of DEPLOY_BASE>/sN ($STAGING_SERVERS)
   STAGING_URL     Slot URL with {slot}; default: sN. before the host of CHECK_URL ($(redact "${STAGING_URL:-not set}"))
 EOF
+}
+
+# Makes every git call against a remote fail fast on a dead or stalled network: no password
+# prompt, a stop when HTTPS moves under 1000 bytes/s for 30 s, and for SSH a 10 s connect timeout
+# and a stop after 30 s of silence. Settings the user made win: the git HTTP variables when set, and
+# their SSH command keeps its own options, as ssh takes the first value of each.
+git_fail_fast() {
+    local ssh_cmd
+
+    export GIT_TERMINAL_PROMPT=0
+    export GIT_HTTP_LOW_SPEED_LIMIT="${GIT_HTTP_LOW_SPEED_LIMIT:-1000}"
+    export GIT_HTTP_LOW_SPEED_TIME="${GIT_HTTP_LOW_SPEED_TIME:-30}"
+
+    # GIT_SSH names a program that may not take ssh options; left alone.
+    if [ -z "${GIT_SSH_COMMAND:-}" ] && [ -n "${GIT_SSH:-}" ]; then
+        return 0
+    fi
+
+    ssh_cmd="${GIT_SSH_COMMAND:-$(git config --get core.sshCommand 2>/dev/null || true)}"
+    export GIT_SSH_COMMAND="${ssh_cmd:-ssh} -o ConnectTimeout=10 -o BatchMode=yes -o ServerAliveInterval=10 -o ServerAliveCountMax=3"
 }
 
 # Runs only once bash has read the whole file, so a `git pull` of the engine during a run cannot
@@ -2471,6 +2622,7 @@ main() {
     fi
 
     trap on_exit EXIT
+    git_fail_fast
 
     # A signal exits with 128 + its number, so on_exit cleans up once.
     trap 'exit 130' INT

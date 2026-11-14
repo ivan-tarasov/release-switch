@@ -240,10 +240,11 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `CHECK_VERSION` | `1` | `0` to only wait for a 200, for a project that cannot send `X-App-Version` yet |
 | `PHP_BIN` | `php` | PHP binary, for the project's steps |
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
-| `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt` |
+| `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt`. Stopped after 60 s with a warning |
+| `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status` and `log`, e.g. `America/Toronto`. `status` says "today at" and "yesterday at" for recent deploys. Release names stay in UTC |
 | `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON: `text`, `project`, `event` |
-| `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` |
+| `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT`. Stopped after 30 s with a warning |
 | `NOTIFY_ON` | problems | `problems`, or `all` to also send successful deploys |
 | `STAGING_SERVERS` | `0` | Number of staging slots, `s1` to `sN` (see [Staging](#staging)) |
 | `STAGING_URL` | `sN.` before the host of `CHECK_URL` | Slot URL, with `{slot}` for `s1`, `s2`, ... e.g. `https://user:pass@{slot}.example.com/` |
@@ -427,7 +428,12 @@ up() {
 ```
 
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMPOSER_BIN`,
-`DEPLOY_SLOT` and `DEPLOY_HOST`.
+`DEPLOY_SLOT` and `DEPLOY_HOST`. Their input is empty, so a command that asks a question gets no
+answer instead of waiting. Each step has `STEP_TIMEOUT` seconds.
+
+Git calls to the repo fail fast on a dead network: no password prompt, a 10 s SSH connect timeout,
+and a stop when the transfer stalls for 30 s. Your own `GIT_SSH_COMMAND` or `core.sshCommand` keeps
+its options, and `GIT_HTTP_LOW_SPEED_LIMIT`/`GIT_HTTP_LOW_SPEED_TIME` win when set.
 
 The project must send the release name as a header, so the check knows the new code is live:
 
@@ -459,7 +465,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
-`PHP_RELOAD_CMD`, a signal after the switch, a rollback with the live folder missing, prune and
+`PHP_RELOAD_CMD`, `STEP_TIMEOUT` and git timeouts, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

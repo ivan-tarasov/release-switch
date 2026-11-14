@@ -53,7 +53,8 @@ checks `git ls-remote` every 5 seconds until the tag is there, and shows how lon
 (`Waiting for the release tag on abc1234 (25 s of 90)`). It waits only when the commit is under
 5 minutes old and the repo already has `v*` tags; a repo without them never waits. If no tag comes
 within `RELEASE_WAIT` seconds, or the commit is older, the deploy goes on without a tag and warns.
-`deploy --no-wait` skips the wait once, `RELEASE_WAIT=0` turns it off.
+`deploy --no-wait` skips the wait once, `RELEASE_WAIT=0` turns it off. `--ref` and `--pr` never
+wait: they deploy a commit picked by hand.
 
 A `no-release` merge never gets a tag. git can't see pull request labels, so the release workflow
 marks such a merge with a ref `refs/no-release/<merge sha>` (not a tag) and keeps only the newest
@@ -73,10 +74,14 @@ deploy [project] [command]
   deploy --no-wait  Do not wait for the release tag of a new commit
   deploy --ref <ref>
                     Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
-                    to a release that rollback no longer keeps. Stops if it is already live
+                    to a release that rollback no longer keeps. Stops if it is already live.
+                    Never waits for a release tag
   deploy --branch <name>
                     On a staging slot only: follow that branch from now on and deploy it
                     (see [Staging](#staging))
+  deploy --pr <number>
+                    On a staging slot only: follow the head of that pull request from now on
+                    and deploy it (see [Staging](#staging))
   freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
                     status, status --all and check show it
   unfreeze          Allow deploys again
@@ -108,8 +113,8 @@ deploy [project] [command]
   path [--base]     Print the full path of the live release, and nothing else, to copy or use
                     in `cd "$(deploy path <project>)"`. --base prints DEPLOY_BASE instead.
                     Fails if there is no live release. Also works as `deploy path <project>`
-  slots             One line per staging slot: its branch (or free), live commit, deploy time
-                    and URL
+  slots             One line per staging slot: its branch (PR #N, or free), live commit,
+                    deploy time and URL
   init <checkout>   Move the SHARED paths of an existing checkout into shared/
                     and link them back (add --dry-run to only show what it would do)
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
@@ -279,6 +284,13 @@ already live. `--branch` again switches the slot to another branch. `deploy exam
 the slots, with `free` for a slot that has no branch yet. `status`, `check`, `log`, `rollback`,
 `freeze`, `down`, `up` and `path` work on a slot the same way, as `deploy example@s1 <command>`.
 `--branch` on production is refused: production deploys `DEPLOY_BRANCH`.
+
+To test a pull request before merge, deploy its head: `deploy example@s1 --pr 281`. It uses plain
+git (`refs/pull/281/head` from `REPO_URL`), no GitHub token. The slot stores `pr/281` in `s1/BRANCH`,
+so a plain `deploy example@s1` fetches the PR head again and picks up new commits on the PR. The
+release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), and `slots` shows
+`PR #281`. `--pr` is refused on production, and together with `--branch` or `--ref`. Neither
+`--pr` nor `--ref` waits for a release tag.
 
 The steps of `deploy.conf` see `DEPLOY_SLOT` (`s1`, empty in production) and `DEPLOY_HOST` (the
 host of the check URL, like `s1.example.com`), e.g. to skip a step on staging:

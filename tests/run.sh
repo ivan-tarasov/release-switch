@@ -857,6 +857,18 @@ fi
 grep -q "RELEASE_WAIT must be a whole number of seconds, not 'soon'" "$WORK/wait.log" || fail "no message for RELEASE_WAIT=soon"
 check "a repo without release tags did not wait; a bad RELEASE_WAIT is refused"
 
+sleep 1
+commit "fixture ref no wait"
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+started="$(date +%s)"
+RELEASE_WAIT=60 RELEASE_POLL=1 deploy fixture --ref "$(git -C "$REPO" rev-parse develop)" > "$WORK/wait.log" 2>&1
+[ "$(($(date +%s) - started))" -lt 20 ] || fail "--ref to a new untagged commit waited for a tag"
+if grep -q "Waiting for the release tag" "$WORK/wait.log"; then
+    fail "--ref waited for the release tag"
+fi
+[[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "--ref deployed $(live_release)"
+check "--ref to a new untagged commit deployed $waiting without waiting"
+
 step "Staging slots: a branch each, in their own folder and URL"
 SLOT="$WORK/s1"
 cat >> "$WORK/projects/fixture.env" <<EOF
@@ -960,6 +972,68 @@ grep -q "s2/current is a folder, not a link; move it away" "$WORK/slot.err" || f
 [ ! -e "$WORK/s2/BRANCH" ] || fail "the refused deploy stored a branch"
 rm -rf "$WORK/s2/current"
 check "a deploy into a base whose current is a folder stops and changes nothing"
+
+step "A slot deploys the head of a pull request"
+SLOT2="$WORK/s2"
+mkdir -p "$SLOT2/shared/data"
+printf 'APP_ENV=production\n' > "$SLOT2/shared/.env"
+printf 'slot two\n' > "$SLOT2/shared/data/note.txt"
+slot2_live() {
+    basename "$(readlink "$SLOT2/current" 2>/dev/null)" 2>/dev/null || true
+}
+# Like GitHub: the PR head is only under refs/pull, on no branch.
+git -C "$WORK/feature" checkout --quiet -b pr-seven develop
+printf 'pr one\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "pr one"
+git -C "$WORK/feature" push --quiet origin HEAD:refs/heads/pr-tmp
+git -C "$REPO" update-ref refs/pull/7/head refs/heads/pr-tmp
+git -C "$REPO" update-ref -d refs/heads/pr-tmp
+if deploy fixture@s2 --pr 99 2> "$WORK/slot.err"; then
+    fail "a missing pull request deployed"
+fi
+grep -q "no pull request #99 in the repo" "$WORK/slot.err" || fail "no message for a missing pull request"
+if deploy fixture@s2 --pr seven 2> "$WORK/slot.err"; then
+    fail "--pr seven deployed"
+fi
+grep -qF -- "--pr takes a pull request number, not 'seven'" "$WORK/slot.err" || fail "no message for --pr seven"
+if deploy fixture@s2 --pr 7 --branch feature/x 2> "$WORK/slot.err"; then
+    fail "--pr with --branch deployed"
+fi
+grep -q "use --branch or --pr, not both" "$WORK/slot.err" || fail "no message for --pr with --branch"
+if deploy fixture@s2 --pr 7 --ref develop 2> "$WORK/slot.err"; then
+    fail "--pr with --ref deployed"
+fi
+grep -q "use --pr or --ref, not both" "$WORK/slot.err" || fail "no message for --pr with --ref"
+if deploy fixture --pr 7 > /dev/null 2> "$WORK/slot.err"; then
+    fail "--pr on production was not refused"
+fi
+grep -qF -- "--pr is for staging slots" "$WORK/slot.err" || fail "no message for --pr on production"
+[ ! -e "$SLOT2/BRANCH" ] || fail "a refused --pr stored a branch"
+deploy fixture@s2 --pr 7 > "$WORK/slot.log"
+cat "$WORK/slot.log"
+[ "$(cat "$SLOT2/BRANCH")" = pr/7 ] || fail "the slot did not store pr/7"
+[ "$(cat "$SLOT2/current/VERSION")" = "pr one" ] || fail "the slot does not run the PR head"
+[[ "$(slot2_live)" =~ ^[0-9]{8}-[0-9]{6}-pr7-[0-9a-f]{7,}$ ]] || fail "the release name $(slot2_live) has no pr7"
+first_pr="$(slot2_live)"
+check "fixture@s2 --pr 7 deployed $first_pr"
+
+printf 'pr two\n' > "$WORK/feature/VERSION"
+git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "pr two"
+git -C "$WORK/feature" push --quiet origin HEAD:refs/heads/pr-tmp
+git -C "$REPO" update-ref refs/pull/7/head refs/heads/pr-tmp
+git -C "$REPO" update-ref -d refs/heads/pr-tmp
+deploy fixture@s2 status > "$WORK/slot.log"
+grep -q "Pending:   1 commit(s) on PR #7, not deployed yet" "$WORK/slot.log" || fail "status does not count the new PR commit"
+deploy fixture@s2 > "$WORK/slot.log"
+[ "$(cat "$SLOT2/current/VERSION")" = "pr two" ] || fail "a plain deploy did not pick up the new PR commit"
+[ "$(slot2_live)" != "$first_pr" ] || fail "a plain deploy of the PR slot built nothing new"
+grep -q "pr two" "$WORK/slot.log" || fail "the deploy does not list the new PR commit"
+deploy fixture@s2 > "$WORK/slot.log"
+grep -q "Nothing new on PR #7" "$WORK/slot.log" || fail "a PR slot with nothing new built again"
+deploy fixture slots > "$WORK/slots.log"
+cat "$WORK/slots.log"
+grep -qE "^s2 +PR #7 +[0-9a-f]{7,} +today at " "$WORK/slots.log" || fail "slots does not show PR #7"
+check "a plain deploy picked up the new PR commit, then stopped; status and slots show PR #7"
 
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.

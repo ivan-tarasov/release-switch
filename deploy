@@ -2,7 +2,8 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--force] [--no-wait] | freeze [reason]
+#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait]
+#                     | freeze [reason]
 #                     | unfreeze | status | check | log [count] | path [--base] | rollback [name]
 #                     | init <checkout> [--dry-run] | slots | help]
 #   deploy self-update | self [log [count]] | --version
@@ -19,8 +20,10 @@ SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT 
 PROJECT=""
 
 # The staging slot (s1, s2, ...) from <project>@sN, empty in production, and the branch it follows.
+# SLOT_PR is the pull request number when the slot follows one (its BRANCH file holds pr/<N>).
 DEPLOY_SLOT=""
 SLOT_BRANCH=""
+SLOT_PR=""
 
 # Set while a deploy runs, so the exit trap knows what to clean up.
 NEW_RELEASE=""
@@ -306,15 +309,54 @@ apply_slot() {
     NOTIFY_URL=""
     NOTIFY_CMD=""
     SLOT_BRANCH=""
+    SLOT_PR=""
 
     if [ -f "$DEPLOY_BASE/BRANCH" ]; then
         SLOT_BRANCH="$(cat "$DEPLOY_BASE/BRANCH")"
         DEPLOY_BRANCH="$SLOT_BRANCH"
+        ! is_pr_branch "$SLOT_BRANCH" || SLOT_PR="${SLOT_BRANCH#pr/}"
     fi
 
     PROJECT="$PROJECT@$DEPLOY_SLOT"
     DEPLOY_HOST="$(url_host "$CHECK_URL")"
     export DEPLOY_BASE DEPLOY_SLOT DEPLOY_HOST
+}
+
+# True when a slot branch $1 names a pull request: pr/<N>.
+is_pr_branch() {
+    [[ "$1" =~ ^pr/[1-9][0-9]*$ ]]
+}
+
+# The remote ref of DEPLOY_BRANCH: refs/pull/<N>/head when the slot follows a pull request.
+branch_ref() {
+    if [ -n "$SLOT_PR" ]; then
+        printf 'refs/pull/%s/head' "$SLOT_PR"
+    else
+        printf 'refs/heads/%s' "$DEPLOY_BRANCH"
+    fi
+}
+
+# DEPLOY_BRANCH for people: "PR #7" for a pull request.
+branch_label() {
+    if [ -n "$SLOT_PR" ]; then
+        printf 'PR #%s' "$SLOT_PR"
+    else
+        printf '%s' "$DEPLOY_BRANCH"
+    fi
+}
+
+# A commits-only clone of DEPLOY_BRANCH from repo $1 into $2, with HEAD at its tip. A clone never
+# fetches refs/pull/*, so a pull request head is fetched on its own.
+history_clone() {
+    if [ -z "$SLOT_PR" ]; then
+        git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$1" "$2" 2>/dev/null
+
+        return
+    fi
+
+    git clone --quiet --bare --filter=tree:0 --single-branch "$1" "$2" 2>/dev/null \
+        && git -C "$2" fetch --quiet origin "+$(branch_ref):refs/heads/deploy-pr" 2>/dev/null \
+        && git -C "$2" symbolic-ref HEAD refs/heads/deploy-pr
 }
 
 resolve_base() {
@@ -526,8 +568,7 @@ shipped_commits() {
     if [ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
         tmp="$(mktemp -d)"
         git_dir="$tmp/repo"
-        git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$REPO_URL" "$git_dir" \
-            2>/dev/null || git_dir=""
+        history_clone "$REPO_URL" "$git_dir" || git_dir=""
     fi
 
     # Only when going forward: a --ref to an older commit ships nothing new.
@@ -774,7 +815,7 @@ wait_release_tag() {
     warn "no release tag on $short; deploying without one"
 }
 
-# Commits on DEPLOY_BRANCH after the live one. Sets PENDING_COUNT (empty when unknown),
+# Commits on DEPLOY_BRANCH (or the pull request head) after the live one. Sets PENDING_COUNT (empty when unknown),
 # PENDING_LOG (newest first) and PENDING_NOTE (why the count is unknown).
 pending_commits() {
     local repo live_sha tip tmp
@@ -791,10 +832,10 @@ pending_commits() {
         return
     fi
 
-    tip="$(git ls-remote "$repo" "refs/heads/$DEPLOY_BRANCH" 2>/dev/null | cut -f1)" || true
+    tip="$(git ls-remote "$repo" "$(branch_ref)" 2>/dev/null | cut -f1)" || true
 
     if [ -z "$tip" ]; then
-        PENDING_NOTE="cannot read $DEPLOY_BRANCH from the repo"
+        PENDING_NOTE="cannot read $(branch_label) from the repo"
 
         return
     fi
@@ -808,10 +849,10 @@ pending_commits() {
     # Commits only, no files, so even a long history is quick to fetch.
     tmp="$(mktemp -d)"
 
-    if ! git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$repo" "$tmp/repo" 2>/dev/null; then
+    if ! history_clone "$repo" "$tmp/repo"; then
         PENDING_NOTE="cannot clone the repo"
     elif ! git -C "$tmp/repo" merge-base --is-ancestor "$live_sha" HEAD 2>/dev/null; then
-        PENDING_NOTE="the live commit is not on $DEPLOY_BRANCH"
+        PENDING_NOTE="the live commit is not on $(branch_label)"
     else
         PENDING_COUNT="$(git -C "$tmp/repo" rev-list --count "$live_sha..HEAD")"
         PENDING_LOG="$(git -C "$tmp/repo" log --format='%h %s' "$live_sha..HEAD")"
@@ -1078,9 +1119,10 @@ unfreeze() {
 
 # Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
 # --force builds even when that commit is already live; --no-wait does not wait for a release tag.
-# On a staging slot, --branch <name> sets the branch the slot follows and deploys it.
+# On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
+# does the same for the head of that pull request. --ref and --pr never wait for a release tag.
 deploy() {
-    local force=0 ref="" no_wait=0 branch=""
+    local force=0 ref="" no_wait=0 branch="" pr=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -1098,6 +1140,12 @@ deploy() {
                 branch="$2"
                 shift
                 ;;
+            --pr=*) pr="${1#--pr=}" ;;
+            --pr)
+                [ -n "${2:-}" ] || fail "usage: deploy <project>@sN --pr <number>"
+                pr="$2"
+                shift
+                ;;
             *) fail "unknown option for deploy: $1" ;;
         esac
 
@@ -1106,8 +1154,14 @@ deploy() {
 
     if [ -z "$DEPLOY_SLOT" ]; then
         [ -z "$branch" ] || fail "--branch is for staging slots (deploy ${PROJECT:-<project>}@s1 --branch $branch); production deploys DEPLOY_BRANCH ($DEPLOY_BRANCH), or use --ref"
+        [ -z "$pr" ] || fail "--pr is for staging slots (deploy ${PROJECT:-<project>}@s1 --pr $pr); production deploys DEPLOY_BRANCH ($DEPLOY_BRANCH), or use --ref"
     elif [ -n "$branch" ]; then
         [ -z "$ref" ] || fail "use --branch or --ref, not both"
+        [ -z "$pr" ] || fail "use --branch or --pr, not both"
+        ! is_pr_branch "$branch" || fail "$branch is how a slot stores a pull request; use --pr ${branch#pr/}"
+    elif [ -n "$pr" ]; then
+        [ -z "$ref" ] || fail "use --pr or --ref, not both"
+        [[ "$pr" =~ ^[1-9][0-9]*$ ]] || fail "--pr takes a pull request number, not '$pr'"
     elif [ -z "$SLOT_BRANCH" ]; then
         fail "$PROJECT has no branch yet; set one: deploy $PROJECT --branch <name>"
     fi
@@ -1137,7 +1191,18 @@ deploy() {
         printf '%s\n' "$branch" > "$DEPLOY_BASE/BRANCH"
         DEPLOY_BRANCH="$branch"
         SLOT_BRANCH="$branch"
+        SLOT_PR=""
         say "$PROJECT now follows $branch"
+    fi
+
+    if [ -n "$pr" ]; then
+        [ "$(git ls-remote "$REPO_URL" "refs/pull/$pr/head" 2>/dev/null | cut -f2)" = "refs/pull/$pr/head" ] \
+            || fail "no pull request #$pr in the repo (no refs/pull/$pr/head)"
+        printf 'pr/%s\n' "$pr" > "$DEPLOY_BASE/BRANCH"
+        DEPLOY_BRANCH="pr/$pr"
+        SLOT_BRANCH="pr/$pr"
+        SLOT_PR="$pr"
+        say "$PROJECT now follows PR #$pr"
     fi
 
     local stamp sha live_sha="" tip err
@@ -1146,10 +1211,10 @@ deploy() {
 
     # Like Deployer's check_remote: an empty release would only push a good one out.
     if [ -n "$PREVIOUS_RELEASE" ] && [ -z "$ref" ] && [ "$force" -eq 0 ]; then
-        tip="$(git ls-remote "$REPO_URL" "refs/heads/$DEPLOY_BRANCH" 2>/dev/null | cut -f1)" || true
+        tip="$(git ls-remote "$REPO_URL" "$(branch_ref)" 2>/dev/null | cut -f1)" || true
 
         if [ -n "$live_sha" ] && [ "$tip" = "$live_sha" ]; then
-            say "Nothing new on $DEPLOY_BRANCH: $PREVIOUS_RELEASE already runs ${tip:0:7}"
+            say "Nothing new on $(branch_label): $PREVIOUS_RELEASE already runs ${tip:0:7}"
             say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--force"
 
             return
@@ -1158,10 +1223,18 @@ deploy() {
 
     stamp="$(date -u +%Y%m%d-%H%M%S)"
 
-    say "Cloning ${ref:-$DEPLOY_BRANCH}"
+    say "Cloning ${ref:-$(branch_label)}"
     NEW_RELEASE="$stamp"
 
-    if [ -z "$ref" ]; then
+    if [ -z "$ref" ] && [ -n "$SLOT_PR" ]; then
+        # A clone never fetches refs/pull/*, so the head is fetched on its own. Errors are redacted.
+        if ! err="$({ git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" \
+            && git -C "$DEPLOY_BASE/releases/$stamp" fetch --quiet origin "$(branch_ref)" \
+            && git -C "$DEPLOY_BASE/releases/$stamp" checkout --quiet --detach FETCH_HEAD; } 2>&1)"; then
+            [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
+            fail "could not fetch PR #$SLOT_PR from $REPO_URL"
+        fi
+    elif [ -z "$ref" ]; then
         # Git may print the URL with its token, so its errors are shown redacted.
         if ! err="$(git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/$stamp" 2>&1)"; then
             [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
@@ -1186,7 +1259,14 @@ deploy() {
         fi
     fi
     sha="$(git -C "$DEPLOY_BASE/releases/$stamp" rev-parse --short HEAD)"
-    wait_release_tag "$DEPLOY_BASE/releases/$stamp" "$no_wait"
+
+    if [ -z "$ref" ] && [ -n "$SLOT_PR" ]; then
+        TAG="pr$SLOT_PR"
+    else
+        # A named ref is picked by hand: it keeps its tag in the name, but never waits for one.
+        [ -z "$ref" ] || no_wait=1
+        wait_release_tag "$DEPLOY_BASE/releases/$stamp" "$no_wait"
+    fi
 
     NEW_RELEASE="$stamp${TAG:+-$TAG}-$sha"
     LOG_RELEASE="$NEW_RELEASE"
@@ -1302,9 +1382,9 @@ show_pending() {
     if [ -z "$PENDING_COUNT" ]; then
         printf 'Pending:   unknown (%s)\n' "$PENDING_NOTE"
     elif [ "$PENDING_COUNT" = 0 ]; then
-        printf 'Pending:   none (live is the tip of %s)\n' "$DEPLOY_BRANCH"
+        printf 'Pending:   none (live is the tip of %s)\n' "$(branch_label)"
     else
-        printf 'Pending:   %s commit(s) on %s, not deployed yet\n' "$PENDING_COUNT" "$DEPLOY_BRANCH"
+        printf 'Pending:   %s commit(s) on %s, not deployed yet\n' "$PENDING_COUNT" "$(branch_label)"
         printf '%s\n' "$PENDING_LOG" | sed -n '1,10s/^/             /p'
         more=$((PENDING_COUNT - 10))
         [ "$more" -le 0 ] || printf '             ... and %s more\n' "$more"
@@ -1672,6 +1752,7 @@ slot_row() {
         time="$(release_time "$live")"
     fi
 
+    [ -z "$SLOT_PR" ] || SLOT_BRANCH="PR #$SLOT_PR"
     printf '%s\t%s\t%s\t%s\t%s\n' "$DEPLOY_SLOT" "${SLOT_BRANCH:-free}" "$sha" "$time" "$(redact "${CHECK_URL:--}")"
 }
 
@@ -1876,9 +1957,11 @@ Commands:
                              Build the newest commit and switch to it (the default). Stops if
                              that commit is already live, unless --force. --ref deploys a tag,
                              branch or commit instead. A commit under 5 minutes old waits for
-                             its release tag, unless --no-wait
+                             its release tag, unless --no-wait or --ref
   deploy --branch <name>     On a slot only: follow that branch from now on and deploy it. A
                              plain deploy of the slot then deploys the newest commit of it
+  deploy --pr <number>       On a slot only: follow the head of that pull request, the same way.
+                             Plain git, no GitHub token
   freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
   unfreeze                   Allow deploys again
   down [reason]              Run the down() step of the live release, like a maintenance page.
@@ -1898,7 +1981,7 @@ Commands:
   rollback [name]            Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
                              it, like the sha or tag)
-  slots                      One line per staging slot: its branch (or free), live commit,
+  slots                      One line per staging slot: its branch (PR #N, or free), live commit,
                              deploy time and URL
   init <checkout> [--dry-run]
                              Move the SHARED paths of an existing checkout into shared/
@@ -2000,7 +2083,7 @@ main() {
 
     command="${1:-deploy}"
     case "$command" in
-        --force | --no-wait | --ref | --ref=* | --branch | --branch=*) command=deploy ;;
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=*) command=deploy ;;
     esac
 
     case "$command" in
@@ -2014,7 +2097,7 @@ main() {
             [ $# -eq 0 ] || shift
             deploy "$@"
             ;;
-        --force | --no-wait | --ref | --ref=* | --branch | --branch=*)
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=*)
             deploy "$@"
             ;;
         freeze)

@@ -948,6 +948,19 @@ serves "$prod" || fail "production does not serve $prod"
 [ "$(cat "$BASE/current/slot")" = " 127.0.0.1" ] || fail "production steps do not see an empty DEPLOY_SLOT and its host"
 check "slots lists s1 and a free s2; bad slots and values are refused; production is unchanged"
 
+step "A current folder that is not a link is refused"
+# Like a web panel making the document root of a new subdomain.
+mkdir -p "$WORK/s2/current/public"
+printf 'panel log\n' > "$WORK/s2/current/error_log"
+if deploy fixture@s2 --branch feature/x 2> "$WORK/slot.err"; then
+    fail "a deploy over a current folder succeeded"
+fi
+grep -q "s2/current is a folder, not a link; move it away" "$WORK/slot.err" || fail "no message for a current folder"
+[ "$(find "$WORK/s2/current" -mindepth 1 | wc -l | tr -d ' ')" = 2 ] || fail "the deploy changed the current folder"
+[ ! -e "$WORK/s2/BRANCH" ] || fail "the refused deploy stored a branch"
+rm -rf "$WORK/s2/current"
+check "a deploy into a base whose current is a folder stops and changes nothing"
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

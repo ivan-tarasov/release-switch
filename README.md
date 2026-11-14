@@ -305,7 +305,8 @@ release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), an
 `deploy example@sN --branch feature/login` would, and prints the slot's URL as the last line.
 `deploy example stage --pr 281` does the same for a pull request. With no free slot, it takes the
 first slot whose branch is gone from the repo, and says which branch it replaces. When all slots
-are busy, it fails and shows the `slots` list.
+are busy, it fails and shows the `slots` list. It takes each slot under the slot's lock, so two `stage` runs at
+once never pick the same slot.
 
 `deploy example@s1 free` forgets the slot's branch, so `stage` can use it again. The site and its
 releases stay until then. It takes the slot's lock, so it never runs during a deploy of the slot.

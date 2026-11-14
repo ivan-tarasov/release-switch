@@ -430,6 +430,9 @@ lock_text() {
 # Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
     local state
+
+    # stage took it already, for this slot.
+    [ "$LOCK_DIR" != "$DEPLOY_BASE/.deploy.lock" ] || return 0
     LOCK_DIR="$DEPLOY_BASE/.deploy.lock"
 
     # mkdir is atomic, and unlike flock it exists everywhere.
@@ -1834,7 +1837,7 @@ show_slots() {
 # Deploys a branch (or --pr <N>) to the slot that already follows it, else to the first free slot,
 # else to the first slot whose branch is gone from the repo. Then prints the slot's URL last.
 stage() {
-    local branch="" pr="" want i slot="" free="" gone="" usage="usage: deploy <project> stage <branch> | --pr <number>"
+    local branch="" pr="" want i slot="" following="" free="" gone="" usage="usage: deploy <project> stage <branch> | --pr <number>"
 
     require_slots stage
 
@@ -1851,20 +1854,34 @@ stage() {
 
     for ((i = 1; i <= STAGING_SERVERS; i++)); do
         if [ "${SLOT_BRANCHES[$((i - 1))]}" = "$want" ]; then
-            slot="s$i"
-            break
+            following="s$i"
         elif [ -z "${SLOT_BRANCHES[$((i - 1))]}" ]; then
-            [ -n "$free" ] || free="s$i"
+            free+=" s$i"
         elif [ "${SLOT_GONE[$((i - 1))]}" -eq 1 ]; then
-            [ -n "$gone" ] || gone="s$i"
+            gone+=" s$i"
         fi
     done
 
-    if [ -z "$slot$free" ] && [ -n "$gone" ]; then
-        say "No free slot; $PROJECT@$gone follows ${SLOT_BRANCHES[$((${gone#s} - 1))]}, which is gone from the repo, so it takes $want"
+    # Each slot is taken under its lock, so two runs never pick the same one.
+    if [ -n "$following" ]; then
+        claim_slot "$following" "$want" "$want" \
+            || fail "$PROJECT@$following follows $want, but another run holds its lock; try again when it is done"
+        slot="$following"
     fi
 
-    slot="${slot:-${free:-$gone}}"
+    for i in $free; do
+        [ -z "$slot" ] || break
+        ! claim_slot "$i" "" "$want" || slot="$i"
+    done
+
+    for i in $gone; do
+        [ -z "$slot" ] || break
+
+        if claim_slot "$i" "${SLOT_BRANCHES[$((${i#s} - 1))]}" "$want"; then
+            slot="$i"
+            say "No free slot; $PROJECT@$i follows ${SLOT_BRANCHES[$((${i#s} - 1))]}, which is gone from the repo, so it takes $want"
+        fi
+    done
 
     if [ -z "$slot" ]; then
         show_slots | rail >&2
@@ -1886,6 +1903,28 @@ stage() {
         redact "$CHECK_URL"
         printf '\n'
     fi
+}
+
+# Takes the lock of slot $1 for stage when nobody holds it, and keeps it for the deploy. Keeps it
+# only while the slot's BRANCH is still $2 (empty: free) or already $3; else lets it go and fails.
+claim_slot() {
+    local base followed
+
+    base="$(DEPLOY_SLOT="$1" && apply_slot && mkdir -p "$DEPLOY_BASE" && cd "$DEPLOY_BASE" && pwd -P)" || return 1
+    mkdir "$base/.deploy.lock" 2>/dev/null || return 1
+    LOCK_DIR="$base/.deploy.lock"
+    printf '%s %s stage\n' "$$" "$(date +%s)" > "$LOCK_DIR/owner.$$"
+    mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner"
+    followed="$(cat "$base/BRANCH" 2>/dev/null || true)"
+
+    if [ "$followed" = "$2" ] || [ "$followed" = "$3" ]; then
+        return 0
+    fi
+
+    rm -rf "$LOCK_DIR"
+    LOCK_DIR=""
+
+    return 1
 }
 
 # Forgets the branch of the slot; its site and releases stay until the slot is used again.

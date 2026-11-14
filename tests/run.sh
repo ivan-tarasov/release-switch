@@ -1134,6 +1134,31 @@ deploy fixture slots update > "$WORK/update.log"
 grep -qE "^s2 +free +skipped$" "$WORK/update.log" || fail "the summary does not skip the free s2"
 check "stage took s2 from the gone feature/y; slots update skips a free slot"
 
+step "stage takes each slot under its lock, so two runs never pick the same one"
+deploy fixture@s1 free > /dev/null
+# Like another stage that took s1 a moment ago.
+sleep 60 &
+holder=$!
+mkdir "$SLOT/.deploy.lock"
+printf '%s %s stage\n' "$holder" "$(date +%s)" > "$SLOT/.deploy.lock/owner"
+deploy fixture stage feature/z > "$WORK/stage.log"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage took the locked s1"
+[ ! -e "$SLOT/BRANCH" ] || fail "stage wrote BRANCH of the locked s1"
+[ ! -e "$SLOT2/.deploy.lock" ] || fail "stage left the lock of s2 behind"
+if deploy fixture stage feature/x > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage deployed with the only free slot locked"
+fi
+grep -q "all 2 slots are busy" "$WORK/stage.err" || fail "no busy message with the free slot locked"
+mv "$SLOT/.deploy.lock" "$SLOT2/.deploy.lock"
+if deploy fixture stage feature/z > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage deployed to a slot another run holds"
+fi
+grep -q "fixture@s2 follows feature/z, but another run holds its lock" "$WORK/stage.err" \
+    || fail "no message for a locked slot on the same branch"
+kill "$holder" 2>/dev/null || true
+rm -rf "$SLOT2/.deploy.lock"
+check "stage skipped a locked free slot, failed with no slot left, and refused a locked slot on its branch"
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

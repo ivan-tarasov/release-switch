@@ -2,12 +2,13 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait]
-#                     | freeze [reason]
-#                     | unfreeze | status | check | log [count] | path [--base] | rollback [name]
+#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
+#                     | freeze [reason] | down [reason] [--yes] | up
+#                     | unfreeze | status | check | log [count] | path [--base] | rollback [name] [--yes]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
-#                     | free | copy-from <project> [--yes] [path ...] | help]
+#                     | free | copy-from <project> [--yes] [path ...] | help [command]]
 #   deploy self-update | self [log [count]] | --version
+#   deploy [project] <command> --help
 
 set -euo pipefail
 
@@ -60,6 +61,13 @@ LIMIT_FD=0
 
 # The last fail() message, for the alert.
 FAIL_MESSAGE=""
+
+# 1 with --yes or -y: rollback, down and deploy --force do not ask.
+YES=0
+
+# The commands, for help and for typo hints.
+COMMANDS=(deploy freeze unfreeze down up status check log path rollback slots stage free copy-from init self help
+    version)
 
 # The commits a deploy ships, "<sha> <subject>" per line, newest first. Empty when unknown or none.
 SHIPPED=""
@@ -115,14 +123,55 @@ warn() {
 
 fail() {
     FAIL_MESSAGE="$(redact "$*")"
-
-    if [ "$RAILS" -eq 1 ]; then
-        printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$FAIL_MESSAGE" >&2
-    else
-        printf 'deploy: %s\n' "$FAIL_MESSAGE" >&2
-    fi
+    error_line "$FAIL_MESSAGE"
 
     exit 1
+}
+
+error_line() {
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$1" >&2
+    else
+        printf 'deploy: %s\n' "$1" >&2
+    fi
+}
+
+is_terminal() {
+    [ -t 0 ] && [ -t 1 ]
+}
+
+# Asks $1 with [y/N] on the terminal. True only for y or yes.
+ask_yes() {
+    local answer
+
+    printf '%s' "$(say "$1 [y/N] ")"
+    read -r answer || answer=""
+
+    case "$answer" in
+        y | Y | yes | YES) return 0 ;;
+    esac
+
+    return 1
+}
+
+# Before a risky change: on a terminal and without --yes, shows the lines after $1, asks $1 and
+# stops with 0 on no. Without a terminal (cron, pipes) it goes on, silent.
+confirm() {
+    local question="$1" line
+    shift
+
+    if [ "$YES" -eq 1 ] || ! is_terminal; then
+        return 0
+    fi
+
+    for line in "$@"; do
+        say "$line"
+    done
+
+    ask_yes "$question" && return 0
+
+    say "Nothing done"
+    exit 0
 }
 
 # Puts each line of its input on the rail.
@@ -1231,16 +1280,28 @@ run_live_step() {
 
 # Not named down and up: deploy.conf defines those.
 maintenance_down() {
-    resolve_base
-    acquire_lock down
-    DOWN_REASON="$1"
+    local arg words=()
+
+    for arg in "$@"; do
+        case "$arg" in
+            --yes | -y) YES=1 ;;
+            *) words+=("$arg") ;;
+        esac
+    done
+
+    DOWN_REASON="${words[*]-}"
     export DOWN_REASON
+    resolve_base
+    confirm "Take the site down?" "Taking $PROJECT down: ${DOWN_REASON:-no reason given}" \
+        "The site shows its maintenance page until: deploy ${PROJECT:+$PROJECT }up"
+
+    acquire_lock down
     run_live_step down
 
-    printf '%s\n%s\n' "$(date -u +%Y%m%d%H%M%S)" "$1" > "$DEPLOY_BASE/$DOWN_FILE"
+    printf '%s\n%s\n' "$(date -u +%Y%m%d%H%M%S)" "$DOWN_REASON" > "$DEPLOY_BASE/$DOWN_FILE"
     log_event down "$LOG_RELEASE" ok
     ACTION=""
-    say "The site is down for maintenance: ${1:-no reason given}"
+    say "The site is down for maintenance: ${DOWN_REASON:-no reason given}"
     say "Deploys skip the site check until: deploy ${PROJECT:+$PROJECT }up"
 }
 
@@ -1296,9 +1357,10 @@ deploy() {
         case "$1" in
             --force) force=1 ;;
             --no-wait) no_wait=1 ;;
+            --yes | -y) YES=1 ;;
             --ref=*) ref="${1#--ref=}" ;;
             --ref)
-                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait]"
+                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"
                 ref="$2"
                 shift
                 ;;
@@ -1371,7 +1433,7 @@ deploy() {
         say "$PROJECT now follows PR #$pr"
     fi
 
-    local stamp sha live_sha="" tip err
+    local stamp sha live_sha="" tip err subject forced
 
     [ -z "$PREVIOUS_RELEASE" ] || live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
 
@@ -1427,6 +1489,17 @@ deploy() {
         fi
     fi
     sha="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse --short HEAD)"
+
+    if [ "$force" -eq 1 ]; then
+        subject="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" log -1 --format=%s 2>/dev/null || true)"
+        forced="--force deploys $sha: $subject"
+
+        if [ -n "$live_sha" ] && [ "$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse HEAD)" = "$live_sha" ]; then
+            forced="--force rebuilds $sha, which $PREVIOUS_RELEASE already runs: $subject"
+        fi
+
+        confirm "Build it?" "$forced"
+    fi
 
     if [ -z "$ref" ] && [ -n "$SLOT_PR" ]; then
         TAG="pr$SLOT_PR"
@@ -1493,6 +1566,20 @@ deploy() {
 }
 
 rollback() {
+    local name="" arg live target note
+
+    for arg in "$@"; do
+        case "$arg" in
+            --yes | -y) YES=1 ;;
+            -*) fail "usage: deploy [project] rollback [name] [--yes]" ;;
+            *)
+                [ -z "$name" ] || fail "usage: deploy [project] rollback [name] [--yes]"
+                name="$arg"
+                ;;
+        esac
+    done
+
+    set -- "$name"
     resolve_base
     refuse_current_folder
     refuse_if_frozen
@@ -1500,21 +1587,24 @@ rollback() {
     acquire_lock rollback
     remove_unfinished
 
-    local live target
     live="$(current_release)"
     [ -n "$live" ] || fail "$DEPLOY_BASE/current is not a link; nothing to roll back"
 
     if [ -n "${1:-}" ]; then
         target="$(find_release "$1")"
         [ "$target" != "$live" ] || fail "$target is already live"
-
-        if is_bad "$target"; then
-            rm -f "$DEPLOY_BASE/releases/$target/.bad"
-            say "Cleared the bad mark on $target"
-        fi
+        note="$live is not marked bad"
     else
         target="$(rollback_target "$live")"
         [ -n "$target" ] || fail "no good release older than $live"
+        note="$live gets marked bad, so later rollbacks skip it"
+    fi
+
+    confirm "Roll back?" "Rollback of $PROJECT: live $live → $target" "$note"
+
+    if [ -n "${1:-}" ] && is_bad "$target"; then
+        rm -f "$DEPLOY_BASE/releases/$target/.bad"
+        say "Cleared the bad mark on $target"
     fi
 
     ACTION=rollback
@@ -2137,7 +2227,7 @@ is_env_path() {
 # Copies SHARED paths from production's shared/ into the slot's shared/, never an env file. Asks
 # first on a terminal, unless --yes. Each path is copied to a temp name and renamed into place.
 copy_from() {
-    local source="" yes=0 arg conf conf_label shared_text path wanted=() paths=() from to old size answer
+    local source="" yes=0 arg conf conf_label shared_text path wanted=() paths=() from to old size
     local usage="usage: deploy <project>@sN copy-from <project> [--yes] [path ...]"
 
     for arg in "$@"; do
@@ -2212,18 +2302,13 @@ copy_from() {
     done | rail
 
     if [ "$yes" -eq 0 ]; then
-        [ -t 0 ] && [ -t 1 ] || fail "not a terminal, so copy-from cannot ask; add --yes to copy"
-        printf '%s' "$(say "Copy these into $PROJECT? Its files are replaced [y/N] ")"
-        read -r answer || answer=""
+        is_terminal || fail "not a terminal, so copy-from cannot ask; add --yes to copy"
 
-        case "$answer" in
-            y | Y | yes | YES) ;;
-            *)
-                say "Nothing copied"
+        if ! ask_yes "Copy these into $PROJECT? Its files are replaced"; then
+            say "Nothing copied"
 
-                return
-                ;;
-        esac
+            return
+        fi
     fi
 
     acquire_lock copy-from
@@ -2501,8 +2586,298 @@ self_log() {
         --date='format-local:%Y-%m-%d %H:%M %Z' HEAD
 }
 
+# The help block of command $1, as the full usage shows it: its forms on the left, what they do on
+# the right.
+command_help() {
+    case "$1" in
+        deploy)
+            cat <<EOF
+  deploy [--ref <ref>] [--force] [--no-wait] [--yes]
+                             Build the newest commit and switch to it (the default). Stops if
+                             that commit is already live, unless --force; on a terminal --force
+                             asks first, and --yes skips that. --ref deploys a tag, branch or
+                             commit instead. A commit under 5 minutes old waits for its release
+                             tag, unless --no-wait or --ref
+  deploy --branch <name>     On a slot only: follow that branch from now on and deploy it. A
+                             plain deploy of the slot then deploys the newest commit of it
+  deploy --pr <number>       On a slot only: follow the head of that pull request, the same way.
+                             Plain git, no GitHub token
+EOF
+            ;;
+        freeze)
+            cat <<EOF
+  freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
+EOF
+            ;;
+        unfreeze)
+            cat <<EOF
+  unfreeze                   Allow deploys again
+EOF
+            ;;
+        down)
+            cat <<EOF
+  down [reason] [--yes]      Run the down() step of the live release, like a maintenance page.
+                             Deploys and check skip the site check until up. Asks first on a
+                             terminal; --yes skips that
+EOF
+            ;;
+        up)
+            cat <<EOF
+  up                         Run the up() step and check the site again
+EOF
+            ;;
+        status)
+            cat <<EOF
+  status                     Show the live release, the rollback target, pending commits, all
+                             releases and the site
+  status --all               One line per project, and one for the engine; fails if any site does
+                             not serve its live release. Production only, no slots
+EOF
+            ;;
+        check)
+            cat <<EOF
+  check                      Check the live release, its shared links, its health() step, the
+                             site and the lock; changes nothing. Problems go to stderr; exits
+                             with 1 on any
+  check --all                The same for every project, production only
+EOF
+            ;;
+        log)
+            cat <<EOF
+  log [count]                The last deploys and rollbacks, with results (20 by default)
+EOF
+            ;;
+        path)
+            cat <<EOF
+  path [--base]              Print the full path of the live release, or of DEPLOY_BASE with
+                             --base, and nothing else: cd "\$(deploy path <project>)"
+EOF
+            ;;
+        rollback)
+            cat <<EOF
+  rollback [name] [--yes]    Point current at the previous good release and mark the live one
+                             bad, or go to the named release (a full name or a unique part of
+                             it, like the sha or tag). Asks first on a terminal; --yes skips that
+EOF
+            ;;
+        slots)
+            cat <<EOF
+  slots                      One line per staging slot: its branch (PR #N, or free (DEPLOY_BRANCH);
+                             "(gone)" when the repo no longer has it), live commit, deploy time
+                             and URL
+  slots update               Redeploy each slot whose branch has new commits, for cron; a free
+                             slot follows DEPLOY_BRANCH, even one never deployed. Skips a slot
+                             whose branch is gone from the repo. Exits with 1 if any slot failed
+EOF
+            ;;
+        stage)
+            cat <<EOF
+  stage <branch>, stage --pr <number>
+                             Deploy to the slot that already follows it, else to the first free
+                             one, else to one whose branch is gone, and print the slot's URL
+                             last. Fails when all slots are busy
+EOF
+            ;;
+        free)
+            cat <<EOF
+  free                       On a slot only: forget its branch, so stage can use it, and deploy
+                             the newest DEPLOY_BRANCH. A plain deploy of a free slot does the
+                             same, and the slot stays free
+EOF
+            ;;
+        copy-from)
+            cat <<EOF
+  copy-from <project> [--yes] [path ...]
+                             On a slot only: copy production's SHARED data into the slot's
+                             shared/, all paths but .env, or only the named ones. Asks first;
+                             --yes skips that, and without a terminal it is required
+EOF
+            ;;
+        init)
+            cat <<EOF
+  init <checkout> [--dry-run]
+                             Move the SHARED paths of an existing checkout into shared/
+EOF
+            ;;
+        self)
+            cat <<EOF
+  self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
+                             versions and their release notes
+  self log [count]           The engine's last commits (10 by default), and ones not pulled yet
+EOF
+            ;;
+        help)
+            cat <<EOF
+  help [command]             Show this help, or only the help of one command, like
+                             <command> --help and <command> -h
+EOF
+            ;;
+        version)
+            cat <<EOF
+  --version, version         The engine's version: its newest release tag
+EOF
+            ;;
+    esac
+}
+
+# shellcheck disable=SC2016
+command_examples() {
+    case "$1" in
+        deploy) printf '%s\n' "deploy example" "deploy example --ref v2026.11.1" "deploy example@s1 --pr 42" ;;
+        freeze) printf '%s\n' 'deploy example freeze "release week"' ;;
+        unfreeze) printf '%s\n' "deploy example unfreeze" ;;
+        down) printf '%s\n' 'deploy example down "database upgrade"' "deploy example down --yes" ;;
+        up) printf '%s\n' "deploy example up" ;;
+        status) printf '%s\n' "deploy example status" "deploy status --all" ;;
+        check) printf '%s\n' "deploy example check" "deploy check --all" ;;
+        log) printf '%s\n' "deploy example log 50" ;;
+        path) printf '%s\n' 'cd "$(deploy path example)"' ;;
+        rollback) printf '%s\n' "deploy example rollback" "deploy example rollback v2026.11.1" ;;
+        slots) printf '%s\n' "deploy example slots" "deploy example slots update" ;;
+        stage) printf '%s\n' "deploy example stage feature/login" "deploy example stage --pr 42" ;;
+        free) printf '%s\n' "deploy example@s1 free" ;;
+        copy-from) printf '%s\n' "deploy example@s1 copy-from example" "deploy example@s1 copy-from example storage --yes" ;;
+        init) printf '%s\n' 'deploy example init "$HOME/site" --dry-run' ;;
+        self) printf '%s\n' "deploy self" "deploy self log 5" ;;
+        help) printf '%s\n' "deploy help rollback" "deploy example rollback --help" ;;
+        version) printf '%s\n' "deploy --version" ;;
+    esac
+}
+
+# The help of one command: its usage line, its block of the full usage, and examples.
+command_usage() {
+    local block form prefix="[project] "
+    block="$(command_help "$1")"
+    # The first form of the block, without its text.
+    form="$(printf '%s\n' "$block" | sed -E '1!d; s/^ +//; s/ {2,}.*$//')"
+
+    case "$1" in
+        self | help | version) prefix="" ;;
+        free | copy-from) prefix="<project>@sN " ;;
+    esac
+
+    printf 'Usage: deploy %s%s\n\n%s\n\nExamples:\n' "$prefix" "$form" "$block"
+    command_examples "$1" | sed 's/^/  /'
+}
+
+is_command() {
+    local name
+
+    for name in "${COMMANDS[@]}"; do
+        [ "$name" != "$1" ] || return 0
+    done
+
+    return 1
+}
+
+# The topic of `deploy [project] <command> --help` (or -h) and `deploy [project] help <topic>`, as
+# named in COMMANDS. Nothing for the full help or a run that is not a help request.
+help_topic() {
+    local command arg
+
+    if [ $# -gt 0 ] && is_project "$1"; then
+        shift
+    fi
+
+    command="${1:-deploy}"
+    [ $# -eq 0 ] || shift
+
+    case "$command" in
+        help | -h | --help)
+            printf '%s' "$(command_name "${1:-}")"
+
+            return
+            ;;
+    esac
+
+    command="$(command_name "$command")"
+    is_command "$command" || return 0
+
+    for arg in "$@"; do
+        case "$arg" in
+            -h | --help)
+                printf '%s' "$command"
+
+                return
+                ;;
+        esac
+    done
+}
+
+# The name in COMMANDS for $1: deploy for its options, self for self-update, version for --version.
+command_name() {
+    case "$1" in
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=* | --yes | -y) printf deploy ;;
+        self-update) printf self ;;
+        --version) printf version ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
+# The edit distance (Levenshtein) of $1 and $2.
+edit_distance() {
+    local a="$1" b="$2" i j cost best prev=() cur=()
+
+    for ((j = 0; j <= ${#b}; j++)); do
+        prev[j]=$j
+    done
+
+    for ((i = 1; i <= ${#a}; i++)); do
+        cur=("$i")
+
+        for ((j = 1; j <= ${#b}; j++)); do
+            cost=1
+            [ "${a:i-1:1}" != "${b:j-1:1}" ] || cost=0
+            best=$((prev[j] + 1))
+            [ $((cur[j - 1] + 1)) -ge "$best" ] || best=$((cur[j - 1] + 1))
+            [ $((prev[j - 1] + cost)) -ge "$best" ] || best=$((prev[j - 1] + cost))
+            cur[j]=$best
+        done
+
+        prev=("${cur[@]}")
+    done
+
+    printf '%s' "${prev[${#b}]}"
+}
+
+# The command closest to $1: one that starts with it, else one at most 1 edit away (2 for a name of
+# 5 letters or more). Nothing when none is close.
+closest_command() {
+    local name distance best="" best_distance=3 limit=1
+
+    [ ${#1} -lt 5 ] || limit=2
+
+    for name in "${COMMANDS[@]}"; do
+        if [ ${#1} -ge 2 ] && [ "${name#"$1"}" != "$name" ]; then
+            printf '%s' "$name"
+
+            return
+        fi
+    done
+
+    for name in "${COMMANDS[@]}"; do
+        distance="$(edit_distance "$1" "$name")"
+
+        if [ "$distance" -le "$limit" ] && [ "$distance" -lt "$best_distance" ]; then
+            best="$name"
+            best_distance="$distance"
+        fi
+    done
+
+    printf '%s' "$best"
+}
+
+# One line with the closest command, and where to find the rest. Exits with 2, like a usage error.
+unknown_command() {
+    local guess
+    guess="$(closest_command "$1")"
+    error_line "Unknown command: $1.${guess:+ Did you mean $guess?}"
+    printf 'Run deploy help to see all commands.\n' >&2
+    exit 2
+}
+
 usage() {
-    local projects
+    local projects name
     projects="$(list_projects | paste -sd ' ' -)"
 
     cat <<EOF
@@ -2513,58 +2888,13 @@ The project can be left out when there is only one. A staging slot is named <pro
 (tarasov@s1) and takes the same commands, with its own folder, URL and branch.
 
 Commands:
-  deploy [--ref <ref>] [--force] [--no-wait]
-                             Build the newest commit and switch to it (the default). Stops if
-                             that commit is already live, unless --force. --ref deploys a tag,
-                             branch or commit instead. A commit under 5 minutes old waits for
-                             its release tag, unless --no-wait or --ref
-  deploy --branch <name>     On a slot only: follow that branch from now on and deploy it. A
-                             plain deploy of the slot then deploys the newest commit of it
-  deploy --pr <number>       On a slot only: follow the head of that pull request, the same way.
-                             Plain git, no GitHub token
-  freeze [reason]            Refuse deploys and rollbacks until unfreeze, showing the reason
-  unfreeze                   Allow deploys again
-  down [reason]              Run the down() step of the live release, like a maintenance page.
-                             Deploys and check skip the site check until up
-  up                         Run the up() step and check the site again
-  status                     Show the live release, the rollback target, pending commits, all
-                             releases and the site
-  status --all               One line per project, and one for the engine; fails if any site does
-                             not serve its live release. Production only, no slots
-  check                      Check the live release, its shared links, its health() step, the
-                             site and the lock; changes nothing. Problems go to stderr; exits
-                             with 1 on any
-  check --all                The same for every project, production only
-  log [count]                The last deploys and rollbacks, with results (20 by default)
-  path [--base]              Print the full path of the live release, or of DEPLOY_BASE with
-                             --base, and nothing else: cd "\$(deploy path <project>)"
-  rollback [name]            Point current at the previous good release and mark the live one
-                             bad, or go to the named release (a full name or a unique part of
-                             it, like the sha or tag)
-  slots                      One line per staging slot: its branch (PR #N, or free (DEPLOY_BRANCH);
-                             "(gone)" when the repo no longer has it), live commit, deploy time
-                             and URL
-  slots update               Redeploy each slot whose branch has new commits, for cron; a free
-                             slot follows DEPLOY_BRANCH, even one never deployed. Skips a slot
-                             whose branch is gone from the repo. Exits with 1 if any slot failed
-  stage <branch>, stage --pr <number>
-                             Deploy to the slot that already follows it, else to the first free
-                             one, else to one whose branch is gone, and print the slot's URL
-                             last. Fails when all slots are busy
-  free                       On a slot only: forget its branch, so stage can use it, and deploy
-                             the newest DEPLOY_BRANCH. A plain deploy of a free slot does the
-                             same, and the slot stays free
-  copy-from <project> [--yes] [path ...]
-                             On a slot only: copy production's SHARED data into the slot's
-                             shared/, all paths but .env, or only the named ones. Asks first;
-                             --yes skips that, and without a terminal it is required
-  init <checkout> [--dry-run]
-                             Move the SHARED paths of an existing checkout into shared/
-  self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
-                             versions and their release notes
-  self log [count]           The engine's last commits (10 by default), and ones not pulled yet
-  help                       Show this help
-  --version, version         The engine's version: its newest release tag
+EOF
+
+    for name in "${COMMANDS[@]}"; do
+        command_help "$name"
+    done
+
+    cat <<EOF
 
 Settings${PROJECT:+ for $PROJECT} (value now in effect):
   DEPLOY_BASE     Folder with releases/, shared/ and current (${DEPLOY_BASE:-not set})
@@ -2611,7 +2941,7 @@ git_fail_fast() {
 # Runs only once bash has read the whole file, so a `git pull` of the engine during a run cannot
 # change the code that runs.
 main() {
-    local projects command
+    local projects command topic
 
     # Before a project is loaded: the engine itself, and commands where each project loads its own
     # settings.
@@ -2628,6 +2958,14 @@ main() {
     trap 'exit 130' INT
     trap 'exit 143' TERM
     trap 'exit 129' HUP
+
+    # The help of one command needs no project and runs nothing.
+    topic="$(help_topic "$@")"
+    if [ -n "$topic" ]; then
+        is_command "$topic" || unknown_command "$topic"
+        report "help $topic" command_usage "$topic"
+        exit 0
+    fi
 
     if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
         case "${2:-}" in
@@ -2672,16 +3010,17 @@ main() {
     apply_defaults
     [ -z "$DEPLOY_SLOT" ] || apply_slot
 
+    command="$(command_name "${1:-deploy}")"
+    case "$command" in
+        -h | --help) ;;
+        *) is_command "$command" || unknown_command "$1" ;;
+    esac
+
     if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
         && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
         projects="$(list_projects | paste -sd ' ' -)"
         fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
     fi
-
-    command="${1:-deploy}"
-    case "$command" in
-        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=*) command=deploy ;;
-    esac
 
     case "$command" in
         deploy | freeze | unfreeze | down | up | rollback | init | stage | free | copy-from)
@@ -2697,7 +3036,7 @@ main() {
             [ $# -eq 0 ] || shift
             deploy "$@"
             ;;
-        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=*)
+        --force | --no-wait | --ref | --ref=* | --branch | --branch=* | --pr | --pr=* | --yes | -y)
             deploy "$@"
             ;;
         freeze)
@@ -2709,7 +3048,7 @@ main() {
             ;;
         down)
             shift
-            maintenance_down "$*"
+            maintenance_down "$@"
             ;;
         up)
             maintenance_up
@@ -2749,7 +3088,8 @@ main() {
             copy_from "$@"
             ;;
         rollback)
-            rollback "${2:-}"
+            shift
+            rollback "$@"
             ;;
         init)
             init "${2:-}" "${3:-}"
@@ -2757,9 +3097,15 @@ main() {
         help | -h | --help)
             report help usage
             ;;
+        version)
+            engine_version
+            printf '\n'
+            ;;
+        self | self-update)
+            fail "$1 works on the engine, not on a project: deploy $1"
+            ;;
         *)
-            usage >&2
-            fail "unknown command: $1"
+            unknown_command "$1"
             ;;
     esac
 }

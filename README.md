@@ -73,7 +73,7 @@ a deploy after a `no-release` merge waits the full `RELEASE_WAIT`, as before.
 deploy [project] [command]
 
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
-                    is already live, unless --force
+                    is already live, unless --force. On a terminal --force asks first
   deploy --no-wait  Do not wait for the release tag of a new commit
   deploy --ref <ref>
                     Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
@@ -90,7 +90,8 @@ deploy [project] [command]
   unfreeze          Allow deploys again
   down [reason]     Run the down() step of the live release, e.g. to show a maintenance page
                     during a risky data change. Until up, deploys and rollbacks do not check
-                    the site, check accepts a 503 and skips health(), and status shows it
+                    the site, check accepts a 503 and skips health(), and status shows it.
+                    On a terminal it asks first
   up                Run the up() step, then check that the site serves the live release again
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock and the site
@@ -104,7 +105,7 @@ deploy [project] [command]
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
-                    and clears the mark if that release had one
+                    and clears the mark if that release had one. On a terminal it asks first
   check             A quick health check that changes nothing: the live release, its shared
                     links, the project's health() step, the site, and a lock held for 30 min
                     or more, or with no owner for 60 s. Problems go to stderr
@@ -137,7 +138,7 @@ deploy [project] [command]
                     its commits when `gh` cannot read them) and the commits not released yet.
                     Stops if the folder has local changes. Short form: self
   self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
-  help              Commands and the settings in effect
+  help [command]    Commands and the settings in effect, or the help of one command
   --version         The engine's version: its newest release tag, like v2026.11.1, with "+N" when
                     it is N commits past it
 ```
@@ -145,6 +146,20 @@ deploy [project] [command]
 `project` is the name of a file in `projects/` (`projects/tarasov.env` is `tarasov`).
 It can be left out when there is only one. A staging slot is `<project>@sN`, like `tarasov@s1`,
 and takes the same commands: `deploy tarasov@s1 status`, `deploy path tarasov@s1`.
+
+`deploy <command> --help`, `deploy <command> -h` and `deploy help <command>` show the help of one
+command: its usage, options and examples. A project in front works too: `deploy tarasov rollback --help`.
+A mistyped command prints one line with the closest command, like
+`Unknown command: rolback. Did you mean rollback?`, and exits with 2.
+
+### Questions before risky commands
+
+`rollback`, `down` and `deploy --force` change the live site, so on a terminal they first show what
+will happen and ask `y/N`: `rollback` shows the live release and the one it goes to, `down` the
+reason and that the site will show its maintenance page, `deploy --force` the commit it builds. Only
+`y` goes on; `n` or an empty answer does nothing and exits with 0. `--yes` (or `-y`) skips the
+question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
+`copy-from` asks the same way.
 
 ## Setup on a server
 

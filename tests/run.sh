@@ -623,7 +623,8 @@ cat "$ALERTS"
 grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" || fail "no alert for the failed build"
 grep -qF '"text":"fixture: deploy ' "$WORK/hook.log" || fail "NOTIFY_URL got no JSON alert"
 grep -qF '"event":"deploy"' "$WORK/hook.log" || fail "the JSON alert has no event"
-NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null
+FIXTURE_DETAILS="$WORK/details" NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null
+grep -qx "FORCED=1" "$WORK/details" || fail "a --force deploy did not set DEPLOY_FORCED=1"
 [ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "a successful deploy sent an alert without NOTIFY_ON=all"
 NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:1/" NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null 2> "$WORK/notify.log" \
     || fail "an alert that cannot be sent failed the deploy"
@@ -662,7 +663,12 @@ step "A deploy lists the commits it ships, in the output, the log and the alert"
 commit "fixture shipped one"
 commit "fixture shipped two"
 sleep 1
-NOTIFY_ON=all NOTIFY_CMD="$alert_cmd" deploy fixture > "$WORK/shipped.log"
+before="$(live_release)"
+: > "$WORK/hook.log"
+# shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here.
+details_cmd='printf "%s|%s|%s|%s\n" "$NOTIFY_STATUS" "$NOTIFY_RELEASE" "$NOTIFY_DURATION" "$DEPLOY_SHA" > "$NOTIFY_FILE"'
+NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd; $details_cmd" NOTIFY_FILE="$WORK/notify-env" \
+    FIXTURE_DETAILS="$WORK/details" deploy fixture > "$WORK/shipped.log"
 cat "$WORK/shipped.log"
 grep -q "^2 commit(s):$" "$WORK/shipped.log" || fail "deploy does not count the commits it ships"
 grep -qE "^  [0-9a-f]+ fixture shipped two$" "$WORK/shipped.log" || fail "deploy does not list the commits it ships"
@@ -673,13 +679,40 @@ grep -q "ok ([0-9]*s)  2 commit(s): fixture shipped two; fixture shipped one$" "
 grep -qE "^  [0-9a-f]+ fixture shipped one$" "$ALERTS" || fail "the alert does not list the commits"
 check "the output, the log and the alert list both commits"
 
+sha="$(git -C "$REPO" rev-parse develop)"
+cat "$WORK/details"
+printf 'SHA=%s\nREF=develop\nPREVIOUS=%s\nAUTHOR=test\nMESSAGE=fixture shipped two\nPERFORMER=%s\nFORCED=0\n' \
+    "$sha" "$before" "${USER:-$(id -un)}" | diff - "$WORK/details" || fail "a step did not get the deploy details"
+cat "$WORK/notify-env"
+grep -qE "^ok\|$(live_release)\|[0-9]+\|$sha$" "$WORK/notify-env" || fail "NOTIFY_CMD did not get the deploy details"
+cat "$WORK/hook.log"
+# shellcheck disable=SC2016 # PHP code, not shell.
+php -r '
+    $a = json_decode(trim(file_get_contents($argv[1])), true);
+    $want = ["event" => "deploy", "status" => "ok", "release" => $argv[2], "previous" => $argv[3], "sha" => $argv[4],
+        "ref" => "develop"];
+    foreach ($want as $key => $value) {
+        if (($a[$key] ?? null) !== $value) {
+            fwrite(STDERR, "$key is " . json_encode($a[$key] ?? null) . "\n");
+            exit(1);
+        }
+    }
+    exit(is_int($a["duration"]) && count($a["commits"]) === 2 && $a["commits"][0]["subject"] === "fixture shipped two"
+        && strlen($a["commits"][0]["sha"]) >= 7 ? 0 : 1);
+' "$WORK/hook.log" "$(live_release)" "$before" "$sha" || fail "the JSON alert lacks the deploy details"
+check "steps, NOTIFY_CMD and the JSON alert get the deploy details and commits"
+
 step "Check alerts only when the result changes"
 : > "$ALERTS"
+: > "$WORK/hook.log"
 for _ in 1 2; do
-    if CHECK_URL="http://127.0.0.1:$PORT/missing" NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null 2>&1; then
+    if CHECK_URL="http://127.0.0.1:$PORT/missing" NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" \
+        deploy fixture check > /dev/null 2>&1; then
         fail "check passed with a 404"
     fi
 done
+grep -qF "\"status\":\"problem\",\"release\":\"$(live_release)\",\"previous\":\"\",\"sha\":\"\"" "$WORK/hook.log" \
+    || fail "the check alert has no status, or deploy details"
 cat "$ALERTS"
 [ "$(grep -c "^check|fixture: check failed: site: .* answered 404" "$ALERTS")" = 1 ] || fail "check did not alert once for the 404"
 NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null || fail "check failed on a healthy site"
@@ -1214,8 +1247,9 @@ if deploy fixture --pr 7 > /dev/null 2> "$WORK/slot.err"; then
 fi
 grep -qF -- "--pr is for staging slots" "$WORK/slot.err" || fail "no message for --pr on production"
 [ ! -e "$SLOT2/BRANCH" ] || fail "a refused --pr stored a branch"
-deploy fixture@s2 --pr 7 > "$WORK/slot.log"
+FIXTURE_DETAILS="$WORK/details" deploy fixture@s2 --pr 7 > "$WORK/slot.log"
 cat "$WORK/slot.log"
+grep -qx "REF=pr/7" "$WORK/details" || fail "a PR slot deploy did not set DEPLOY_REF=pr/7"
 [ "$(cat "$SLOT2/BRANCH")" = pr/7 ] || fail "the slot did not store pr/7"
 [ "$(cat "$SLOT2/current/VERSION")" = "pr one" ] || fail "the slot does not run the PR head"
 [[ "$(slot2_live)" =~ ^[0-9]{8}-[0-9]{6}-pr7-[0-9a-f]{7,}$ ]] || fail "the release name $(slot2_live) has no pr7"

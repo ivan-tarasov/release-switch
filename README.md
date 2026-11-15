@@ -258,8 +258,8 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt`. Stopped after 60 s with a warning |
 | `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status` and `log`, e.g. `America/Toronto`. `status` says "today at" and "yesterday at" for recent deploys. Release names stay in UTC |
-| `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON: `text`, `project`, `event` |
-| `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT`. Stopped after 30 s with a warning |
+| `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON (see [Alerts](#alerts)) |
+| `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` (see [Alerts](#alerts)). Stopped after 30 s with a warning |
 | `NOTIFY_ON` | problems | `problems`, or `all` to also send successful deploys |
 | `STAGING_SERVERS` | `0` | Number of staging slots, `s1` to `sN` (see [Staging](#staging)) |
 | `STAGING_URL` | `sN.` before the host of `CHECK_URL` | Slot URL, with `{slot}` for `s1`, `s2`, ... e.g. `https://user:pass@{slot}.example.com/` |
@@ -279,6 +279,32 @@ anything else, like local mail:
 ```bash
 NOTIFY_CMD='printf "%s\n" "$NOTIFY_TEXT" | mail -s "deploy alert" you@example.com'
 ```
+
+`NOTIFY_URL` gets JSON like this. `status` is `ok`, `failed`, `rolled back` (a rollback, or a deploy
+whose check failed and switched back) or `problem` (a failed `check`). `commits` lists up to 20
+commits the deploy ships, newest first, with full shas, and is empty when unknown. `check` alerts
+only fill `project`, `event`, `status`, `release` (the live one) and `duration`.
+
+```json
+{
+  "text": "shop: deploy 20261114-101500-v1.4.0-a1b2c3d: ok (42s)\n2 commit(s):\n  a1b2c3d Fix the cart\n  e4f5a6b Add coupons",
+  "project": "shop",
+  "event": "deploy",
+  "status": "ok",
+  "release": "20261114-101500-v1.4.0-a1b2c3d",
+  "previous": "20261113-170200-v1.3.9-9f8e7d6",
+  "sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+  "ref": "main",
+  "duration": 42,
+  "commits": [
+    {"sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "subject": "Fix the cart"},
+    {"sha": "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", "subject": "Add coupons"}
+  ]
+}
+```
+
+`NOTIFY_CMD` gets `NOTIFY_EVENT`, `NOTIFY_TEXT`, `NOTIFY_PROJECT`, `NOTIFY_STATUS`, `NOTIFY_RELEASE`
+and `NOTIFY_DURATION` (seconds), plus the `DEPLOY_*` variables in [deploy.conf](#deployconf).
 
 For alerts on a down site, run `check` from cron. The alerts do the telling, so cron mail is off:
 
@@ -443,7 +469,20 @@ up() {
 ```
 
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMPOSER_BIN`,
-`DEPLOY_SLOT` and `DEPLOY_HOST`. Their input is empty, so a command that asks a question gets no
+`DEPLOY_SLOT` and `DEPLOY_HOST`, and these details of the run (also in `NOTIFY_CMD`). They are empty
+when unknown:
+
+| Variable | deploy | rollback | down, up | check |
+|---|---|---|---|---|
+| `DEPLOY_SHA` | full sha of the new release | sha of the target release | sha of the live release | empty |
+| `DEPLOY_REF` | the branch, `pr/<N>`, or the `--ref` value | empty | empty | empty |
+| `DEPLOY_PREVIOUS_RELEASE` | release live before (empty on the first deploy) | release live before | empty | empty |
+| `DEPLOY_AUTHOR` | author name of the commit | author of the target's commit | author of the live commit | empty |
+| `DEPLOY_MESSAGE` | subject of the commit | subject of the target's commit | subject of the live commit | empty |
+| `DEPLOY_PERFORMER` | user who ran it | user who ran it | user who ran it | user who ran it |
+| `DEPLOY_FORCED` | `1` with `--force`, else `0` | `0` | `0` | `0` |
+
+Their input is empty, so a command that asks a question gets no
 answer instead of waiting. Each step has `STEP_TIMEOUT` seconds.
 
 Git calls to the repo fail fast on a dead network: no password prompt, a 10 s SSH connect timeout,

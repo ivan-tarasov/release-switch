@@ -69,8 +69,20 @@ YES=0
 COMMANDS=(deploy freeze unfreeze down up status check log path rollback slots stage free copy-from init self help
     version)
 
-# The commits a deploy ships, "<sha> <subject>" per line, newest first. Empty when unknown or none.
+# The commits a deploy ships, "<full sha> <subject>" per line, newest first. Empty when unknown
+# or none.
 SHIPPED=""
+
+# What steps and NOTIFY_CMD know about the run, set as soon as known; empty when unknown. The sha,
+# author and message are those of the release being deployed or rolled back to.
+DEPLOY_SHA=""
+DEPLOY_REF=""
+DEPLOY_PREVIOUS_RELEASE=""
+DEPLOY_AUTHOR=""
+DEPLOY_MESSAGE=""
+DEPLOY_PERFORMER="${USER:-$(id -un 2>/dev/null || true)}"
+DEPLOY_FORCED=0
+export DEPLOY_SHA DEPLOY_REF DEPLOY_PREVIOUS_RELEASE DEPLOY_AUTHOR DEPLOY_MESSAGE DEPLOY_PERFORMER DEPLOY_FORCED
 
 # Rails like Clack's (┌ ◇ │ └) when stdout is a terminal, or with DEPLOY_RAILS=1. Pipes and cron
 # get plain lines. Colors only on a terminal, and never with NO_COLOR.
@@ -589,17 +601,24 @@ on_exit() {
 
 # One line per deploy or rollback in <base>/deploy.log: UTC time, action, release, result, seconds.
 log_event() {
-    local file="$DEPLOY_BASE/deploy.log" seconds
+    local file="$DEPLOY_BASE/deploy.log" seconds status
     seconds="$(($(date +%s) - STARTED))"
 
     printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1${DEPLOY_SLOT:+@$DEPLOY_SLOT}" "${2:--}" "$3" \
         "$seconds" "$(shipped_summary)" >> "$file"
 
+    case "$1:$3" in
+        rollback:ok*) status="rolled back" ;;
+        *:ok*) status=ok ;;
+        *"switched back"*) status="rolled back" ;;
+        *) status=failed ;;
+    esac
+
     # Failures and rollbacks always; a plain successful deploy only with NOTIFY_ON=all.
     if [ "$3" != ok ]; then
-        notify "$1" "$1 ${2:--}: $3${FAIL_MESSAGE:+ ($FAIL_MESSAGE)}$(shipped_list)"
+        notify "$1" "$1 ${2:--}: $3${FAIL_MESSAGE:+ ($FAIL_MESSAGE)}$(shipped_list)" "$status" "$2"
     elif [ "$NOTIFY_ON" = all ]; then
-        notify "$1" "$1 $2: ok (${seconds}s)$(shipped_list)"
+        notify "$1" "$1 $2: ok (${seconds}s)$(shipped_list)" "$status" "$2"
     fi
 
     # Keeps it small: past 1000 lines, only the last 500 stay.
@@ -609,17 +628,29 @@ log_event() {
 }
 
 # The last lines of deploy.log, with times in DISPLAY_TZ.
-# Sends an alert: $1 is the event (deploy, rollback, check), $2 the text. NOTIFY_URL gets JSON
-# with a "text" field, which Slack-style webhooks show. NOTIFY_CMD runs with the text in
-# $NOTIFY_TEXT. Never fails: an alert that cannot be sent only warns.
+# Sends an alert: $1 is the event (deploy, rollback, check), $2 the text, $3 the status (ok,
+# failed, rolled back, problem) and $4 the release. NOTIFY_URL gets JSON with a "text" field, which
+# Slack-style webhooks show, and the deploy details. NOTIFY_CMD runs with them in NOTIFY_* and
+# DEPLOY_* variables. Never fails: an alert that cannot be sent only warns.
 notify() {
-    local text body
+    local text body duration
     text="$(redact "${PROJECT:+$PROJECT: }$2")"
+    duration="$(($(date +%s) - STARTED))"
 
     if [ -n "$NOTIFY_URL" ]; then
         # shellcheck disable=SC2016 # PHP code, not shell.
-        body="$("$PHP_BIN" -r 'echo json_encode(["text" => $argv[1], "project" => $argv[2], "event" => $argv[3]],
-            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' "$text" "$PROJECT" "$1" 2>/dev/null)" || body=""
+        body="$("$PHP_BIN" -r '
+            $commits = [];
+            foreach (array_slice(array_filter(explode("\n", $argv[9]), "strlen"), 0, 20) as $line) {
+                $parts = explode(" ", $line, 2);
+                $commits[] = ["sha" => $parts[0], "subject" => $parts[1] ?? ""];
+            }
+            echo json_encode(["text" => $argv[1], "project" => $argv[2], "event" => $argv[3],
+                "status" => $argv[4], "release" => $argv[5], "previous" => $argv[6], "sha" => $argv[7],
+                "ref" => $argv[8], "duration" => (int) $argv[10], "commits" => $commits],
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' \
+            "$text" "$PROJECT" "$1" "$3" "$(redact "$4")" "$(redact "$DEPLOY_PREVIOUS_RELEASE")" "$DEPLOY_SHA" \
+            "$(redact "$DEPLOY_REF")" "$(redact "$SHIPPED")" "$duration" 2>/dev/null)" || body=""
 
         if [ -z "$body" ] || ! curl --silent --fail --max-time 10 --output /dev/null \
             --header 'Content-Type: application/json' --data "$body" "$NOTIFY_URL"; then
@@ -629,7 +660,7 @@ notify() {
 
     if [ -n "$NOTIFY_CMD" ]; then
         if ! run_limited "$(short_limit 30)" env NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" \
-            sh -c "$NOTIFY_CMD" > /dev/null 2>&1; then
+            NOTIFY_STATUS="$3" NOTIFY_RELEASE="$4" NOTIFY_DURATION="$duration" sh -c "$NOTIFY_CMD" > /dev/null 2>&1; then
             if [ "$TIMED_OUT" -eq 1 ]; then
                 warn "NOTIFY_CMD ran past $(short_limit 30) s"
             else
@@ -637,6 +668,13 @@ notify() {
             fi
         fi
     fi
+}
+
+# Sets DEPLOY_SHA, DEPLOY_AUTHOR and DEPLOY_MESSAGE from the commit checked out in folder $1.
+commit_details() {
+    DEPLOY_SHA="$(git -C "$1" rev-parse HEAD 2>/dev/null || true)"
+    DEPLOY_AUTHOR="$(git -C "$1" log -1 --format=%an 2>/dev/null || true)"
+    DEPLOY_MESSAGE="$(git -C "$1" log -1 --format=%s 2>/dev/null || true)"
 }
 
 # Finds the commits from the live commit ($1) to the new release ($2). A shallow release has no
@@ -658,7 +696,7 @@ shipped_commits() {
 
     # Only when going forward: a --ref to an older commit ships nothing new.
     if [ -n "$git_dir" ] && git -C "$git_dir" merge-base --is-ancestor "$live_sha" "$new_sha" 2>/dev/null; then
-        SHIPPED="$(git -C "$git_dir" log --format='%h %s' "$live_sha..$new_sha" 2>/dev/null | tr '\t' ' ' || true)"
+        SHIPPED="$(git -C "$git_dir" log --format='%H %s' "$live_sha..$new_sha" 2>/dev/null | tr '\t' ' ' || true)"
     fi
 
     [ -z "$tmp" ] || rm -rf "$tmp"
@@ -682,7 +720,7 @@ shipped_list() {
     [ -n "$SHIPPED" ] || return 0
     count="$(printf '%s\n' "$SHIPPED" | wc -l | tr -d ' ')"
     printf '\n%s commit(s):\n' "$count"
-    printf '%s\n' "$SHIPPED" | sed -n '1,10s/^/  /p'
+    printf '%s\n' "$SHIPPED" | sed -nE '1,10s/^([0-9a-f]{7})[0-9a-f]* /  \1 /p'
     [ "$count" -le 10 ] || printf '  ... and %s more\n' "$((count - 10))"
 }
 
@@ -1268,6 +1306,7 @@ run_live_step() {
     RELEASE_DIR="$DEPLOY_BASE/releases/$live"
     RELEASE_NAME="$live"
     export RELEASE_DIR RELEASE_NAME
+    commit_details "$RELEASE_DIR"
     load_conf "$RELEASE_DIR"
     declare -F "$1" > /dev/null || fail "deploy.conf of $live has no $1 step"
 
@@ -1404,6 +1443,8 @@ deploy() {
 
     mkdir -p "$DEPLOY_BASE/releases"
     PREVIOUS_RELEASE="$(current_release)"
+    DEPLOY_PREVIOUS_RELEASE="$PREVIOUS_RELEASE"
+    DEPLOY_FORCED="$force"
 
     if [ -z "$REPO_URL" ]; then
         [ -n "$PREVIOUS_RELEASE" ] || fail "set REPO_URL for the first deploy"
@@ -1432,6 +1473,8 @@ deploy() {
         SLOT_PR="$pr"
         say "$PROJECT now follows PR #$pr"
     fi
+
+    DEPLOY_REF="${ref:-$DEPLOY_BRANCH}"
 
     local stamp sha live_sha="" tip err subject forced
 
@@ -1489,6 +1532,7 @@ deploy() {
         fi
     fi
     sha="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse --short HEAD)"
+    commit_details "$DEPLOY_BASE/releases/.building-$stamp"
 
     if [ "$force" -eq 1 ]; then
         subject="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" log -1 --format=%s 2>/dev/null || true)"
@@ -1601,6 +1645,8 @@ rollback() {
     fi
 
     confirm "Roll back?" "Rollback of $PROJECT: live $live → $target" "$note"
+    DEPLOY_PREVIOUS_RELEASE="$live"
+    commit_details "$DEPLOY_BASE/releases/$target"
 
     if [ -n "${1:-}" ] && is_bad "$target"; then
         rm -f "$DEPLOY_BASE/releases/$target/.bad"
@@ -1861,11 +1907,11 @@ check_notify() {
 
     if [ "$CHECK_FAILED" -eq 1 ]; then
         if [ "$(cat "$state" 2>/dev/null)" != "${CHECK_KEYS%$'\n'}" ]; then
-            notify check "check failed: $CHECK_PROBLEMS"
+            notify check "check failed: $CHECK_PROBLEMS" problem "$(current_release)"
             printf '%s' "$CHECK_KEYS" > "$state"
         fi
     elif [ -f "$state" ]; then
-        notify check "check ok again"
+        notify check "check ok again" ok "$(current_release)"
         rm -f "$state"
     fi
 }

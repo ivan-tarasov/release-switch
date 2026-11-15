@@ -122,13 +122,44 @@ EOF
 cp "$ROOT/projects/example.env" "$WORK/projects/example.env"
 
 step "Help, without a project file loaded"
-PROJECTS_DIR="$WORK/empty" "$ROOT/deploy" --help | grep -q "^Usage: deploy" || fail "--help shows no usage"
+PROJECTS_DIR="$WORK/empty" "$ROOT/deploy" --help | grep "^Usage: deploy" > /dev/null || fail "--help shows no usage"
 if deploy fixture nope 2> /dev/null; then
     fail "an unknown command succeeded"
 fi
-deploy --help | grep -q "fixture" || fail "--help does not list the project"
-deploy fixture help | grep -q "CHECK_WAIT .*(10)" || fail "an env var does not win over the project file"
+deploy --help | grep "fixture" > /dev/null || fail "--help does not list the project"
+deploy fixture help | grep "CHECK_WAIT .*(10)" > /dev/null || fail "an env var does not win over the project file"
 check "--help works, lists projects and shows env overrides; an unknown command fails"
+
+step "Per-command help and typo hints"
+deploy rollback --help > "$WORK/help.log"
+grep -q "^Usage: deploy \[project\] rollback \[name\] \[--yes\]$" "$WORK/help.log" || fail "rollback --help shows no usage line"
+grep -q "^Examples:$" "$WORK/help.log" || fail "rollback --help shows no examples"
+! grep -q "^Settings" "$WORK/help.log" || fail "rollback --help shows the full usage"
+[ ! -e "$BASE" ] || fail "rollback --help touched DEPLOY_BASE"
+deploy fixture rollback -h | grep "^Usage: deploy \[project\] rollback" > /dev/null || fail "fixture rollback -h shows no rollback help"
+deploy help down | grep "^Usage: deploy \[project\] down \[reason\] \[--yes\]$" > /dev/null || fail "help down shows no down help"
+deploy fixture help copy-from | grep "^Usage: deploy <project>@sN copy-from" > /dev/null || fail "fixture help copy-from shows no copy-from help"
+deploy fixture@s1 status --help | grep "^  status --all" > /dev/null || fail "a slot's status --help shows no status help"
+PROJECTS_DIR="$WORK/empty" "$ROOT/deploy" stage -h | grep "^Usage: deploy \[project\] stage" > /dev/null \
+    || fail "stage -h needs a project"
+deploy help | grep "^Settings" > /dev/null || fail "help no longer shows the full usage"
+set +e
+deploy fixture rolback > /dev/null 2> "$WORK/typo.log"
+code=$?
+set -e
+[ "$code" = 2 ] || fail "a typo exits with $code, not 2"
+grep -q "Unknown command: rolback. Did you mean rollback?" "$WORK/typo.log" || fail "no hint for rolback"
+grep -q "deploy help" "$WORK/typo.log" || fail "a typo does not point to deploy help"
+[ "$(wc -l < "$WORK/typo.log" | tr -d ' ')" = 2 ] || fail "a typo prints more than the hint"
+! deploy stauts 2> "$WORK/typo.log" || fail "stauts succeeded"
+grep -q "Did you mean status?" "$WORK/typo.log" || fail "no hint for stauts without a project"
+! deploy help rolback 2> "$WORK/typo.log" || fail "help rolback succeeded"
+grep -q "Did you mean rollback?" "$WORK/typo.log" || fail "no hint for help rolback"
+if deploy fixture xyzzy 2> "$WORK/typo.log"; then
+    fail "an unknown command succeeded"
+fi
+grep -q "Unknown command: xyzzy.$" "$WORK/typo.log" || fail "a far typo got a hint"
+check "<command> --help, -h and help <command> show one command, with or without a project; a typo gets one hint and exits 2"
 
 step "init --dry-run changes nothing"
 deploy fixture init "$OLD" --dry-run
@@ -1449,6 +1480,75 @@ if command -v script > /dev/null; then
     grep -q "Copied into fixture@s1: data" "$WORK/copy.log" || fail "copy-from does not copy on y"
     diff -r "$BASE/shared/data" "$SLOT/shared/data" > /dev/null || fail "copy-from on y did not copy data/"
     check "copy-from asked on a terminal: n copied nothing, y copied data/"
+else
+    check "skipped: no script command to make a terminal"
+fi
+
+step "rollback, down and deploy --force ask on a terminal"
+# Like on_terminal, but holds the terminal open for $1 seconds after the answer, so a deploy can
+# build. A run that ends before the answer, as with --yes, is fine.
+on_terminal_hold() {
+    local hold="$1" answer="$2"
+    shift 2
+
+    if script --version > /dev/null 2>&1; then
+        { trap '' PIPE; sleep 2; printf '%s\n' "$answer" 2> /dev/null; sleep "$hold"; true; } \
+            | script -qec "$(printf '%q ' "$@")" /dev/null
+    else
+        { trap '' PIPE; sleep 2; printf '%s\n' "$answer" 2> /dev/null; sleep "$hold"; true; } | script -q /dev/null "$@"
+    fi
+}
+# Runs the engine on a terminal with answer $1, into ask.log; fails with the log when it fails.
+ask_run() {
+    local answer="$1"
+    shift
+
+    on_terminal_hold 10 "$answer" env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 DEPLOY_RAILS=0 \
+        "$ROOT/deploy" "$@" > "$WORK/ask.log" 2>&1 || { cat "$WORK/ask.log"; fail "deploy $* failed on a terminal"; }
+}
+deploy fixture down "pipe" > "$WORK/ask.log" 2>&1
+! grep -q "\[y/N\]" "$WORK/ask.log" || fail "down asked in a pipe"
+deploy fixture up > /dev/null
+if command -v script > /dev/null; then
+    live="$(live_release)"
+    count="$(release_count)"
+    ask_run n fixture rollback
+    grep -q "Rollback of fixture: live $live → " "$WORK/ask.log" || fail "rollback does not show live and target"
+    grep -q "Roll back? \[y/N\]" "$WORK/ask.log" || fail "rollback does not ask on a terminal"
+    grep -q "Nothing done" "$WORK/ask.log" || fail "rollback does not stop on n"
+    [ "$(live_release)" = "$live" ] || fail "rollback rolled back after n"
+    [ ! -e "$BASE/.deploy.lock" ] || fail "rollback left the lock after n"
+    ask_run y fixture rollback
+    [ "$(live_release)" != "$live" ] || fail "rollback did not roll back on y"
+    ask_run "" fixture rollback "$live" --yes
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "rollback --yes asked"
+    [ "$(live_release)" = "$live" ] || fail "rollback --yes did not go back to $live"
+    serves "$live" || fail "server does not show $live after rollback --yes"
+
+    ask_run "" fixture down "terminal test"
+    grep -q "Taking fixture down: terminal test" "$WORK/ask.log" || fail "down does not show the reason"
+    grep -q "maintenance page until: deploy fixture up" "$WORK/ask.log" || fail "down does not say the site shows maintenance"
+    grep -q "Nothing done" "$WORK/ask.log" || fail "down does not stop on an empty answer"
+    [ ! -e "$BASE/.down" ] || fail "down went down after an empty answer"
+    ask_run y fixture down "terminal test"
+    [ -e "$BASE/.down" ] || fail "down did not go down on y"
+    deploy fixture up > /dev/null
+    ask_run "" fixture down --yes
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "down --yes asked"
+    [ -e "$BASE/.down" ] || fail "down --yes did not go down"
+    [ "$(sed -n 2p "$BASE/.down")" = "" ] || fail "down --yes took --yes as the reason"
+    deploy fixture up > /dev/null
+
+    ask_run n fixture --force
+    grep -qE -- "--force (rebuilds [0-9a-f]+, which $live already runs|deploys [0-9a-f]+): " "$WORK/ask.log" \
+        || fail "deploy --force does not show the commit it rebuilds"
+    grep -q "Nothing done" "$WORK/ask.log" || fail "deploy --force does not stop on n"
+    [ "$(live_release)" = "$live" ] && [ "$(release_count)" = "$count" ] || fail "deploy --force built after n"
+    [ -z "$(find "$BASE/releases" -maxdepth 1 -name '.building-*')" ] || fail "deploy --force left a .building folder after n"
+    ask_run "" fixture --force --yes
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "deploy --force --yes asked"
+    [ "$(live_release)" != "$live" ] || fail "deploy --force --yes did not deploy"
+    check "on a terminal rollback, down and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes did not ask; a pipe was not asked"
 else
     check "skipped: no script command to make a terminal"
 fi

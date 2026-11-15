@@ -698,7 +698,7 @@ php -r '
         }
     }
     exit(is_int($a["duration"]) && count($a["commits"]) === 2 && $a["commits"][0]["subject"] === "fixture shipped two"
-        && strlen($a["commits"][0]["sha"]) >= 7 ? 0 : 1);
+        && $a["commits"][0]["sha"] === $argv[4] ? 0 : 1);
 ' "$WORK/hook.log" "$(live_release)" "$before" "$sha" || fail "the JSON alert lacks the deploy details"
 check "steps, NOTIFY_CMD and the JSON alert get the deploy details and commits"
 

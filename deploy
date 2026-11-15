@@ -69,7 +69,8 @@ YES=0
 COMMANDS=(deploy freeze unfreeze down up status check log path rollback slots stage free copy-from init self help
     version)
 
-# The commits a deploy ships, "<sha> <subject>" per line, newest first. Empty when unknown or none.
+# The commits a deploy ships, "<full sha> <subject>" per line, newest first. Empty when unknown
+# or none.
 SHIPPED=""
 
 # What steps and NOTIFY_CMD know about the run, set as soon as known; empty when unknown. The sha,
@@ -695,7 +696,7 @@ shipped_commits() {
 
     # Only when going forward: a --ref to an older commit ships nothing new.
     if [ -n "$git_dir" ] && git -C "$git_dir" merge-base --is-ancestor "$live_sha" "$new_sha" 2>/dev/null; then
-        SHIPPED="$(git -C "$git_dir" log --format='%h %s' "$live_sha..$new_sha" 2>/dev/null | tr '\t' ' ' || true)"
+        SHIPPED="$(git -C "$git_dir" log --format='%H %s' "$live_sha..$new_sha" 2>/dev/null | tr '\t' ' ' || true)"
     fi
 
     [ -z "$tmp" ] || rm -rf "$tmp"
@@ -719,7 +720,7 @@ shipped_list() {
     [ -n "$SHIPPED" ] || return 0
     count="$(printf '%s\n' "$SHIPPED" | wc -l | tr -d ' ')"
     printf '\n%s commit(s):\n' "$count"
-    printf '%s\n' "$SHIPPED" | sed -n '1,10s/^/  /p'
+    printf '%s\n' "$SHIPPED" | sed -nE '1,10s/^([0-9a-f]{7})[0-9a-f]* /  \1 /p'
     [ "$count" -le 10 ] || printf '  ... and %s more\n' "$((count - 10))"
 }
 

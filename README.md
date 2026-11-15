@@ -282,8 +282,8 @@ NOTIFY_CMD='printf "%s\n" "$NOTIFY_TEXT" | mail -s "deploy alert" you@example.co
 
 `NOTIFY_URL` gets JSON like this. `status` is `ok`, `failed`, `rolled back` (a rollback, or a deploy
 whose check failed and switched back) or `problem` (a failed `check`). `commits` lists up to 20
-commits the deploy ships, newest first, and is empty when unknown. `check` alerts only fill
-`project`, `event`, `status`, `release` (the live one) and `duration`.
+commits the deploy ships, newest first, with full shas, and is empty when unknown. `check` alerts
+only fill `project`, `event`, `status`, `release` (the live one) and `duration`.
 
 ```json
 {
@@ -297,8 +297,8 @@ commits the deploy ships, newest first, and is empty when unknown. `check` alert
   "ref": "main",
   "duration": 42,
   "commits": [
-    {"sha": "a1b2c3d", "subject": "Fix the cart"},
-    {"sha": "e4f5a6b", "subject": "Add coupons"}
+    {"sha": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678", "subject": "Fix the cart"},
+    {"sha": "e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3", "subject": "Add coupons"}
   ]
 }
 ```

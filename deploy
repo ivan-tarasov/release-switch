@@ -52,6 +52,7 @@ ACTION=""
 LOG_RELEASE=""
 STAGE=""
 STARTED="$(date +%s)"
+LOG_WARNED=0
 
 # The process group run_limited is running, and its watchdog, so on_exit can stop them.
 LIMIT_PID=""
@@ -614,12 +615,12 @@ on_exit() {
 }
 
 # One line per deploy or rollback in <base>/deploy.log: UTC time, action, release, result, seconds.
+# The alert goes first, and a log that cannot be written (disk full, read-only) only warns.
 log_event() {
-    local file="$DEPLOY_BASE/deploy.log" seconds status
+    local file="$DEPLOY_BASE/deploy.log" seconds status line
     seconds="$(($(date +%s) - STARTED))"
-
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1${DEPLOY_SLOT:+@$DEPLOY_SLOT}" "${2:--}" "$3" \
-        "$seconds" "$(shipped_summary)" >> "$file"
+    line="$(printf '%s\t%s\t%s\t%s\t%s\t%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1${DEPLOY_SLOT:+@$DEPLOY_SLOT}" "${2:--}" "$3" \
+        "$seconds" "$(shipped_summary)")"
 
     case "$1:$3" in
         rollback:ok*) status="rolled back" ;;
@@ -635,9 +636,20 @@ log_event() {
         notify "$1" "$1 $2: ok (${seconds}s)$(shipped_list)" "$status" "$2"
     fi
 
+    if ! printf '%s\n' "$line" 2>/dev/null >> "$file"; then
+        if [ "$LOG_WARNED" -eq 0 ]; then
+            warn "could not write to $file"
+            LOG_WARNED=1
+        fi
+
+        return 0
+    fi
+
     # Keeps it small: past 1000 lines, only the last 500 stay.
-    if [ "$(wc -l < "$file")" -gt 1000 ]; then
-        tail -n 500 "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+    if [ "$(wc -l 2>/dev/null < "$file" || echo 0)" -gt 1000 ]; then
+        if ! { tail -n 500 "$file" > "$file.tmp" && mv "$file.tmp" "$file"; } 2>/dev/null; then
+            rm -f "$file.tmp" 2>/dev/null || true
+        fi
     fi
 }
 
@@ -1685,7 +1697,8 @@ deploy() {
             say "Rolling back to $PREVIOUS_RELEASE"
             switch_to "$PREVIOUS_RELEASE"
             # Requests may still run in it, so set it aside now and delete it on the next deploy.
-            mv "$RELEASE_DIR" "$DEPLOY_BASE/releases/.failed-$NEW_RELEASE"
+            mv "$RELEASE_DIR" "$DEPLOY_BASE/releases/.failed-$NEW_RELEASE" 2>/dev/null \
+                || warn "could not set $NEW_RELEASE aside"
         fi
 
         fail "the check failed; ${PREVIOUS_RELEASE:-$NEW_RELEASE, the only release,} is live (data changes stay applied)"
@@ -1749,8 +1762,11 @@ rollback() {
     # Only a plain rollback says the release it leaves is bad; a named one may go forward.
     if [ -z "${1:-}" ]; then
         if [ -d "$DEPLOY_BASE/releases/$live" ]; then
-            touch "$DEPLOY_BASE/releases/$live/.bad"
-            say "Marked $live as bad; later rollbacks skip it"
+            if touch "$DEPLOY_BASE/releases/$live/.bad" 2>/dev/null; then
+                say "Marked $live as bad; later rollbacks skip it"
+            else
+                warn "could not mark $live as bad"
+            fi
         else
             warn "the folder of $live was missing, so it is not marked bad"
         fi
@@ -1990,20 +2006,30 @@ check_bad() {
 }
 
 # Alerts only when the check result changes, so a cron check does not repeat itself.
-# Remembers the last failure in <base>/.check-failed.
+# Remembers the last failure in <base>/.check-failed. With no base folder, in
+# <projects>/.<project>.check-failed instead, so check never makes the base folder.
 check_notify() {
-    local state="$DEPLOY_BASE/.check-failed"
+    local state="$DEPLOY_BASE/.check-failed" spare last
+    spare="$PROJECTS_DIR/.${PROJECT:-default}${DEPLOY_SLOT:+@$DEPLOY_SLOT}.check-failed"
 
     [ -n "$NOTIFY_URL$NOTIFY_CMD" ] || return 0
+    [ -n "$DEPLOY_BASE" ] && [ -d "$DEPLOY_BASE" ] || state="$spare"
+
+    if [ -f "$spare" ]; then
+        last="$(cat "$spare" 2>/dev/null || true)"
+    else
+        last="$(cat "$state" 2>/dev/null || true)"
+    fi
 
     if [ "$CHECK_FAILED" -eq 1 ]; then
-        if [ "$(cat "$state" 2>/dev/null)" != "${CHECK_KEYS%$'\n'}" ]; then
+        if [ "$last" != "${CHECK_KEYS%$'\n'}" ]; then
             notify check "check failed: $CHECK_PROBLEMS" problem "$(current_release)"
-            printf '%s' "$CHECK_KEYS" > "$state"
+            printf '%s' "$CHECK_KEYS" 2>/dev/null > "$state" || warn "could not write $state"
+            [ "$state" = "$spare" ] || rm -f "$spare" 2>/dev/null || true
         fi
-    elif [ -f "$state" ]; then
+    elif [ -f "$state" ] || [ -f "$spare" ]; then
         notify check "check ok again" ok "$(current_release)"
-        rm -f "$state"
+        rm -f "$state" "$spare" 2>/dev/null || true
     fi
 }
 
@@ -2057,6 +2083,7 @@ check() {
 
     if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
         check_bad "no base folder: ${DEPLOY_BASE:-DEPLOY_BASE not set}"
+        check_notify
 
         return 1
     fi

@@ -722,6 +722,54 @@ NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null
 [ "$(wc -l < "$ALERTS" | tr -d ' ')" = 2 ] || fail "a healthy check sent another alert"
 check "one alert for a failing check, one when it is ok again, none while nothing changes"
 
+step "An unwritable deploy.log never stops the alert or the cleanup"
+# A folder in its place: appends fail, as on a full or read-only disk.
+mv "$BASE/deploy.log" "$WORK/deploy.log.kept"
+mkdir "$BASE/deploy.log"
+: > "$ALERTS"
+if FIXTURE_FAIL_BUILD=1 NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null 2> "$WORK/nolog.log"; then
+    fail "a deploy with a failing build succeeded"
+fi
+cat "$WORK/nolog.log"
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" \
+    || fail "no alert for the failed build with an unwritable deploy.log"
+[ ! -e "$BASE/.deploy.lock" ] || fail "the lock stayed after a failed deploy with an unwritable deploy.log"
+[ "$(grep -c "could not write to $BASE/deploy.log" "$WORK/nolog.log")" = 1 ] \
+    || fail "no single warning for the unwritable deploy.log"
+NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null 2> "$WORK/nolog.log" \
+    || fail "an unwritable deploy.log failed a good deploy"
+serves "$(live_release)" || fail "the site does not serve the release deployed with an unwritable deploy.log"
+[ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "a good deploy with an unwritable deploy.log sent an alert"
+rmdir "$BASE/deploy.log"
+mv "$WORK/deploy.log.kept" "$BASE/deploy.log"
+check "with an unwritable deploy.log, a failed deploy still alerts and frees the lock, and a good deploy passes"
+
+step "Check alerts when the base folder is missing"
+sed "s#^DEPLOY_BASE=.*#DEPLOY_BASE=\"$WORK/gone\"#" "$WORK/projects/fixture.env" > "$WORK/projects/gone.env"
+: > "$ALERTS"
+for _ in 1 2; do
+    if NOTIFY_CMD="$alert_cmd" deploy gone check > /dev/null 2> "$WORK/gone.log"; then
+        fail "check passed with no base folder"
+    fi
+done
+cat "$WORK/gone.log"
+cat "$ALERTS"
+grep -q "^FAIL  gone: no base folder: $WORK/gone$" "$WORK/gone.log" || fail "check does not report the missing base folder"
+[ "$(grep -c "^check|gone: check failed: no base folder: $WORK/gone$" "$ALERTS")" = 1 ] \
+    || fail "check did not alert once for the missing base folder"
+[ ! -e "$WORK/gone" ] || fail "check created the base folder"
+if NOTIFY_CMD="$alert_cmd" deploy check --all > "$WORK/gone-all.log" 2>&1; then
+    fail "check --all passed with a missing base folder"
+fi
+grep -q "^ok    fixture: site: 200, matches live$" "$WORK/gone-all.log" || fail "check --all stopped at the missing base folder"
+[ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "check --all alerted again for the missing base folder"
+ln -s "$BASE" "$WORK/gone"
+NOTIFY_CMD="$alert_cmd" deploy gone check > /dev/null || fail "check failed once the base folder came back"
+grep -q "^check|gone: check ok again$" "$ALERTS" || fail "no alert when the base folder came back"
+[ ! -e "$WORK/projects/.gone.check-failed" ] || fail "check kept the missing base state after it was ok"
+rm "$WORK/gone" "$WORK/projects/gone.env"
+check "a missing base folder alerts once, is not created, does not stop check --all, and alerts ok when back"
+
 step "Disk space: check, status and deploy"
 used_kb="$(du -sk "$BASE" | awk '{ print $1 }')"
 free_mb="$(df -Pk "$BASE" | awk 'NR == 2 { print int($4 / 1024) }')"

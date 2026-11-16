@@ -722,6 +722,50 @@ NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null
 [ "$(wc -l < "$ALERTS" | tr -d ' ')" = 2 ] || fail "a healthy check sent another alert"
 check "one alert for a failing check, one when it is ok again, none while nothing changes"
 
+step "Disk space: check, status and deploy"
+used_kb="$(du -sk "$BASE" | awk '{ print $1 }')"
+free_mb="$(df -Pk "$BASE" | awk 'NR == 2 { print int($4 / 1024) }')"
+DISK_LIMIT="$((used_kb * 10 + 1024))K" deploy fixture check > "$WORK/disk.log" || fail "check failed under a big DISK_LIMIT"
+grep -qE "^ok    fixture: disk: [0-9.]+[KMGT] used of [0-9.]+[KMGT], [0-9.]+[KMGT] free$" "$WORK/disk.log" \
+    || fail "check does not show the disk line with the limit"
+: > "$ALERTS"
+if DISK_LIMIT=1K NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null 2> "$WORK/disk.log"; then
+    fail "check passed over a tiny DISK_LIMIT"
+fi
+cat "$WORK/disk.log"
+grep -qE "^FAIL  fixture: disk: [0-9.]+[KMGT] used of 1K, [0-9.]+[KMGT] free; over DISK_LIMIT \(1K\)$" "$WORK/disk.log" \
+    || fail "check does not report the size over DISK_LIMIT"
+grep -q "^check|fixture: check failed: disk: " "$ALERTS" || fail "no alert for the disk over DISK_LIMIT"
+NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null || fail "check failed with no DISK_LIMIT"
+grep -q "^check|fixture: check ok again$" "$ALERTS" || fail "no alert when the disk is ok again"
+if DISK_LIMIT=2GB deploy fixture check > /dev/null 2> "$WORK/disk.log"; then
+    fail "DISK_LIMIT=2GB was not refused"
+fi
+grep -q "DISK_LIMIT must be a size like 2G, 500M or 1.5G, or plain bytes, not '2GB'" "$WORK/disk.log" \
+    || fail "no message for DISK_LIMIT=2GB"
+deploy fixture status > "$WORK/disk.log"
+grep -qE "^Disk: +[0-9.]+[KMGT] used, [0-9.]+[KMGT] free$" "$WORK/disk.log" || fail "status does not show the Disk line"
+if MIN_FREE_MB="$((free_mb + 1000000))" deploy fixture check > /dev/null 2> "$WORK/disk.log"; then
+    fail "check passed under a huge MIN_FREE_MB"
+fi
+grep -q "^FAIL  fixture: disk: .*; under MIN_FREE_MB ($((free_mb + 1000000))M free)$" "$WORK/disk.log" \
+    || fail "check does not report free space under MIN_FREE_MB"
+before="$(live_release)"
+count="$(release_count)"
+if MIN_FREE_MB="$((free_mb + 1000000))" deploy fixture --force > "$WORK/disk.out" 2> "$WORK/disk.log"; then
+    fail "a deploy passed under a huge MIN_FREE_MB"
+fi
+cat "$WORK/disk.log"
+grep -q "under MIN_FREE_MB ($((free_mb + 1000000))M); free some space before deploying" "$WORK/disk.log" \
+    || fail "no clear message for too little free space"
+grep -q "Cloning" "$WORK/disk.out" && fail "a deploy with too little free space started to clone"
+[ "$(live_release)" = "$before" ] || fail "a deploy with too little free space changed the live release"
+[ "$(release_count)" = "$count" ] || fail "a deploy with too little free space made a release"
+[ ! -d "$BASE/.deploy.lock" ] || fail "a deploy with too little free space left the lock behind"
+DISK_LIMIT=1K deploy fixture --force > /dev/null 2> "$WORK/disk.log" || fail "a deploy over DISK_LIMIT failed"
+grep -q "over DISK_LIMIT (1K)" "$WORK/disk.log" || fail "a deploy over DISK_LIMIT did not warn"
+check "check passes under DISK_LIMIT and fails over it with an alert; status shows the disk; too little free space stops check and deploy"
+
 step "Deploy history"
 DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"
 cat "$WORK/history.log"

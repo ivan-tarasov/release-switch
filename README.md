@@ -110,7 +110,7 @@ Commands:
                     On a terminal it asks first
   up                Run the up() step, then check that the site serves the live release again
   status            The live release, the rollback target, the commits not deployed yet, all
-                    releases, the lock and the site
+                    releases, the lock, the disk and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
                     commits and failed releases. A last line shows the engine: its version, and
                     whether the repo has newer ones (run `deploy self`) or it has local changes.
@@ -123,8 +123,9 @@ Commands:
                     any part only one release has: date and time, sha, tag); this marks nothing,
                     and clears the mark if that release had one. On a terminal it asks first
   check             A quick health check that changes nothing: the live release, its shared
-                    links, the project's health() step, the site, and a lock held for 30 min
-                    or more, or with no owner for 60 s. Problems go to stderr
+                    links, the project's health() step, the site, the disk (size of the base
+                    folder past DISK_LIMIT, or free space under MIN_FREE_MB), and a lock held
+                    for 30 min or more, or with no owner for 60 s. Problems go to stderr
                     and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
                     only problems
   check --all       The same for every project, production only
@@ -275,6 +276,8 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt`. Stopped after 60 s with a warning |
 | `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
+| `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On cPanel the account quota can differ from `df`, so set it yourself |
+| `MIN_FREE_MB` | `500` | Free space in MB the disk of the base folder must have. `check` fails under it, and `deploy` and `copy-from` stop before they write anything. `0` to turn it off |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status` and `log`, e.g. `America/Toronto`. `status` says "today at" and "yesterday at" for recent deploys. Release names stay in UTC |
 | `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON (see [Alerts](#alerts)) |
 | `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` (see [Alerts](#alerts)). Stopped after 30 s with a warning |
@@ -559,7 +562,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
-`PHP_RELOAD_CMD`, `STEP_TIMEOUT` and git timeouts, a signal after the switch, a rollback with the live folder missing, prune and
+`PHP_RELOAD_CMD`, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

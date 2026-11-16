@@ -18,7 +18,7 @@ PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 # Settings a project file may set. Env vars of the same name win.
 SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION RELEASE_WAIT
     PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON STAGING_SERVERS STAGING_URL
-    STEP_TIMEOUT)
+    STEP_TIMEOUT DISK_LIMIT MIN_FREE_MB)
 
 PROJECT=""
 
@@ -327,6 +327,8 @@ apply_defaults() {
     STAGING_SERVERS="${STAGING_SERVERS:-0}"
     STAGING_URL="${STAGING_URL:-}"
     STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
+    DISK_LIMIT="${DISK_LIMIT:-}"
+    MIN_FREE_MB="${MIN_FREE_MB:-500}"
 
     case "$KEEP_RELEASES" in
         '' | *[!0-9]*) fail "KEEP_RELEASES must be a whole number, not '$KEEP_RELEASES'" ;;
@@ -343,12 +345,18 @@ apply_defaults() {
     case "$STEP_TIMEOUT" in
         '' | *[!0-9]*) fail "STEP_TIMEOUT must be a whole number of seconds, not '$STEP_TIMEOUT'" ;;
     esac
+    case "$MIN_FREE_MB" in
+        '' | *[!0-9]*) fail "MIN_FREE_MB must be a whole number of megabytes, not '$MIN_FREE_MB'" ;;
+    esac
+    [ -z "$DISK_LIMIT" ] || [[ "$DISK_LIMIT" =~ ^[0-9]+([.][0-9]+)?[KkMmGgTt]?$ ]] \
+        || fail "DISK_LIMIT must be a size like 2G, 500M or 1.5G, or plain bytes, not '$DISK_LIMIT'"
     # 10# drops leading zeros, which bash math reads as octal.
     KEEP_RELEASES=$((10#$KEEP_RELEASES))
     CHECK_WAIT=$((10#$CHECK_WAIT))
     RELEASE_WAIT=$((10#$RELEASE_WAIT))
     STAGING_SERVERS=$((10#$STAGING_SERVERS))
     STEP_TIMEOUT=$((10#$STEP_TIMEOUT))
+    MIN_FREE_MB=$((10#$MIN_FREE_MB))
     [ "$KEEP_RELEASES" -ge 2 ] \
         || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
 
@@ -1280,6 +1288,72 @@ prune() {
     done
 }
 
+# DISK_LIMIT in KB, rounded up; empty when there is no limit.
+disk_limit_kb() {
+    [ -n "$DISK_LIMIT" ] || return 0
+    printf '%s\n' "$DISK_LIMIT" | awk '{
+        n = $0 + 0; unit = toupper(substr($0, length($0)))
+        if (unit == "K") n *= 1024; else if (unit == "M") n *= 1048576
+        else if (unit == "G") n *= 1073741824; else if (unit == "T") n *= 1099511627776
+        kb = n / 1024; printf "%.0f\n", (kb == int(kb)) ? kb : int(kb) + 1
+    }'
+}
+
+# $1 KB as 512K, 1.5M or 2.0G.
+human_kb() {
+    awk -v kb="$1" 'BEGIN {
+        if (kb >= 1073741824) printf "%.1fT", kb / 1073741824
+        else if (kb >= 1048576) printf "%.1fG", kb / 1048576
+        else if (kb >= 1024) printf "%.1fM", kb / 1024
+        else printf "%dK", kb
+    }'
+}
+
+# Free KB on the file system that holds the base folder; empty when df fails.
+disk_free_kb() {
+    df -Pk "$DEPLOY_BASE" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+# Sets DISK_TEXT ("2.1G used of 3.0G, 10.4G free") and DISK_PROBLEM (empty when fine).
+disk_usage() {
+    local used free limit
+
+    # du may complain about files it cannot read; the size it prints is still close.
+    used="$(du -sk "$DEPLOY_BASE" 2>/dev/null | awk '{ print $1 }')" || true
+    free="$(disk_free_kb)" || true
+    limit="$(disk_limit_kb)"
+    used="${used:-0}"
+    DISK_TEXT="$(human_kb "$used") used"
+    [ -z "$limit" ] || DISK_TEXT="$DISK_TEXT of $(human_kb "$limit")"
+
+    if [ -n "$free" ]; then
+        DISK_TEXT="$DISK_TEXT, $(human_kb "$free") free"
+    else
+        DISK_TEXT="$DISK_TEXT, free space unknown"
+    fi
+
+    DISK_PROBLEM=""
+
+    if [ -n "$limit" ] && [ "$used" -gt "$limit" ]; then
+        DISK_PROBLEM="over DISK_LIMIT ($DISK_LIMIT)"
+    fi
+
+    if [ -n "$free" ] && [ "$MIN_FREE_MB" -gt 0 ] && [ "$free" -lt $((MIN_FREE_MB * 1024)) ]; then
+        DISK_PROBLEM="${DISK_PROBLEM:+$DISK_PROBLEM, }under MIN_FREE_MB (${MIN_FREE_MB}M free)"
+    fi
+}
+
+# Fails when the file system has less than MIN_FREE_MB free, before $1 writes anything.
+require_free_space() {
+    local free
+
+    [ "$MIN_FREE_MB" -gt 0 ] || return 0
+    free="$(disk_free_kb)" || true
+    [ -n "$free" ] || return 0
+    [ "$free" -ge $((MIN_FREE_MB * 1024)) ] \
+        || fail "only $(human_kb "$free") free on the disk of $DEPLOY_BASE, under MIN_FREE_MB (${MIN_FREE_MB}M); free some space before $1"
+}
+
 # Set by freeze: "<UTC stamp>" on the first line, the reason on the second.
 FREEZE_FILE=".frozen"
 
@@ -1446,6 +1520,7 @@ deploy() {
     acquire_lock deploy
     ACTION=deploy
     STAGE=clone
+    require_free_space deploying
 
     mkdir -p "$DEPLOY_BASE/releases"
     PREVIOUS_RELEASE="$(current_release)"
@@ -1499,6 +1574,13 @@ deploy() {
     fi
 
     stamp="$(date -u +%Y%m%d-%H%M%S)"
+
+    if [ -n "$DISK_LIMIT" ]; then
+        disk_usage
+        case "$DISK_PROBLEM" in
+            *DISK_LIMIT*) warn "disk: $DISK_TEXT, over DISK_LIMIT ($DISK_LIMIT); prune after the deploy may help" ;;
+        esac
+    fi
 
     say "Cloning ${ref:-$(branch_label)}"
     # Under the lock, so any .building-* folder or BUILDING_FILE left is from a killed run.
@@ -1745,6 +1827,9 @@ status() {
         stale) printf '\nLock:      stale (%s; the next deploy removes it)\n' "$(lock_text)" ;;
         held) printf '\nLock:      held (%s)\n' "$(lock_text)" ;;
     esac
+
+    disk_usage
+    printf 'Disk:      %s%s\n' "$DISK_TEXT" "${DISK_PROBLEM:+ (${DISK_PROBLEM})}"
 
     if [ -z "$CHECK_URL" ]; then
         printf 'Site:      not checked (no CHECK_URL)\n'
@@ -2023,6 +2108,14 @@ check() {
         else
             check_bad "site: $CHECK_URL answered ${PROBE_STATUS:-nothing}, version ${PROBE_VERSION:-none}"
         fi
+    fi
+
+    disk_usage
+
+    if [ -n "$DISK_PROBLEM" ]; then
+        check_bad "disk: $DISK_TEXT; $DISK_PROBLEM"
+    else
+        check_ok "disk: $DISK_TEXT"
     fi
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || check_ok "frozen $(frozen_text)"
@@ -2367,6 +2460,7 @@ copy_from() {
     ACTION=copy-from
     LOG_RELEASE="$(current_release)"
     STAGE=copy
+    require_free_space copying
     mkdir -p "$DEPLOY_BASE/shared"
 
     local copied=()
@@ -2783,7 +2877,7 @@ EOF
         status)
             cat <<EOF
   status                     Show the live release, the rollback target, pending commits, all
-                             releases and the site
+                             releases, the disk and the site
   status --all               One line per project, and one for the engine; fails if any site does
                              not serve its live release. Production only, no slots
 EOF
@@ -2791,8 +2885,8 @@ EOF
         check)
             cat <<EOF
   check                      Check the live release, its shared links, its health() step, the
-                             site and the lock; changes nothing. Problems go to stderr; exits
-                             with 1 on any
+                             site, the disk (DISK_LIMIT, MIN_FREE_MB) and the lock; changes
+                             nothing. Problems go to stderr; exits with 1 on any
   check --all                The same for every project, production only
 EOF
             ;;
@@ -3180,6 +3274,8 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   COMPOSER_BIN    Composer command ($COMPOSER_BIN)
   PHP_RELOAD_CMD  Run after each switch, up to 60 s (${PHP_RELOAD_CMD:-none})
   STEP_TIMEOUT    Seconds a deploy.conf step may run, 0 for no limit ($STEP_TIMEOUT)
+  DISK_LIMIT      Max size of the base folder for check, like 2G or 500M (${DISK_LIMIT:-no limit})
+  MIN_FREE_MB     Free MB check wants and deploy needs, 0 for off ($MIN_FREE_MB)
   DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
   NOTIFY_URL      Webhook for alerts, gets JSON with "text" ($([ -n "$NOTIFY_URL" ] && printf set || printf 'not set'))
   NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT ($([ -n "$NOTIFY_CMD" ] && printf set || printf 'not set'))

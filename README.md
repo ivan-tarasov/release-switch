@@ -544,6 +544,8 @@ header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEA
 So a page cache (like LiteSpeed LSCache) does not answer with the old version, each request to
 `CHECK_URL` adds an `rs=<release or time>` query and sends `Cache-Control: no-cache` and
 `Pragma: no-cache`. A CDN that ignores query strings needs a rule to bypass its cache when `rs` is set.
+Each check request stops after `CHECK_WAIT / 3` seconds (at least 1, at most 10), so one stuck
+request still leaves time to retry.
 
 ### Output
 

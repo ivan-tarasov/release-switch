@@ -177,9 +177,16 @@ check "shared/ holds .env and data/; the old checkout links to them"
 # /hook stands in for an alert webhook: it keeps each request body in hook.log. A staging slot
 # host (s1.localhost) gets that slot's folder, next to the base folder. /cached acts like
 # LSCache: it keeps each request in cached.log and answers with an old version unless the
-# request has an rs query or Cache-Control: no-cache.
+# request has an rs query or Cache-Control: no-cache. /stall hangs for 15 s once, when the
+# stall file exists, then serves the site.
 cat > "$WORK/router.php" <<EOF
 <?php
+if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/stall') {
+    if (@unlink('$WORK/stall')) {
+        sleep(15);
+    }
+    \$_SERVER['REQUEST_URI'] = '/';
+}
 if (\$_SERVER['REQUEST_URI'] === '/hook') {
     file_put_contents('$WORK/hook.log', file_get_contents('php://input') . "\n", FILE_APPEND);
     return;
@@ -974,6 +981,17 @@ grep -qF "Site:      http://127.0.0.1:$PORT/cached?lang=en#top answered 200, ver
     "$WORK/cached.out" || fail "status does not match live behind a cache"
 grep -q "^/cached?lang=en&rs=[0-9]* no-cache no-cache$" "$WORK/cached.log" || fail "check and status send no rs time"
 check "the check sends rs=<release> and no-cache, after any query; output shows the plain URL; check and status pass"
+
+step "One stuck check request still leaves time to retry"
+sleep 1
+touch "$WORK/stall"
+started=$(date +%s)
+CHECK_URL="http://127.0.0.1:$PORT/stall" deploy fixture --force > "$WORK/stall.out" 2>&1 \
+    || { cat "$WORK/stall.out"; fail "a deploy with one stuck check request failed"; }
+took=$(($(date +%s) - started))
+[ ! -e "$WORK/stall" ] || fail "the check never hit the stuck request"
+[ "$took" -lt 15 ] || fail "the deploy waited ${took} s on a stuck request"
+check "the stuck request was cut at CHECK_WAIT / 3 and the retry passed (${took} s)"
 
 step "A git remote that never answers fails fast"
 # A TCP port that takes connections and never says a word, like a stalled network.

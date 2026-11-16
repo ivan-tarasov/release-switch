@@ -1248,9 +1248,23 @@ copy_from_live() {
 }
 
 # One request to CHECK_URL. Sets PROBE_STATUS and PROBE_VERSION (empty when missing).
+# Adds rs=<release or time> and no-cache headers, so LSCache or a CDN does not answer
+# with an old page. Pass the release being checked, if any.
 probe() {
-    local headers
-    headers="$(curl --silent --show-error --max-time 10 --location --output /dev/null --dump-header - "$CHECK_URL" 2>&1)" || true
+    local tag url headers
+    tag="${1:-}"
+    tag="${tag:+$tag-}$(date +%s)"
+    tag="${tag//[^[:alnum:].-]/-}"
+    url="${CHECK_URL%%#*}"
+
+    case "$url" in
+        *\? | *\&) url="${url}rs=$tag" ;;
+        *\?*) url="$url&rs=$tag" ;;
+        *) url="$url?rs=$tag" ;;
+    esac
+
+    headers="$(curl --silent --show-error --max-time 10 --location --output /dev/null --dump-header - \
+        --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' "$url" 2>&1)" || true
     PROBE_STATUS="$(printf '%s\n' "$headers" | sed -nE 's#^HTTP/[0-9.]+ ([0-9]+).*#\1#p' | tail -n1)"
     PROBE_VERSION="$(printf '%s\n' "$headers" | sed -nE 's#^[Xx]-[Aa]pp-[Vv]ersion: *([^[:space:]]+).*#\1#p' | tail -n1)"
 }
@@ -1262,7 +1276,7 @@ release_is_serving() {
     deadline=$(($(date +%s) + CHECK_WAIT))
 
     while :; do
-        probe
+        probe "$expected"
 
         if [ "$PROBE_STATUS" = 200 ] && { [ "$CHECK_VERSION" = 0 ] || [ "$PROBE_VERSION" = "$expected" ]; }; then
             return 0

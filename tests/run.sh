@@ -1433,6 +1433,69 @@ kill "$holder" 2>/dev/null || true
 rm -rf "$SLOT2/.deploy.lock"
 check "stage skipped a locked free slot, failed with no slot left, and refused a locked slot on its branch"
 
+step "staging runs the same slot commands as the old forms"
+# s1 is free on develop, s2 follows feature/z.
+deploy fixture slots > "$WORK/slots.log"
+deploy staging fixture > "$WORK/staging.log"
+diff "$WORK/slots.log" "$WORK/staging.log" || fail "staging fixture does not list the slots like slots"
+deploy staging > "$WORK/staging.log"
+diff "$WORK/slots.log" "$WORK/staging.log" || fail "staging without a project does not use the only project with slots"
+deploy staging fixture checkout feature/z > "$WORK/staging.log"
+grep -q "Nothing new on feature/z" "$WORK/staging.log" || fail "staging checkout did not reuse s2"
+[ "$(tail -n1 "$WORK/staging.log")" = "http://s2.localhost:$PORT/" ] || fail "staging checkout feature/z did not end with the s2 URL"
+deploy staging checkout feature/x > "$WORK/staging.log"
+[ "$(tail -n1 "$WORK/staging.log")" = "http://s1.localhost:$PORT/" ] || fail "staging checkout feature/x did not pick the free s1"
+[ "$(cat "$SLOT/BRANCH")" = feature/x ] || fail "staging checkout did not store feature/x for s1"
+deploy staging fixture@s1 checkout feature/x > "$WORK/staging.log"
+grep -q "Nothing new on feature/x" "$WORK/staging.log" || fail "staging fixture@s1 checkout feature/x did not act like --branch"
+deploy staging fixture@s2 checkout --pr 7 > /dev/null
+[ "$(cat "$SLOT2/BRANCH")" = pr/7 ] || fail "staging fixture@s2 checkout --pr 7 did not store pr/7"
+[ "$(cat "$SLOT2/current/VERSION")" = "pr two" ] || fail "staging fixture@s2 checkout --pr 7 did not deploy the PR head"
+deploy staging fixture@s2 update > "$WORK/staging.log"
+grep -q "Nothing new on PR #7" "$WORK/staging.log" || fail "staging fixture@s2 update did not act like a plain deploy"
+deploy staging fixture update > "$WORK/staging.log"
+grep -qE "^s1 +feature/x +unchanged$" "$WORK/staging.log" || fail "staging fixture update did not act like slots update on s1"
+grep -qE "^s2 +PR #7 +unchanged$" "$WORK/staging.log" || fail "staging fixture update did not act like slots update on s2"
+deploy staging fixture@s2 free > "$WORK/staging.log"
+grep -q "fixture@s2 is free now (it followed PR #7); deploying develop" "$WORK/staging.log" || fail "staging free did not free s2"
+[ ! -e "$SLOT2/BRANCH" ] || fail "staging free kept the BRANCH file"
+deploy staging fixture@s1 copy-from fixture --yes > "$WORK/staging.log"
+grep -q "Copied into fixture@s1: data" "$WORK/staging.log" || fail "staging copy-from did not copy"
+[ "$(deploy staging fixture@s1 path)" = "$(deploy path fixture@s1)" ] || fail "staging path does not print the slot's release"
+deploy fixture@s1 status | grep -v deployed > "$WORK/status.log"
+deploy staging fixture@s1 | grep -v deployed > "$WORK/staging.log"
+diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 does not show the slot's status"
+deploy staging fixture@s1 status | grep -v deployed > "$WORK/staging.log"
+diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 status does not show the slot's status"
+if deploy staging fixture free > /dev/null 2> "$WORK/staging.err"; then
+    fail "staging free without a slot was not refused"
+fi
+grep -q "free works on one slot: deploy staging fixture@sN free" "$WORK/staging.err" || fail "no message for staging free without a slot"
+if STAGING_SERVERS=0 deploy staging fixture > /dev/null 2> "$WORK/staging.err"; then
+    fail "staging of a project without slots was not refused"
+fi
+grep -q "fixture has no staging slots (set STAGING_SERVERS" "$WORK/staging.err" || fail "no STAGING_SERVERS hint for staging"
+check "each staging form did what its old form does; free without a slot and a project without slots were refused"
+
+step "staging help and typo hints"
+deploy staging --help > "$WORK/help.log"
+grep -q "^Usage: deploy staging \[project\]$" "$WORK/help.log" || fail "staging --help shows no usage line"
+grep -q "^  staging <project>@sN checkout <branch> | --pr <number>" "$WORK/help.log" || fail "staging --help does not list checkout"
+deploy staging fixture@s1 checkout --help | grep "^Usage: deploy staging <project> checkout <branch> | --pr <number>$" > /dev/null \
+    || fail "staging checkout --help shows no usage line"
+deploy help staging update | grep "^Usage: deploy staging <project>@sN update" > /dev/null || fail "help staging update shows no usage line"
+deploy --help | sed -n '/^Staging:$/,/^Commands:$/p' | grep "^  staging <project>@sN free" > /dev/null \
+    || fail "the full help does not list staging first"
+code=0
+deploy staging fixture chekout feature/x > /dev/null 2> "$WORK/typo.log" || code=$?
+[ "$code" = 2 ] || fail "a staging typo exited with $code, not 2"
+grep -q "Unknown staging command: chekout. Did you mean checkout?" "$WORK/typo.log" || fail "no hint for chekout"
+code=0
+deploy stagign > /dev/null 2> "$WORK/typo.log" || code=$?
+[ "$code" = 2 ] || fail "a typo of staging exited with $code, not 2"
+grep -q "Did you mean staging?" "$WORK/typo.log" || fail "no hint for stagign"
+check "staging --help, <sub> --help and help staging <sub> show the staging help; the full help lists it first; typos get a hint and exit 2"
+
 step "copy-from copies production data into a slot, never .env"
 printf 'APP_ENV=production\n# slot s1 only\n' > "$SLOT/shared/.env"
 printf 'slot data\n' > "$SLOT/shared/data/note.txt"

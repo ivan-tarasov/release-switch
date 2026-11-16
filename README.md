@@ -72,6 +72,22 @@ a deploy after a `no-release` merge waits the full `RELEASE_WAIT`, as before.
 ```
 deploy [project] [command]
 
+Staging (see [Staging](#staging)):
+  staging [project]                 List the slots. Without a project: the only one with slots
+  staging <project>@sN              The slot's status
+  staging <project> checkout <branch> | --pr <number>
+                                    Deploy to the slot on that branch, else a free one, else
+                                    one whose branch is gone; print its URL
+  staging <project>@sN checkout <branch> | --pr <number>
+                                    Make this slot follow it and deploy it
+  staging <project>@sN update       Deploy the newest commit of the slot's branch
+  staging <project> update          Redeploy every slot with new commits (for cron)
+  staging <project>@sN free         Forget the slot's branch, deploy DEPLOY_BRANCH
+  staging <project>@sN copy-from <project> [--yes] [path ...]
+                                    Copy production's SHARED data into the slot
+  staging <project>@sN status | log | path | rollback | down | up
+
+Commands:
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
                     is already live, unless --force. On a terminal --force asks first
   deploy --no-wait  Do not wait for the release tag of a new commit
@@ -150,7 +166,9 @@ and takes the same commands: `deploy tarasov@s1 status`, `deploy path tarasov@s1
 `deploy <command> --help`, `deploy <command> -h` and `deploy help <command>` show the help of one
 command: its usage, options and examples. A project in front works too: `deploy tarasov rollback --help`.
 A mistyped command prints one line with the closest command, like
-`Unknown command: rolback. Did you mean rollback?`, and exits with 2.
+`Unknown command: rolback. Did you mean rollback?`, and exits with 2. The same goes for the
+`staging` subcommands: `deploy staging checkout --help`, and
+`Unknown staging command: chekout. Did you mean checkout?`.
 
 ### Questions before risky commands
 
@@ -333,61 +351,83 @@ To set up a slot:
    is never copied. Give the slot its own `shared/.env`, with its own `APP_URL`
    (`https://s1.example.com`), `APP_ENV=staging`, its own database, and mail to the log
    (`MAIL_MAILER=log`).
-3. Deploy a branch to it: `deploy example@s1 --branch feature/login`. The slot stores the branch in
-   `s1/BRANCH` and deploys it. Or deploy it with no branch, `deploy example@s1`: a free slot runs
-   production's `DEPLOY_BRANCH`.
+3. Deploy a branch to it: `deploy staging example@s1 checkout feature/login`. The slot stores the
+   branch in `s1/BRANCH` and deploys it. Or deploy it with no branch,
+   `deploy staging example@s1 update`: a free slot runs production's `DEPLOY_BRANCH`.
 
-From then on, `deploy example@s1` deploys the newest commit of that branch, and stops when it is
-already live. `--branch` again switches the slot to another branch. `deploy example slots` lists
-the slots, with `free (develop)` for a free slot (`DEPLOY_BRANCH` is `develop`), or `free` and `-`
-for one never deployed. `status`, `check`, `log`, `rollback`,
-`freeze`, `down`, `up` and `path` work on a slot the same way, as `deploy example@s1 <command>`.
-`--branch` on production is refused: production deploys `DEPLOY_BRANCH`.
+All slot work goes through `deploy staging <project>[@sN] <command>`:
 
-To test a pull request before merge, deploy its head: `deploy example@s1 --pr 281`. It uses plain
-git (`refs/pull/281/head` from `REPO_URL`), no GitHub token. The slot stores `pr/281` in `s1/BRANCH`,
-so a plain `deploy example@s1` fetches the PR head again and picks up new commits on the PR. The
-release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), and `slots` shows
+```
+deploy staging example                              list the slots
+deploy staging example checkout feature/login       pick a slot for the branch, print its URL
+deploy staging example checkout --pr 281            the same for a pull request
+deploy staging example@s1 checkout feature/login    this slot, that branch
+deploy staging example@s1 checkout --pr 281         this slot, that pull request
+deploy staging example@s1 update                    the newest commit of the slot's branch
+deploy staging example update                       every slot with new commits
+deploy staging example@s1 free                      forget the branch, back on DEPLOY_BRANCH
+deploy staging example@s1 copy-from example         production data in
+deploy staging example@s1                           the slot's status
+deploy staging example@s1 log | path | rollback | down | up
+```
+
+With one project with slots, the project can be left out: `deploy staging`,
+`deploy staging checkout feature/login`. The older forms still work the same: `deploy example slots`,
+`deploy example stage <branch>`, `deploy example@s1 --branch <name>` or `--pr <number>`, a plain
+`deploy example@s1`, `deploy example slots update`, and `deploy example@s1 <command>` for any other
+command (`check` and `freeze` too).
+
+From then on, `deploy staging example@s1 update` deploys the newest commit of that branch, and
+stops when it is already live. `checkout` again switches the slot to another branch.
+`deploy staging example` lists the slots, with `free (develop)` for a free slot (`DEPLOY_BRANCH` is
+`develop`), or `free` and `-` for one never deployed. `--branch` on production is refused:
+production deploys `DEPLOY_BRANCH`.
+
+To test a pull request before merge, deploy its head: `deploy staging example@s1 checkout --pr 281`.
+It uses plain git (`refs/pull/281/head` from `REPO_URL`), no GitHub token. The slot stores `pr/281`
+in `s1/BRANCH`, so `deploy staging example@s1 update` fetches the PR head again and picks up new
+commits on the PR. The
+release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), and the slot list shows
 `PR #281`. `--pr` is refused on production, and together with `--branch` or `--ref`. Neither
 `--pr` nor `--ref` waits for a release tag.
 
 ### Sharing the slots
 
-`deploy example stage feature/login` picks a slot for you: the one that already follows
+`deploy staging example checkout feature/login` picks a slot for you: the one that already follows
 `feature/login`, else the first free one (no `BRANCH` file). It deploys the branch there, as
-`deploy example@sN --branch feature/login` would, and prints the slot's URL as the last line.
-`deploy example stage --pr 281` does the same for a pull request. With no free slot, it takes the
+`deploy staging example@sN checkout feature/login` would, and prints the slot's URL as the last
+line. `deploy staging example checkout --pr 281` does the same for a pull request. With no free slot, it takes the
 first slot whose branch is gone from the repo, and says which branch it replaces. When all slots
-are busy, it fails and shows the `slots` list. It takes each slot under the slot's lock, so two `stage` runs at
-once never pick the same slot.
+are busy, it fails and shows the slot list. It takes each slot under the slot's lock, so two
+`checkout` runs at once never pick the same slot.
 
-`deploy example@s1 free` forgets the slot's branch, so `stage` can use it again, and deploys the
-newest commit of `DEPLOY_BRANCH` to it, so a free slot always runs something current. The slot
-stays free (no `BRANCH` file), and a plain `deploy example@s1` keeps it on the newest
-`DEPLOY_BRANCH`. It takes the slot's lock, so it never runs during a deploy of the slot.
+`deploy staging example@s1 free` forgets the slot's branch, so `checkout` can use it again, and
+deploys the newest commit of `DEPLOY_BRANCH` to it, so a free slot always runs something current.
+The slot stays free (no `BRANCH` file), and `deploy staging example@s1 update` keeps it on the
+newest `DEPLOY_BRANCH`. It takes the slot's lock, so it never runs during a deploy of the slot.
 
-`slots` marks a branch the repo no longer has (deleted after the merge) as `feature/x (gone)` or
+The slot list marks a branch the repo no longer has (deleted after the merge) as `feature/x (gone)` or
 `PR #7 (gone)`, from one `git ls-remote` for all slots. When the repo cannot be read, it marks
 nothing.
 
-`deploy example slots update` redeploys each slot whose branch or PR head has new commits, and each
+`deploy staging example update` redeploys each slot whose branch or PR head has new commits, and each
 free slot whose `DEPLOY_BRANCH` has; a slot with nothing new is left as it is. A free slot never
 deployed gets its first release, so give each slot its shared files before adding it to
 `STAGING_SERVERS`. A slot whose branch is gone is skipped and keeps its branch until `free` or
-`stage` reuses it; that is not a failure. A failing slot does not stop the others, but the run
+`checkout` reuses it; that is not a failure. A failing slot does not stop the others, but the run
 exits with 1. It ends with one line per slot: `updated`, `deployed`, `unchanged`, `branch gone` or
 `failed`. Run it from cron to keep the slots up to date:
 
 ```cron
-*/5 * * * * $HOME/release-switch/deploy example slots update > /dev/null
+*/5 * * * * $HOME/release-switch/deploy staging example update > /dev/null
 ```
 
 ### Copying production data
 
-`deploy example@s1 copy-from example` copies production's data into the slot: each `SHARED` path
+`deploy staging example@s1 copy-from example` copies production's data into the slot: each `SHARED` path
 from production's `shared/` into the slot's `shared/`, except `.env` (and any `*.env` or `.env.*`),
 so the slot keeps its own settings. Name paths to copy only those:
-`deploy example@s1 copy-from example database/database.sqlite`. Each must be in `SHARED`, and
+`deploy staging example@s1 copy-from example database/database.sqlite`. Each must be in `SHARED`, and
 `.env` is always refused. `SHARED` comes from the slot's live `deploy.conf`, or production's when
 the slot has no live release yet; the output says which.
 

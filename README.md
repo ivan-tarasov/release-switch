@@ -541,6 +541,10 @@ The project must send the release name as a header, so the check knows the new c
 header('X-App-Version: ' . trim((string) @file_get_contents(__DIR__ . '/../RELEASE')));
 ```
 
+So a page cache (like LiteSpeed LSCache) does not answer with the old version, each request to
+`CHECK_URL` adds an `rs=<release or time>` query and sends `Cache-Control: no-cache` and
+`Pragma: no-cache`. A CDN that ignores query strings needs a rule to bypass its cache when `rs` is set.
+
 ### Output
 
 In a terminal, each command runs on rails, like this:

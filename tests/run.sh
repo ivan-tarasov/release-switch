@@ -175,12 +175,24 @@ check "shared/ holds .env and data/; the old checkout links to them"
 
 # Serves whatever `current` points at. No realpath cache, so a switch shows on the next request.
 # /hook stands in for an alert webhook: it keeps each request body in hook.log. A staging slot
-# host (s1.localhost) gets that slot's folder, next to the base folder.
+# host (s1.localhost) gets that slot's folder, next to the base folder. /cached acts like
+# LSCache: it keeps each request in cached.log and answers with an old version unless the
+# request has an rs query or Cache-Control: no-cache.
 cat > "$WORK/router.php" <<EOF
 <?php
 if (\$_SERVER['REQUEST_URI'] === '/hook') {
     file_put_contents('$WORK/hook.log', file_get_contents('php://input') . "\n", FILE_APPEND);
     return;
+}
+if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/cached') {
+    \$cacheControl = \$_SERVER['HTTP_CACHE_CONTROL'] ?? '-';
+    \$line = \$_SERVER['REQUEST_URI'] . ' ' . \$cacheControl . ' ' . (\$_SERVER['HTTP_PRAGMA'] ?? '-');
+    file_put_contents('$WORK/cached.log', \$line . "\n", FILE_APPEND);
+    if (!isset(\$_GET['rs']) && \$cacheControl !== 'no-cache') {
+        header('X-App-Version: old-cached-release');
+        return;
+    }
+    \$_SERVER['REQUEST_URI'] = '/';
 }
 \$base = '$BASE';
 if (preg_match('/^(s[0-9]+)\\./', \$_SERVER['HTTP_HOST'] ?? '', \$m)) {
@@ -938,6 +950,30 @@ STEP_TIMEOUT=3 PHP_RELOAD_CMD="sleep 20" deploy fixture --force > /dev/null 2> "
 grep -q "PHP_RELOAD_CMD ran past 3 s; carrying on" "$WORK/reload.log" || fail "no warning for a slow PHP_RELOAD_CMD"
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "the slow PHP_RELOAD_CMD was stopped and the deploy went on"
+
+step "The site check gets past a cache"
+sleep 1
+rm -f "$WORK/cached.log"
+CHECK_URL="http://127.0.0.1:$PORT/cached" deploy fixture --force > "$WORK/cached.out" 2>&1 \
+    || fail "a deploy behind a cache failed"
+cached="$(live_release)"
+cat "$WORK/cached.log"
+grep -q "^/cached?rs=$cached-[0-9]* no-cache no-cache$" "$WORK/cached.log" \
+    || fail "the check did not send rs=$cached and the no-cache headers"
+sleep 1
+url="http://127.0.0.1:$PORT/cached?lang=en#top"
+CHECK_URL="$url" deploy fixture --force > "$WORK/cached.out" 2>&1 || fail "a deploy to a URL with a query failed"
+cached="$(live_release)"
+grep -q "^/cached?lang=en&rs=$cached-[0-9]* no-cache no-cache$" "$WORK/cached.log" \
+    || fail "the check did not add rs=$cached after the query"
+grep -qF "Checking $url" "$WORK/cached.out" || fail "the output does not show the plain CHECK_URL"
+! grep -q "rs=" "$WORK/cached.out" || fail "the output shows the rs query"
+CHECK_URL="$url" deploy fixture check > /dev/null || fail "check failed behind a cache"
+CHECK_URL="$url" deploy fixture status > "$WORK/cached.out" || fail "status failed behind a cache"
+grep -qF "Site:      http://127.0.0.1:$PORT/cached?lang=en#top answered 200, version $cached (matches live)" \
+    "$WORK/cached.out" || fail "status does not match live behind a cache"
+grep -q "^/cached?lang=en&rs=[0-9]* no-cache no-cache$" "$WORK/cached.log" || fail "check and status send no rs time"
+check "the check sends rs=<release> and no-cache, after any query; output shows the plain URL; check and status pass"
 
 step "A git remote that never answers fails fast"
 # A TCP port that takes connections and never says a word, like a stalled network.

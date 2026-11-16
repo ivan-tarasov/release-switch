@@ -290,6 +290,9 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 With `NOTIFY_URL` or `NOTIFY_CMD` set, the engine sends an alert when a deploy or rollback fails,
 when a rollback runs, and when the result of `check` changes (once when it fails, once when it is
 ok again, so a cron check does not repeat itself). An alert that cannot be sent only warns.
+The alert goes out even when `deploy.log` cannot be written (a full or read-only disk). A missing
+base folder is a `check` problem too; `check` never makes the folder, and keeps its state in
+`projects/.<project>.check-failed` until the folder is back.
 
 URLs in output, `deploy.log` and alerts hide their user and password: `https://user:token@host`
 shows as `https://***@host`. SSH URLs like `git@github.com:owner/repo.git` stay as they are.

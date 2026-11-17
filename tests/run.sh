@@ -247,7 +247,8 @@ grep -q "Deployed ${first##*-}$" "$WORK/first.log" || fail "a first deploy does 
 serves "$first" || fail "server does not show $first"
 [ "$(cat "$BASE/shared/data/switched")" = "$first" ] || fail "after_switch did not run"
 [ -L "$BASE/current/data" ] || fail "data/ is not linked from shared/"
-check "live: $first; after_switch ran; data/ is shared"
+[ ! -e "$BASE/shared/data/failed" ] || fail "failed ran after a good deploy"
+check "live: $first; after_switch ran; data/ is shared; failed did not run"
 
 sleep 1
 step "Second deploy, of a new tagged commit"
@@ -269,7 +270,8 @@ grep -q "Rolled back v2026.11.99 → ${first##*-} (data changes stay applied)$" 
     || fail "rollback does not show tag → sha"
 serves "$first" || fail "server does not show $first after rollback"
 [ -e "$BASE/releases/$second/.bad" ] || fail "rollback did not mark $second as bad"
-check "rolled back to $first; $second is marked bad"
+[ "$(cat "$BASE/shared/data/rolled_back")" = "$first" ] || fail "after_rollback did not run in $first"
+check "rolled back to $first; $second is marked bad; after_rollback ran"
 
 releases_before="$(release_count)"
 
@@ -280,7 +282,23 @@ if FIXTURE_FAIL_BUILD=1 deploy fixture; then
 fi
 [ "$(live_release)" = "$first" ] || fail "current moved after a failed build"
 [ "$(release_count)" = "$releases_before" ] || fail "the failed release folder was left behind"
-check "$first is still live and the broken release is gone"
+[ "$(sed -n '$=' "$BASE/shared/data/failed")" = 1 ] || fail "failed did not run once"
+built_release="$(cat "$BASE/shared/data/failed")"
+[ "$built_release" != "$first" ] && [ -n "$built_release" ] || fail "failed did not run in the new release"
+check "$first is still live and the broken release is gone; failed ran in it"
+
+sleep 1
+step "A failing failed() only warns; the deploy still fails"
+rm -f "$BASE/shared/data/failed"
+if FIXTURE_FAIL_BUILD=1 FIXTURE_FAIL_FAILED=1 deploy fixture 2> "$WORK/failed.log"; then
+    fail "deploy with a failing build and failed() succeeded"
+fi
+grep -q "failed failed; the deploy failed anyway" "$WORK/failed.log" || fail "no warning for a failing failed()"
+grep -q "build failed" "$WORK/failed.log" || fail "a failing failed() hid the build error"
+[ -e "$BASE/shared/data/failed" ] || fail "failed did not run"
+[ "$(live_release)" = "$first" ] || fail "current moved after a failed build"
+rm -f "$BASE/shared/data/failed"
+check "the warning shows and the build error stays"
 
 sleep 1
 step "Failing deploy: preflight refuses a wrong .env"
@@ -398,12 +416,15 @@ fi
 deploy fixture rollback
 [ "$(live_release)" = "$first" ] || fail "rollback did not skip the bad $second"
 serves "$first" || fail "server does not show $first"
-deploy fixture rollback "${second:0:15}"
+FIXTURE_FAIL_ROLLBACK=1 deploy fixture rollback "${second:0:15}" 2> "$WORK/after-rollback.log" \
+    || fail "a failing after_rollback failed the rollback"
+grep -q "after_rollback failed; the rollback stands" "$WORK/after-rollback.log" || fail "no warning for after_rollback"
+[ "$(cat "$BASE/shared/data/rolled_back")" = "$second" ] || fail "after_rollback did not run in $second"
 [ "$(live_release)" = "$second" ] || fail "rollback by time did not go to $second"
 serves "$second" || fail "server does not show $second after a rollback by time"
 [ ! -e "$BASE/releases/$second/.bad" ] || fail "going to $second by name did not clear its bad mark"
 [ ! -d "$BASE/.deploy.lock" ] || fail "rollback left the lock behind"
-check "rollback skipped the bad $second; naming it went there and cleared the mark; unclear and missing names refused"
+check "rollback skipped the bad $second; naming it went there and cleared the mark; a failing after_rollback only warned; unclear and missing names refused"
 
 step "A second deploy waits for the lock"
 mkdir "$BASE/.deploy.lock"
@@ -1827,7 +1848,7 @@ slot_data_kept || fail "a refused copy-from changed the slot's data"
 deploy fixture@s1 copy-from fixture --yes > "$WORK/copy.log"
 cat "$WORK/copy.log"
 grep -q "SHARED from the slot's live release" "$WORK/copy.log" || fail "copy-from does not say where SHARED comes from"
-grep -qE "^  [0-9.]+[A-Z]?  data$" "$WORK/copy.log" || fail "copy-from does not list data with its size"
+grep -qE "^ +[0-9.]+[A-Z]?  data$" "$WORK/copy.log" || fail "copy-from does not list data with its size"
 grep -q "Copied into fixture@s1: data" "$WORK/copy.log" || fail "copy-from does not say what it copied"
 diff -r "$BASE/shared/data" "$SLOT/shared/data" > /dev/null || fail "the slot's data is not production's"
 [ ! -e "$SLOT/shared/data/slot-only.txt" ] || fail "the slot's old data/ was merged, not replaced"

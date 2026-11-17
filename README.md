@@ -514,6 +514,11 @@ up() {
 }
 ```
 
+Names of the engine are reserved. `deploy.conf` may read engine variables, but a function with the
+name of an engine function (`fail`, `say`, `prune`, ...) or a top-level change to an engine
+variable (`KEEP_RELEASES`, `DEPLOY_BASE`, ...) stops the deploy before any step, with the names
+to change. `SHARED` and `COPY_FROM_LIVE` are the only engine variables it sets.
+
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMPOSER_BIN`,
 `DEPLOY_SLOT` and `DEPLOY_HOST`, and these details of the run (also in `NOTIFY_CMD`). They are empty
 when unknown:

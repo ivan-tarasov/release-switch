@@ -12,6 +12,9 @@
 
 set -euo pipefail
 
+# Variables set before the engine starts: the environment and bash's own. deploy.conf may set them.
+START_VARS=" $(compgen -v | tr '\n' ' ')"
+
 ENGINE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 
@@ -62,6 +65,9 @@ LIMIT_FD=0
 
 # The last fail() message, for the alert.
 FAIL_MESSAGE=""
+
+# The engine's functions, set in main. deploy.conf may not define any of them.
+ENGINE_FUNCS=""
 
 # 1 with --yes or -y: rollback, down and deploy --force do not ask.
 YES=0
@@ -361,12 +367,12 @@ apply_defaults() {
     [ "$KEEP_RELEASES" -ge 2 ] \
         || fail "KEEP_RELEASES must be 2 or more: the live release and one to roll back to"
 
-    DEPLOY_HOST="$(url_host "$CHECK_URL")"
+    DEPLOY_HOST="$(host_of_url "$CHECK_URL")"
     export DEPLOY_BASE PHP_BIN COMPOSER_BIN DEPLOY_SLOT DEPLOY_HOST
 }
 
 # The host of URL $1, without scheme, user, port or path: https://u:p@example.com:8443/x gives example.com.
-url_host() {
+host_of_url() {
     printf '%s' "$1" | sed -E 's|^[^:/]+://||; s|[/?#].*$||; s|^.*@||; s|:[0-9]*$||'
 }
 
@@ -418,7 +424,7 @@ apply_slot() {
     fi
 
     PROJECT="$PROJECT@$DEPLOY_SLOT"
-    DEPLOY_HOST="$(url_host "$CHECK_URL")"
+    DEPLOY_HOST="$(host_of_url "$CHECK_URL")"
     export DEPLOY_BASE DEPLOY_SLOT DEPLOY_HOST
 }
 
@@ -1068,9 +1074,54 @@ require_check_url() {
     [ -n "$CHECK_URL" ] || fail "set CHECK_URL in $PROJECTS_DIR/<project>.env"
 }
 
+# Prints the engine names deploy.conf $1 takes: the functions it defines and the engine variables
+# it changes. Loads it in a subshell, so nothing reaches the engine.
+conf_clashes() (
+    set +eu
+    conf_list=" "
+    conf_values=()
+    conf_value=""
+
+    for conf_name in "${SETTINGS[@]}"; do
+        conf_list="$conf_list$conf_name "
+    done
+    for conf_name in $(compgen -v); do
+        case "$START_VARS$conf_list" in *" $conf_name "*) continue ;; esac
+        case "$conf_name" in conf_* | SHARED | COPY_FROM_LIVE | BASH_REMATCH | PIPESTATUS) continue ;; esac
+        conf_list="$conf_list$conf_name "
+    done
+
+    for conf_name in $conf_list; do
+        eval "conf_values+=(\"\${#${conf_name}[@]}:\${${conf_name}[*]}\")"
+    done
+
+    # shellcheck disable=SC2086 # One name per word.
+    unset -f $ENGINE_FUNCS
+    conf_ifs="$IFS"
+    # shellcheck source=/dev/null
+    . "$1" > /dev/null 2>&1
+    IFS="$conf_ifs"
+
+    for conf_name in $ENGINE_FUNCS; do
+        ! declare -F "$conf_name" > /dev/null || printf '%s() ' "$conf_name"
+    done
+
+    conf_i=0
+    for conf_name in $conf_list; do
+        eval "conf_value=\"\${#${conf_name}[@]}:\${${conf_name}[*]}\""
+        [ "$conf_value" = "${conf_values[$conf_i]}" ] || printf '%s ' "$conf_name"
+        conf_i=$((conf_i + 1))
+    done
+)
+
 # Reads deploy.conf of a release: SHARED and the step functions.
 load_conf() {
+    local clashes
     [ -f "$1/deploy.conf" ] || fail "$DEPLOY_BRANCH has no deploy.conf"
+
+    clashes="$(conf_clashes "$1/deploy.conf")"
+    [ -z "$clashes" ] \
+        || fail "deploy.conf uses names of the engine: ${clashes% }; rename them (see README, deploy.conf)"
 
     SHARED=()
     COPY_FROM_LIVE=()
@@ -3363,6 +3414,7 @@ main() {
         exit 0
     fi
 
+    ENGINE_FUNCS="$(compgen -A function)"
     trap on_exit EXIT
     git_fail_fast
 

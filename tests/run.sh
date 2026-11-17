@@ -1113,6 +1113,37 @@ fi
 [ "$(release_count)" = "$releases_now" ] || fail "a refused setting still built a release"
 check "bad KEEP_RELEASES and CHECK_WAIT stop the deploy before a clone"
 
+step "A deploy.conf that takes an engine function or variable fails before any step"
+before="$(live_release)"
+releases_now="$(release_count)"
+for clash in "prune() { :; }" "KEEP_RELEASES=3"; do
+    tmp="$WORK/clash"
+    rm -rf "$tmp"
+    git clone --quiet --branch develop "$REPO" "$tmp"
+    git -C "$tmp" checkout --quiet -B clash
+    # A helper of its own and top-level reads of engine variables are fine.
+    # shellcheck disable=SC2016 # Code for deploy.conf.
+    printf '%s\n' 'own_helper() { :; }' 'seen="$PHP_BIN $DEPLOY_BASE"' "$clash" >> "$tmp/deploy.conf"
+    git -C "$tmp" -c user.name=test -c user.email=test@example.com commit --quiet -am "clash: $clash"
+    git -C "$tmp" push --quiet --force origin clash
+    sleep 1
+    if deploy fixture --ref clash > "$WORK/clash.log" 2>&1; then
+        fail "a deploy.conf with $clash deployed"
+    fi
+    name="${clash%% *}"
+    name="${name%%=*}"
+    grep -q "deploy.conf uses names of the engine: $name; rename them" "$WORK/clash.log" \
+        || fail "no clear message for $clash"
+    if grep -q "Running preflight" "$WORK/clash.log"; then
+        fail "a step ran with $clash in deploy.conf"
+    fi
+    [ "$(live_release)" = "$before" ] || fail "a deploy.conf with $clash changed the live release"
+    [ "$(release_count)" = "$releases_now" ] || fail "a deploy.conf with $clash left its release behind"
+    [ ! -d "$BASE/.deploy.lock" ] || fail "a deploy.conf with $clash left the lock behind"
+done
+serves "$before" || fail "server does not show $before"
+check "a deploy.conf with prune() or KEEP_RELEASES failed before any step; $before is still live, the lock is free"
+
 step "Prune keeps the release that was just live"
 sleep 1
 KEEP_RELEASES=2 deploy fixture --force > /dev/null

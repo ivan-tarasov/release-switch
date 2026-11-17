@@ -988,8 +988,9 @@ check "a slow build failed after STEP_TIMEOUT with its sleep stopped, also on th
 step "A TERM during a step stops the step and its watchdog"
 sleep 1
 rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep"
-# An odd STEP_TIMEOUT, so the watchdog's sleep is easy to find.
-env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 STEP_TIMEOUT=97 FIXTURE_SLOW_BUILD="$WORK/slow.pid" \
+# A STEP_TIMEOUT tied to this run's port, so pgrep finds only this run's watchdog.
+watchdog=$((90000 + PORT))
+env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 STEP_TIMEOUT="$watchdog" FIXTURE_SLOW_BUILD="$WORK/slow.pid" \
     "$ROOT/deploy" fixture --force > /dev/null 2>&1 &
 pid=$!
 tries=40
@@ -1003,10 +1004,10 @@ code=0
 wait "$pid" || code=$?
 [ "$code" = 143 ] || fail "TERM during a step exited with $code, not 143"
 kill -0 "$(cat "$WORK/slow.pid.sleep")" 2>/dev/null && fail "TERM left the step's sleep running"
-pgrep -f "sleep 97" > /dev/null && fail "TERM left the watchdog running"
+pgrep -f "^sleep $watchdog\$" > /dev/null && fail "TERM left the watchdog running"
 [ ! -d "$BASE/.deploy.lock" ] || fail "TERM during a step left the lock behind"
-STEP_TIMEOUT=97 deploy fixture --force > /dev/null || fail "a deploy with STEP_TIMEOUT=97 failed"
-pgrep -f "sleep 97" > /dev/null && fail "a good deploy left a watchdog running"
+STEP_TIMEOUT="$watchdog" deploy fixture --force > /dev/null || fail "a deploy with STEP_TIMEOUT=$watchdog failed"
+pgrep -f "^sleep $watchdog\$" > /dev/null && fail "a good deploy left a watchdog running"
 check "TERM stopped the step and its watchdog and freed the lock; a good deploy leaves no watchdog"
 
 step "A slow PHP_RELOAD_CMD only warns"

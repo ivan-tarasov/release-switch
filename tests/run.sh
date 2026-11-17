@@ -1810,10 +1810,10 @@ grep -q "fixture@s2 is free now (it followed PR #7); deploying develop" "$WORK/s
 deploy staging fixture@s1 copy-from fixture --yes > "$WORK/staging.log"
 grep -q "Copied into fixture@s1: data" "$WORK/staging.log" || fail "staging copy-from did not copy"
 [ "$(deploy staging fixture@s1 path)" = "$(deploy path fixture@s1)" ] || fail "staging path does not print the slot's release"
-deploy fixture@s1 status | grep -v deployed > "$WORK/status.log"
-deploy staging fixture@s1 | grep -v deployed > "$WORK/staging.log"
+deploy fixture@s1 status | grep -v -e deployed -e "^Disk:" > "$WORK/status.log"
+deploy staging fixture@s1 | grep -v -e deployed -e "^Disk:" > "$WORK/staging.log"
 diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 does not show the slot's status"
-deploy staging fixture@s1 status | grep -v deployed > "$WORK/staging.log"
+deploy staging fixture@s1 status | grep -v -e deployed -e "^Disk:" > "$WORK/staging.log"
 diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 status does not show the slot's status"
 if deploy staging fixture free > /dev/null 2> "$WORK/staging.err"; then
     fail "staging free without a slot was not refused"

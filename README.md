@@ -47,7 +47,8 @@ A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cle
 way and exits with 130, 143 or 129. A build killed hard (SIGKILL, OOM) keeps its `.building` mark:
 it is never listed or rolled back to, and the next deploy or rollback removes it. Once `current` points at the new release, it is never deleted:
 it stays live, and the log says at which stage the deploy stopped.
-Migrations and other data changes are not undone by a switch back or a rollback.
+Migrations and other data changes are not undone by a switch back or a rollback. A rollback warns
+when the target lacks files the live release has in `MIGRATIONS_DIR`.
 Every deploy and rollback, and how it ended, goes to `deploy.log` (see `deploy <project> log`).
 A deploy also lists the commits it ships, in its output, the log and the alert.
 
@@ -282,6 +283,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
 | `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On cPanel the account quota can differ from `df`, so set it yourself |
 | `MIN_FREE_MB` | `500` | Free space in MB the disk of the base folder must have. `check` fails under it, and `deploy` and `copy-from` stop before they write anything. `0` to turn it off |
+| `MIGRATIONS_DIR` | `database/migrations` | Migrations folder inside a release. Before a rollback switches, it warns when the target lacks files the live release has there, as data is not reverted. A hint only: it never stops the rollback. Empty to turn it off |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status` and `log`, e.g. `America/Toronto`. `status` says "today at" and "yesterday at" for recent deploys. Release names stay in UTC |
 | `NOTIFY_URL` | none | Webhook for alerts. Gets a POST with JSON (see [Alerts](#alerts)) |
 | `NOTIFY_CMD` | none | Command for alerts, run with `sh -c`. The text is in `$NOTIFY_TEXT`, the event in `$NOTIFY_EVENT` (see [Alerts](#alerts)). Stopped after 30 s with a warning |

@@ -1074,6 +1074,34 @@ grep -q "OPCACHE_RESET_DIR must be a folder inside the release" "$WORK/opcache.o
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "a 500, a timeout and a missing folder only warned and left no file; a path out of the release is refused"
 
+step "A rollback past a new migration warns; it never blocks"
+sleep 1
+deploy fixture --force > /dev/null || fail "a deploy before the migrations test failed"
+older="$(live_release)"
+sleep 1
+deploy fixture --force > /dev/null || fail "a deploy before the migrations test failed"
+newer="$(live_release)"
+mkdir -p "$BASE/releases/$older/database/migrations" "$BASE/releases/$newer/database/migrations"
+touch "$BASE/releases/$older/database/migrations/2026_01_01_000000_create_users.php" \
+    "$BASE/releases/$newer/database/migrations/2026_01_01_000000_create_users.php" \
+    "$BASE/releases/$newer/database/migrations/2026_11_17_000000_add_notes.php"
+deploy fixture rollback "$older" > /dev/null 2> "$WORK/migrations.out" || fail "a rollback past a migration failed"
+grep -q "the target lacks 1 migration; data is not reverted" "$WORK/migrations.out" || fail "no warning for a missing migration"
+grep -q "^  2026_11_17_000000_add_notes[.]php$" "$WORK/migrations.out" || fail "the warning does not name the missing migration"
+! grep -q "create_users" "$WORK/migrations.out" || fail "the warning names a migration the target has"
+[ "$(live_release)" = "$older" ] || fail "the rollback past a migration did not switch"
+deploy fixture rollback "$newer" > /dev/null 2> "$WORK/migrations.out" || fail "a rollback to $newer failed"
+! grep -q "lacks" "$WORK/migrations.out" || fail "a warning when the target lacks no migration"
+MIGRATIONS_DIR='' deploy fixture rollback "$older" > /dev/null 2> "$WORK/migrations.out" || fail "a rollback with MIGRATIONS_DIR off failed"
+! grep -q "lacks" "$WORK/migrations.out" || fail "a warning with MIGRATIONS_DIR off"
+if MIGRATIONS_DIR=../db deploy fixture rollback "$newer" > /dev/null 2> "$WORK/migrations.out"; then
+    fail "MIGRATIONS_DIR=../db was not refused"
+fi
+grep -q "MIGRATIONS_DIR must stay inside the release" "$WORK/migrations.out" || fail "no message for MIGRATIONS_DIR=../db"
+deploy fixture rollback "$newer" > /dev/null 2>&1 || fail "a rollback back to $newer failed"
+serves "$newer" || fail "server does not show $newer"
+check "the warning named the missing file; none when nothing is missing or MIGRATIONS_DIR is empty; ../ is refused"
+
 step "The site check gets past a cache"
 sleep 1
 rm -f "$WORK/cached.log"

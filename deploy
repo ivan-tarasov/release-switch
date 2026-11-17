@@ -1245,7 +1245,7 @@ load_conf() {
 
     SHARED=()
     COPY_FROM_LIVE=()
-    unset -f preflight build verify after_switch failed after_rollback
+    unset -f preflight backup build verify after_switch failed after_rollback
 
     # shellcheck source=/dev/null
     . "$1/deploy.conf"
@@ -1874,7 +1874,7 @@ deploy() {
     copy_from_live
 
     local step
-    for step in preflight build verify; do
+    for step in preflight backup build verify; do
         STAGE="$step"
         run_step "$step"
         [ "$RUN_STATUS" -eq 0 ] || fail "$RUN_ERROR"

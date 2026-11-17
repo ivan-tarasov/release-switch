@@ -21,7 +21,7 @@ PROJECTS_DIR="${PROJECTS_DIR:-$ENGINE_DIR/projects}"
 # Settings a project file may set. Env vars of the same name win.
 SETTINGS=(DEPLOY_BASE CHECK_URL REPO_URL DEPLOY_BRANCH KEEP_RELEASES CHECK_WAIT CHECK_VERSION RELEASE_WAIT
     PHP_BIN COMPOSER_BIN PHP_RELOAD_CMD OPCACHE_RESET_DIR DISPLAY_TZ NOTIFY_URL NOTIFY_CMD NOTIFY_ON STAGING_SERVERS STAGING_URL
-    STEP_TIMEOUT DISK_LIMIT MIN_FREE_MB)
+    STEP_TIMEOUT DISK_LIMIT MIN_FREE_MB MIGRATIONS_DIR)
 
 PROJECT=""
 
@@ -340,6 +340,8 @@ apply_defaults() {
     STEP_TIMEOUT="${STEP_TIMEOUT:-600}"
     DISK_LIMIT="${DISK_LIMIT:-}"
     MIN_FREE_MB="${MIN_FREE_MB:-500}"
+    # No colon: an empty value turns the migrations hint off.
+    MIGRATIONS_DIR="${MIGRATIONS_DIR-database/migrations}"
 
     case "$KEEP_RELEASES" in
         '' | *[!0-9]*) fail "KEEP_RELEASES must be a whole number, not '$KEEP_RELEASES'" ;;
@@ -363,6 +365,10 @@ apply_defaults() {
         /* | .. | ../* | */.. | */../*)
             fail "OPCACHE_RESET_DIR must be a folder inside the release, like public, not '$OPCACHE_RESET_DIR'"
             ;;
+    esac
+    case "/$MIGRATIONS_DIR/" in
+        //) ;;
+        //* | */../*) fail "MIGRATIONS_DIR must stay inside the release: no leading / and no .., not '$MIGRATIONS_DIR'" ;;
     esac
     [ -z "$DISK_LIMIT" ] || [[ "$DISK_LIMIT" =~ ^[0-9]+([.][0-9]+)?[KkMmGgTt]?$ ]] \
         || fail "DISK_LIMIT must be a size like 2G, 500M or 1.5G, or plain bytes, not '$DISK_LIMIT'"
@@ -1894,6 +1900,32 @@ deploy() {
     say "Deployed ${PREVIOUS_RELEASE:+$(release_version "$PREVIOUS_RELEASE") → }$(release_version "$NEW_RELEASE")"
 }
 
+# Warns when release $2 lacks files that release $1 has in MIGRATIONS_DIR. A hint only.
+warn_missing_migrations() {
+    local live_dir target_dir file missing=() count
+
+    [ -n "$MIGRATIONS_DIR" ] || return 0
+    live_dir="$DEPLOY_BASE/releases/$1/${MIGRATIONS_DIR%/}"
+    target_dir="$DEPLOY_BASE/releases/$2/${MIGRATIONS_DIR%/}"
+    [ -d "$live_dir" ] && [ -d "$target_dir" ] || return 0
+
+    for file in "$live_dir"/*; do
+        [ -e "$file" ] || continue
+        file="${file##*/}"
+        [ -e "$target_dir/$file" ] || missing+=("$file")
+    done
+
+    count="${#missing[@]}"
+    [ "$count" -gt 0 ] || return 0
+    if [ "$count" -eq 1 ]; then
+        warn "the target lacks 1 migration; data is not reverted"
+    else
+        warn "the target lacks $count migrations; data is not reverted"
+    fi
+    printf '  %s\n' "${missing[@]:0:10}" | rail >&2
+    [ "$count" -le 10 ] || printf '  and %s more\n' "$((count - 10))" | rail >&2
+}
+
 rollback() {
     local name="" arg live target note
 
@@ -1929,6 +1961,7 @@ rollback() {
         note="$live gets marked bad, so later rollbacks skip it"
     fi
 
+    warn_missing_migrations "$live" "$target"
     confirm "Roll back?" "Rollback of $PROJECT: live $live → $target" "$note"
     DEPLOY_PREVIOUS_RELEASE="$live"
     commit_details "$DEPLOY_BASE/releases/$target"
@@ -3519,6 +3552,7 @@ Settings${PROJECT:+ for $PROJECT} (value now in effect):
   STEP_TIMEOUT    Seconds a deploy.conf step may run, 0 for no limit ($STEP_TIMEOUT)
   DISK_LIMIT      Max size of the base folder for check, like 2G or 500M (${DISK_LIMIT:-no limit})
   MIN_FREE_MB     Free MB check wants and deploy needs, 0 for off ($MIN_FREE_MB)
+  MIGRATIONS_DIR  Folder a rollback compares to warn about missing migrations (${MIGRATIONS_DIR:-off})
   DISPLAY_TZ      Time zone for status times (${DISPLAY_TZ:-UTC})
   NOTIFY_URL      Webhook for alerts, gets JSON with "text" ($([ -n "$NOTIFY_URL" ] && printf set || printf 'not set'))
   NOTIFY_CMD      Command for alerts, text in \$NOTIFY_TEXT ($([ -n "$NOTIFY_CMD" ] && printf set || printf 'not set'))

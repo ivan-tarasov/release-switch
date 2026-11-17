@@ -2020,9 +2020,38 @@ if command -v script > /dev/null; then
         "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
     grep -q "Pick 1–" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
     grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
-    grep -q "Deploy fixture .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" || fail "the menu does not ask before the deploy"
+    grep -q "Deploy fixture (production) .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" \
+        || fail "the menu does not ask before the deploy"
     [[ "$(live_release)" == *-v2026.11.20000-* ]] || { cat "$WORK/menu.log"; fail "the menu did not deploy on y"; }
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; q did nothing; the numbered list picked and deployed fixture"
+
+    # s1 follows feature/x; s2 and the new s3 are free.
+    cp "$WORK/projects/fixture.env" "$WORK/fixture.env"
+    printf 'STAGING_SERVERS=3\n' >> "$WORK/projects/fixture.env"
+    [ ! -e "$SLOT/BRANCH" ] || mv "$SLOT/BRANCH" "$WORK/s1.branch"
+    [ ! -e "$SLOT2/BRANCH" ] || mv "$SLOT2/BRANCH" "$WORK/s2.branch"
+    printf 'feature/x\n' > "$SLOT/BRANCH"
+    on_terminal_hold 2 $'3\nn' env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
+        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "^ +(❯ )?[0-9 ] " > "$WORK/menu.rows"
+    grep -qE "^ +❯ 1  fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
+    [[ "$(sed -n 2p "$WORK/menu.rows")" =~ ^\ +2\ \ ├\ s1\ +feature/x\  ]] \
+        || { cat "$WORK/menu.rows"; fail "s1 is not under fixture"; }
+    [[ "$(sed -n 3p "$WORK/menu.rows")" =~ ^\ +└\ s2,\ s3\ +free\ *$ ]] \
+        || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one leaf"; }
+    [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +3\ \ release-switch\  ]] \
+        || { cat "$WORK/menu.rows"; fail "the engine is not number 3"; }
+    # Works with or without an upstream branch for the engine.
+    grep -q "Update the engine" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "key 3 skipped the free leaf wrongly"; }
+    grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "n on the engine row did not stop"; }
+    on_terminal_hold 2 $'2\nn' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+        || { cat "$WORK/menu.log"; fail "the numbered tree menu failed"; }
+    grep -q "Deploy fixture s1 (staging) feature/x? \[y/N\]" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the menu does not name the slot in its question"; }
+    rm "$SLOT/BRANCH"
+    [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
+    [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
+    mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; q did nothing; the numbered list picked and deployed fixture; slots hang under fixture with free ones in one leaf that numbers skip; the question names production or the slot"
 else
     check "skipped: no script command to make a terminal"
 fi

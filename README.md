@@ -298,7 +298,6 @@ Use one or both.
 | --- | --- |
 | LiteSpeed (LSAPI) | `touch ~/.lsphp_restart.txt` |
 | CloudLinux mod_lsapi | `touch ~/mod_lsapi_reset_me` |
-| Passenger | `touch ~/tmp/restart.txt` |
 
 `OPCACHE_RESET_DIR` resets OPcache through the web server, whose PHP a shell command cannot reach.
 Set it to the web root inside a release, like `public` or `public/site`. After each switch (deploy,

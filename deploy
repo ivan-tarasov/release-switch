@@ -605,6 +605,20 @@ on_exit() {
     limit_stop
     end_wait_line
 
+    # The failed step of deploy.conf, if loaded: in the new release while it is on disk, else live.
+    if [ "$status" -ne 0 ] && [ "$ACTION" = deploy ] && declare -F failed > /dev/null; then
+        if [ -z "$NEW_RELEASE" ] || [ ! -d "$DEPLOY_BASE/releases/$NEW_RELEASE" ]; then
+            RELEASE_NAME="$(current_release)"
+            RELEASE_DIR="$DEPLOY_BASE/releases/$RELEASE_NAME"
+        fi
+
+        if [ -n "$RELEASE_NAME" ] && [ -d "$RELEASE_DIR" ]; then
+            run_step failed
+            set +e
+            [ "$RUN_STATUS" -eq 0 ] || warn "$RUN_ERROR; the deploy failed anyway"
+        fi
+    fi
+
     # Never deletes the release that `current` points at, whatever the flags say.
     if [ -n "$NEW_RELEASE" ] && [ "$SWITCHED" -eq 0 ] && [ "$(current_release)" != "$NEW_RELEASE" ]; then
         rm -rf "${DEPLOY_BASE:?}/releases/$NEW_RELEASE"
@@ -1214,7 +1228,7 @@ load_conf() {
 
     SHARED=()
     COPY_FROM_LIVE=()
-    unset -f preflight build verify after_switch
+    unset -f preflight build verify after_switch failed after_rollback
 
     # shellcheck source=/dev/null
     . "$1/deploy.conf"
@@ -1943,6 +1957,20 @@ rollback() {
     fi
 
     say "Rolled back $(release_version "$live") → $(release_version "$target") (data changes stay applied)"
+
+    RELEASE_DIR="$DEPLOY_BASE/releases/$target"
+    RELEASE_NAME="$target"
+    export RELEASE_DIR RELEASE_NAME
+
+    if [ -f "$RELEASE_DIR/deploy.conf" ]; then
+        if [ -n "$(conf_clashes "$RELEASE_DIR/deploy.conf")" ]; then
+            warn "not running after_rollback: deploy.conf of $target uses names of the engine"
+        else
+            load_conf "$RELEASE_DIR"
+            run_step after_rollback
+            [ "$RUN_STATUS" -eq 0 ] || warn "$RUN_ERROR; the rollback stands"
+        fi
+    fi
 
     if is_down; then
         warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"

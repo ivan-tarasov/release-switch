@@ -41,6 +41,8 @@ Each project has a base folder on the server:
    go on the next deploy.
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
+When a deploy fails after `deploy.conf` was loaded, its `failed()` step runs once (see
+[deploy.conf](#deployconf)).
 A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cleans up the same
 way and exits with 130, 143 or 129. A build killed hard (SIGKILL, OOM) keeps its `.building` mark:
 it is never listed or rolled back to, and the next deploy or rollback removes it. Once `current` points at the new release, it is never deleted:
@@ -516,6 +518,21 @@ after_switch() {
     "$PHP_BIN" artisan cache:forget sitemap.xml
 }
 
+# Optional. Runs once when a deploy fails after deploy.conf was loaded: in the new release while
+# it is on disk (the build or a step failed, or it is the only release), else in the live release
+# (the check failed and the deploy switched back). Not on success, and not when the deploy stopped
+# earlier (lock, freeze, clone). A failure is only a warning; the deploy still fails.
+failed() {
+    "$PHP_BIN" artisan up
+}
+
+# Optional. Runs in the target release after a rollback switches to it, before the site check.
+# A failure is only a warning; the rollback stands.
+after_rollback() {
+    "$PHP_BIN" artisan cache:clear
+    "$PHP_BIN" artisan queue:restart
+}
+
 # Optional. Run by `check` (and so by the cron check) in the live release. A non-zero exit is a
 # problem, and an alert if alerts are on. The last line it prints shows in the check.
 health() {
@@ -597,7 +614,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
-deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
+deploys, rollbacks and bad releases, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared

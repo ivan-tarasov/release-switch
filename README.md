@@ -32,7 +32,8 @@ Each project has a base folder on the server:
 5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
 6. runs the project's `preflight`, `build` and `verify` steps there;
-7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD` and `after_switch`;
+7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD`, the web OPcache reset (see
+   [OPcache](#opcache)) and `after_switch`;
 8. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
    If it does not, it switches back and sets the new release aside as `releases/.failed-<name>`;
 9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder. It always keeps
@@ -274,7 +275,8 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `CHECK_VERSION` | `1` | `0` to only wait for a 200, for a project that cannot send `X-App-Version` yet |
 | `PHP_BIN` | `php` | PHP binary, for the project's steps |
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
-| `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/tmp/restart.txt`. Stopped after 60 s with a warning |
+| `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/.lsphp_restart.txt` (see [OPcache](#opcache)). Stopped after 60 s with a warning |
+| `OPCACHE_RESET_DIR` | none | Web root inside a release, like `public`. Turns on the OPcache reset through the web after each switch (see [OPcache](#opcache)) |
 | `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
 | `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On cPanel the account quota can differ from `df`, so set it yourself |
 | `MIN_FREE_MB` | `500` | Free space in MB the disk of the base folder must have. `check` fails under it, and `deploy` and `copy-from` stop before they write anything. `0` to turn it off |
@@ -284,6 +286,26 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `NOTIFY_ON` | problems | `problems`, or `all` to also send successful deploys |
 | `STAGING_SERVERS` | `0` | Number of staging slots, `s1` to `sN` (see [Staging](#staging)) |
 | `STAGING_URL` | `sN.` before the host of `CHECK_URL` | Slot URL, with `{slot}` for `s1`, `s2`, ... e.g. `https://user:pass@{slot}.example.com/` |
+
+### OPcache
+
+PHP's OPcache can keep serving old code after `current` is switched. There are two ways to clear it.
+Use one or both.
+
+`PHP_RELOAD_CMD` runs a shell command after each switch. Common values on shared hosts:
+
+| Host | `PHP_RELOAD_CMD` |
+| --- | --- |
+| LiteSpeed (LSAPI) | `touch ~/.lsphp_restart.txt` |
+| CloudLinux mod_lsapi | `touch ~/mod_lsapi_reset_me` |
+
+`OPCACHE_RESET_DIR` resets OPcache through the web server, whose PHP a shell command cannot reach.
+Set it to the web root inside a release, like `public` or `public/site`. After each switch (deploy,
+rollback, or a failed check that switches back), the engine writes a PHP file with a random name
+(`rs-opcache-<32 hex>.php`) into that folder, calls it once at the scheme, host and port of
+`CHECK_URL`, and deletes it whatever happens. The file runs `opcache_reset()` when PHP has it, and
+deletes itself too. A staging slot calls its own slot URL. A missing folder, an answer other than
+200, or no answer within 60 s (or `STEP_TIMEOUT`, when smaller) only warns, and the deploy goes on.
 
 ### Alerts
 
@@ -576,7 +598,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
-`PHP_RELOAD_CMD`, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
+`PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

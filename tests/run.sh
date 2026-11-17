@@ -178,7 +178,9 @@ check "shared/ holds .env and data/; the old checkout links to them"
 # host (s1.localhost) gets that slot's folder, next to the base folder. /cached acts like
 # LSCache: it keeps each request in cached.log and answers with an old version unless the
 # request has an rs query or Cache-Control: no-cache. /stall hangs for 15 s once, when the
-# stall file exists, then serves the site.
+# stall file exists, then serves the site. A one-time OPcache reset file is logged in opcache.log
+# and run from the web root; it answers 500 when opcache-fail exists, and waits 20 s first when
+# opcache-stall exists.
 cat > "$WORK/router.php" <<EOF
 <?php
 if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/stall') {
@@ -204,6 +206,23 @@ if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/cached') {
 \$base = '$BASE';
 if (preg_match('/^(s[0-9]+)\\./', \$_SERVER['HTTP_HOST'] ?? '', \$m)) {
     \$base = '$WORK/' . \$m[1];
+}
+\$path = parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if (preg_match('#^/rs-opcache-[0-9a-f]{32}\\.php\$#', \$path)) {
+    file_put_contents('$WORK/opcache.log', \$path . "\n", FILE_APPEND);
+    if (file_exists('$WORK/opcache-fail')) {
+        http_response_code(500);
+        return;
+    }
+    if (file_exists('$WORK/opcache-stall')) {
+        sleep(20);
+    }
+    if (!is_file("\$base/current/public\$path")) {
+        http_response_code(404);
+        return;
+    }
+    require "\$base/current/public\$path";
+    return;
 }
 chdir("\$base/current/public");
 require "\$base/current/public/index.php";
@@ -957,6 +976,61 @@ STEP_TIMEOUT=3 PHP_RELOAD_CMD="sleep 20" deploy fixture --force > /dev/null 2> "
 grep -q "PHP_RELOAD_CMD ran past 3 s; carrying on" "$WORK/reload.log" || fail "no warning for a slow PHP_RELOAD_CMD"
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "the slow PHP_RELOAD_CMD was stopped and the deploy went on"
+
+# No rs-opcache file in any release, and none in the web root.
+no_opcache_files() {
+    [ -z "$(find "$BASE/releases" -name 'rs-opcache-*')" ]
+}
+
+step "OPCACHE_RESET_DIR resets OPcache through a one-time URL, on deploy and rollback"
+sleep 1
+rm -f "$WORK/opcache.log"
+deploy fixture --force > /dev/null || fail "a deploy without OPCACHE_RESET_DIR failed"
+[ ! -e "$WORK/opcache.log" ] || fail "an OPcache reset ran with OPCACHE_RESET_DIR off"
+sleep 1
+OPCACHE_RESET_DIR=public deploy fixture --force > "$WORK/opcache.out" 2>&1 || fail "a deploy with OPCACHE_RESET_DIR failed"
+[ "$(wc -l < "$WORK/opcache.log" | tr -d ' ')" = 1 ] || fail "the deploy did not call the OPcache reset once"
+grep -qE '^/rs-opcache-[0-9a-f]{32}[.]php$' "$WORK/opcache.log" || fail "the OPcache reset URL has no random name"
+grep -qE "Reset OPcache|No OPcache in the web server's PHP" "$WORK/opcache.out" || fail "the OPcache reset did not run"
+no_opcache_files || fail "the OPcache reset file was left behind"
+reset="$(live_release)"
+OPCACHE_RESET_DIR=public deploy fixture rollback > "$WORK/opcache.out" 2>&1 || fail "a rollback with OPCACHE_RESET_DIR failed"
+[ "$(wc -l < "$WORK/opcache.log" | tr -d ' ')" = 2 ] || fail "the rollback did not call the OPcache reset"
+[ "$(sort -u "$WORK/opcache.log" | wc -l | tr -d ' ')" = 2 ] || fail "the OPcache reset URL was used twice"
+no_opcache_files || fail "the rollback left the OPcache reset file behind"
+[ "$(live_release)" != "$reset" ] || fail "the rollback did not switch"
+check "one request to a random rs-opcache URL per switch, the file gone after; none when off"
+
+step "A failing, slow or misplaced OPcache reset only warns"
+sleep 1
+touch "$WORK/opcache-fail"
+OPCACHE_RESET_DIR=public deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
+    || fail "a failing OPcache reset failed the deploy"
+rm -f "$WORK/opcache-fail"
+grep -qE "OPcache reset at http://127[.]0[.]0[.]1:$PORT/rs-opcache-[0-9a-f]{32}[.]php answered 500; carrying on" "$WORK/opcache.out" \
+    || fail "no warning for a failing OPcache reset"
+no_opcache_files || fail "a failing OPcache reset left the file behind"
+sleep 1
+touch "$WORK/opcache-stall"
+started="$(date +%s)"
+STEP_TIMEOUT=3 OPCACHE_RESET_DIR=public deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
+    || fail "a slow OPcache reset failed the deploy"
+rm -f "$WORK/opcache-stall"
+[ $(($(date +%s) - started)) -lt 15 ] || fail "the slow OPcache reset held the deploy for $(($(date +%s) - started)) s"
+grep -q "ran past 3 s; carrying on" "$WORK/opcache.out" || fail "no warning for a slow OPcache reset"
+no_opcache_files || fail "a slow OPcache reset left the file behind"
+sleep 1
+OPCACHE_RESET_DIR=web deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
+    || fail "a missing OPCACHE_RESET_DIR folder failed the deploy"
+grep -q "the release has no web folder; OPcache not reset, carrying on" "$WORK/opcache.out" \
+    || fail "no warning for a missing OPCACHE_RESET_DIR folder"
+no_opcache_files || fail "a missing OPCACHE_RESET_DIR folder left a file behind"
+if OPCACHE_RESET_DIR=../public deploy fixture --force > /dev/null 2> "$WORK/opcache.out"; then
+    fail "OPCACHE_RESET_DIR=../public was not refused"
+fi
+grep -q "OPCACHE_RESET_DIR must be a folder inside the release" "$WORK/opcache.out" || fail "no message for OPCACHE_RESET_DIR=../public"
+serves "$(live_release)" || fail "server does not show $(live_release)"
+check "a 500, a timeout and a missing folder only warned and left no file; a path out of the release is refused"
 
 step "The site check gets past a cache"
 sleep 1

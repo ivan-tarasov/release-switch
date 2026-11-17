@@ -958,6 +958,16 @@ end_wait_line() {
     fi
 }
 
+# Prints the version of release $1 (<date>-<time>[-<tag>]-<sha>): its tag, else its short sha.
+release_version() {
+    local rest="${1#*-*-}"
+
+    case "$rest" in
+        *-*) printf '%s\n' "${rest%-*}" ;;
+        *) printf '%s\n' "$rest" ;;
+    esac
+}
+
 # Sets TAG to the release tag on the cloned commit in $1. A commit under 5 minutes old in a repo
 # with release tags may not have its tag yet: waits up to RELEASE_WAIT seconds for it, unless $2 is 1.
 # A commit with a no-release marker never gets a tag, so the wait stops at once.
@@ -1867,7 +1877,7 @@ deploy() {
     prune
     log_event deploy "$NEW_RELEASE" ok
     ACTION=""
-    say "Deployed $NEW_RELEASE"
+    say "Deployed ${PREVIOUS_RELEASE:+$(release_version "$PREVIOUS_RELEASE") → }$(release_version "$NEW_RELEASE")"
 }
 
 rollback() {
@@ -1932,7 +1942,7 @@ rollback() {
         fi
     fi
 
-    say "Rolled back from $live to $target (data changes stay applied)"
+    say "Rolled back $(release_version "$live") → $(release_version "$target") (data changes stay applied)"
 
     if is_down; then
         warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"

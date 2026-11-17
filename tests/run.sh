@@ -240,8 +240,9 @@ PHP_CLI_SERVER_WORKERS=4 php -d realpath_cache_size=0 -S "127.0.0.1:$PORT" "$WOR
 SERVER_PID=$!
 
 step "First deploy, with the project left out"
-deploy
+deploy > "$WORK/first.log"
 first="$(live_release)"
+grep -q "Deployed ${first##*-}$" "$WORK/first.log" || fail "a first deploy does not show only its sha"
 [[ "$first" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{7,}$ ]] || fail "release name $first is not <date>-<time>-<sha>"
 serves "$first" || fail "server does not show $first"
 [ "$(cat "$BASE/shared/data/switched")" = "$first" ] || fail "after_switch did not run"
@@ -252,17 +253,20 @@ sleep 1
 step "Second deploy, of a new tagged commit"
 commit "fixture v2"
 git -C "$REPO" tag v2026.11.99 develop
-deploy fixture
+deploy fixture > "$WORK/second.log"
 second="$(live_release)"
 [[ "$second" =~ ^[0-9]{8}-[0-9]{6}-v2026\.11\.99-[0-9a-f]{7,}$ ]] || fail "release name $second has no tag"
+grep -q "Deployed ${first##*-} → v2026.11.99$" "$WORK/second.log" || fail "a tagged deploy does not show sha → tag"
 serves "$second" || fail "server does not show $second"
 [ "$(cat "$BASE/current/cache/origin")" = "$first" ] || fail "cache/ was not copied from $first"
 [ ! -L "$BASE/current/cache" ] || fail "cache/ is a link, not a copy"
 check "live: $second; cache/ copied from $first"
 
 step "Rollback"
-deploy fixture rollback
+deploy fixture rollback > "$WORK/rollback.log"
 [ "$(live_release)" = "$first" ] || fail "rollback did not go back to $first"
+grep -q "Rolled back v2026.11.99 → ${first##*-} (data changes stay applied)$" "$WORK/rollback.log" \
+    || fail "rollback does not show tag → sha"
 serves "$first" || fail "server does not show $first after rollback"
 [ -e "$BASE/releases/$second/.bad" ] || fail "rollback did not mark $second as bad"
 check "rolled back to $first; $second is marked bad"
@@ -555,8 +559,9 @@ grep -q "$tagged already runs v2026.11.99" "$WORK/ref.log" || fail "--ref of the
 [ "$(live_release)" = "$tagged" ] || fail "--ref of the live commit changed the live release"
 sleep 1
 older="$(git -C "$REPO" rev-parse --short develop~1)"
-deploy fixture --ref "$older" > /dev/null
+deploy fixture --ref "$older" > "$WORK/ref.log"
 [[ "$(live_release)" == *"-$older" ]] || fail "--ref $older deployed $(live_release)"
+grep -q "Deployed v2026.11.99 → $older$" "$WORK/ref.log" || fail "an untagged deploy does not show tag → sha"
 if deploy fixture --ref nope 2> "$WORK/ref.log"; then
     fail "--ref of a missing ref succeeded"
 fi

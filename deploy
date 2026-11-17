@@ -2636,7 +2636,7 @@ project_menu() {
     [ "$version" != - ] || version=""
 
     if [ "$target" = self ]; then
-        git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null | rail
+        { git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null || true; } | rail
         ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; exit 0; }
     else
         (

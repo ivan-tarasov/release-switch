@@ -2040,7 +2040,9 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one leaf"; }
     [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +3\ \ release-switch\  ]] \
         || { cat "$WORK/menu.rows"; fail "the engine is not number 3"; }
+    # Works with or without an upstream branch for the engine.
     grep -q "Update the engine" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "key 3 skipped the free leaf wrongly"; }
+    grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "n on the engine row did not stop"; }
     on_terminal_hold 2 $'2\nn' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
         || { cat "$WORK/menu.log"; fail "the numbered tree menu failed"; }
     grep -q "Deploy fixture s1 (staging) feature/x? \[y/N\]" "$WORK/menu.log" \

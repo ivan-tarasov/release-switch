@@ -2488,8 +2488,13 @@ claim_slot() {
     base="$(DEPLOY_SLOT="$1" && apply_slot && mkdir -p "$DEPLOY_BASE" && cd "$DEPLOY_BASE" && pwd -P)" || return 1
     mkdir "$base/.deploy.lock" 2>/dev/null || return 1
     LOCK_DIR="$base/.deploy.lock"
-    printf '%s %s stage\n' "$$" "$(date +%s)" > "$LOCK_DIR/owner.$$"
-    mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner"
+    # Called in a condition, so `set -e` does not stop a lock with no owner.
+    if ! printf '%s %s stage\n' "$$" "$(date +%s)" 2>/dev/null > "$LOCK_DIR/owner.$$" \
+        || ! mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner" 2>/dev/null; then
+        rm -rf "$LOCK_DIR"
+        LOCK_DIR=""
+        fail "could not write the lock owner in $base/.deploy.lock"
+    fi
     followed="$(cat "$base/BRANCH" 2>/dev/null || true)"
 
     if [ "$followed" = "$2" ] || [ "$followed" = "$3" ]; then
@@ -2736,10 +2741,20 @@ slots_update() {
 }
 
 check_all() {
-    local project failed=0
+    local project failed=0 status
 
     for project in $(list_projects); do
-        (load_project "$project" && apply_defaults && check) || failed=1
+        # Not in a condition, which would turn `set -e` off in check and health().
+        set +e
+        (
+            set -e
+            load_project "$project"
+            apply_defaults
+            check
+        )
+        status=$?
+        set -e
+        [ "$status" -eq 0 ] || failed=1
     done
 
     [ -n "$(list_projects)" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"

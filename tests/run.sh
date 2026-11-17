@@ -648,6 +648,12 @@ grep -q "^FAIL  fixture: health: queue is stuck$" "$WORK/check-err.log" || fail 
 deploy check --all > "$WORK/check-all.log"
 grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check the fixture"
 check "check passes on a healthy site; reports broken shared links, a bad site, a stuck deploy and a failing health() on stderr"
+# A bad sleep time fails health() half way; the rest of it would still print "queue is empty".
+if FIXTURE_HEALTH_SLEEP=x deploy check --all > /dev/null 2> "$WORK/check-all-err.log"; then
+    fail "check --all passed with a health() that failed half way"
+fi
+grep -q "^FAIL  fixture: health: " "$WORK/check-all-err.log" || fail "check --all does not report the health() problem"
+check "check --all stops health() at its first failing command, like check"
 
 step "Alerts"
 export ALERTS="$WORK/alerts.log"

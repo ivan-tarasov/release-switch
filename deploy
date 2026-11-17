@@ -42,6 +42,12 @@ COPY_TMP=""
 # The one-time OPcache reset file while it is in the web root, so on_exit deletes it.
 OPCACHE_FILE=""
 
+# While the project menu is up: its temp folder, the jobs reading its rows, and the terminal
+# settings to restore. on_exit cleans them up.
+MENU_TMP=""
+MENU_PIDS=""
+MENU_STTY=""
+
 # Set while a deploy runs, so the exit trap knows what to clean up.
 NEW_RELEASE=""
 PREVIOUS_RELEASE=""
@@ -217,14 +223,15 @@ rail() {
     done
 }
 
-# The newest release tag of the engine, "+N" when N commits are past it, or the short sha.
+# The newest release tag of the engine (or of commit $1), "+N" when N commits are past it, or the
+# short sha.
 engine_version() {
     local described
 
-    if described="$(git -C "$ENGINE_DIR" describe --tags --match 'v[0-9]*' 2>/dev/null)"; then
+    if described="$(git -C "$ENGINE_DIR" describe --tags --match 'v[0-9]*' "${1:-HEAD}" 2>/dev/null)"; then
         printf '%s' "$described" | sed -E 's/-([0-9]+)-g[0-9a-f]+$/+\1/'
     else
-        git -C "$ENGINE_DIR" rev-parse --short HEAD 2>/dev/null || printf 'unknown'
+        git -C "$ENGINE_DIR" rev-parse --short "${1:-HEAD}" 2>/dev/null || printf 'unknown'
     fi
 }
 
@@ -608,6 +615,7 @@ on_exit() {
     # Cleanup runs to the end: no second signal, and no stop on a failed write to a closed terminal.
     trap '' INT TERM HUP
     set +e
+    menu_cleanup
     limit_stop
     end_wait_line
 
@@ -1046,12 +1054,13 @@ wait_release_tag() {
 }
 
 # Commits on DEPLOY_BRANCH (or the pull request head) after the live one. Sets PENDING_COUNT (empty when unknown),
-# PENDING_LOG (newest first) and PENDING_NOTE (why the count is unknown).
+# PENDING_LOG (newest first), PENDING_NOTE (why the count is unknown) and PENDING_TIP (the branch tip).
 pending_commits() {
     local repo live_sha tip tmp
     PENDING_COUNT=""
     PENDING_LOG=""
     PENDING_NOTE=""
+    PENDING_TIP=""
 
     repo="${REPO_URL:-$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null || true)}"
     live_sha="$(git -C "$DEPLOY_BASE/releases/$1" rev-parse HEAD 2>/dev/null || true)"
@@ -1069,6 +1078,8 @@ pending_commits() {
 
         return
     fi
+
+    PENDING_TIP="$tip"
 
     if [ "$tip" = "$live_sha" ]; then
         PENDING_COUNT=0
@@ -2096,9 +2107,52 @@ status() {
     fi
 }
 
+# What status_row and the menu read for the loaded project: ROW_LIVE, ROW_SITE, ROW_SITE_BAD (1 when
+# the site does not serve the live release), ROW_PROBLEMS (frozen, down, lock, failed releases), and
+# pending_commits on the live release.
+project_facts() {
+    local failed
+    ROW_LIVE="$(current_release)"
+    ROW_SITE_BAD=0
+    ROW_PROBLEMS=()
+    PENDING_COUNT=""
+    PENDING_NOTE=""
+    PENDING_TIP=""
+
+    if [ -z "$CHECK_URL" ]; then
+        ROW_SITE="not checked (no CHECK_URL)"
+    else
+        probe
+
+        if [ -n "$ROW_LIVE" ] && [ "$PROBE_STATUS" = 200 ] && [ "$PROBE_VERSION" = "$ROW_LIVE" ]; then
+            ROW_SITE="200, matches live"
+        elif [ -n "$ROW_LIVE" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
+            ROW_SITE="200 (version not checked)"
+        elif is_down && [ "$PROBE_STATUS" = 503 ]; then
+            ROW_SITE="503, down for maintenance"
+        else
+            ROW_SITE="${PROBE_STATUS:-no answer}, NOT the live release"
+            ROW_SITE_BAD=1
+        fi
+    fi
+
+    [ -z "$ROW_LIVE" ] || pending_commits "$ROW_LIVE"
+
+    [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || ROW_PROBLEMS+=("frozen")
+    ! is_down || ROW_PROBLEMS+=("down")
+
+    case "$(lock_state)" in
+        stale) ROW_PROBLEMS+=("stale lock") ;;
+        held) ROW_PROBLEMS+=("lock held") ;;
+    esac
+
+    failed="$(find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [ "$failed" -eq 0 ] || ROW_PROBLEMS+=("$failed failed release(s)")
+}
+
 # One tab-separated row for `status --all`. Fails when the site does not serve the live release.
 status_row() {
-    local live time site notes=() failed ok=0
+    local time notes=()
 
     if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
         printf '%s\tnone\t-\t-\t%s\n' "$PROJECT" "no base folder: ${DEPLOY_BASE:-DEPLOY_BASE not set}"
@@ -2106,30 +2160,11 @@ status_row() {
         return 1
     fi
 
-    live="$(current_release)"
+    project_facts
     time="-"
-    [ -z "$live" ] || time="$(release_time "$live")"
+    [ -z "$ROW_LIVE" ] || time="$(release_time "$ROW_LIVE")"
 
-    if [ -z "$CHECK_URL" ]; then
-        site="not checked (no CHECK_URL)"
-    else
-        probe
-
-        if [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$PROBE_VERSION" = "$live" ]; then
-            site="200, matches live"
-        elif [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$CHECK_VERSION" = 0 ]; then
-            site="200 (version not checked)"
-        elif is_down && [ "$PROBE_STATUS" = 503 ]; then
-            site="503, down for maintenance"
-        else
-            site="${PROBE_STATUS:-no answer}, NOT the live release"
-            ok=1
-        fi
-    fi
-
-    if [ -n "$live" ]; then
-        pending_commits "$live"
-
+    if [ -n "$ROW_LIVE" ]; then
         if [ -z "$PENDING_COUNT" ]; then
             notes+=("pending unknown")
         elif [ "$PENDING_COUNT" != 0 ]; then
@@ -2137,20 +2172,10 @@ status_row() {
         fi
     fi
 
-    [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || notes+=("frozen")
-    ! is_down || notes+=("down")
+    printf '%s\t%s\t%s\t%s\t%s\n' "$PROJECT" "${ROW_LIVE:-none}" "$time" "$ROW_SITE" \
+        "$(join_notes ${notes[@]+"${notes[@]}"} ${ROW_PROBLEMS[@]+"${ROW_PROBLEMS[@]}"})"
 
-    case "$(lock_state)" in
-        stale) notes+=("stale lock") ;;
-        held) notes+=("lock held") ;;
-    esac
-
-    failed="$(find "$DEPLOY_BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' 2>/dev/null | wc -l | tr -d ' ')"
-    [ "$failed" -eq 0 ] || notes+=("$failed failed release(s)")
-
-    printf '%s\t%s\t%s\t%s\t%s\n' "$PROJECT" "${live:-none}" "$time" "$site" "$(join_notes ${notes[@]+"${notes[@]}"})"
-
-    return "$ok"
+    return "$ROW_SITE_BAD"
 }
 
 # One row per project. Each runs in a subshell, so one project's settings never leak into the next.
@@ -2220,6 +2245,346 @@ status_all() {
     fi
 
     return "$failed"
+}
+
+# Loads project or slot $1 the way `deploy $1` does.
+menu_load() {
+    load_project "$1"
+    apply_defaults
+    [ -z "$DEPLOY_SLOT" ] || apply_slot
+}
+
+# The branch slot $1 follows, empty when free. Changes the settings to the slot's, so it runs in a
+# subshell.
+slot_branch() {
+    DEPLOY_SLOT="$1"
+    apply_slot
+    printf '%s' "$SLOT_BRANCH"
+}
+
+# The staging slots of the loaded project that follow a branch: <project>@sN, one per line.
+slots_in_use() {
+    local i branch
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        branch="$(slot_branch "s$i")"
+        [ -z "$branch" ] || printf '%s@s%s\n' "$PROJECT" "$i"
+    done
+}
+
+# One tab-separated menu row for the loaded project or slot: 1 when it has something to ship (else
+# 0), the target and name (both the project), the version, the pending commits, the site and the
+# problems. An empty field is "-".
+menu_row() {
+    local version pending site live_version ship=0 problems=()
+
+    if [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
+        printf '0\t%s\t%s\t-\t-\t-\tno base folder\n' "$PROJECT" "$PROJECT"
+
+        return
+    fi
+
+    project_facts
+    live_version="none"
+    [ -z "$ROW_LIVE" ] || live_version="$(release_version "$ROW_LIVE")"
+    version="$live_version"
+    [ -z "$DEPLOY_SLOT" ] || version="$(branch_label)"
+
+    if [ -z "$ROW_LIVE" ]; then
+        pending="not deployed yet"
+        ship=1
+    elif [ -z "$PENDING_COUNT" ]; then
+        pending="unknown"
+        problems+=("$PENDING_NOTE")
+    elif [ "$PENDING_COUNT" = 0 ]; then
+        pending="up to date"
+    else
+        ship=1
+        pending="$PENDING_COUNT commits"
+        [ "$PENDING_COUNT" != 1 ] || pending="1 commit"
+
+        if [ -z "$DEPLOY_SLOT" ]; then
+            release_refs "$PENDING_TIP"
+
+            if [ -n "$TAG" ]; then
+                version="$live_version → $TAG"
+            elif [ "$HAS_TAGS" -eq 1 ] && [ "$NO_RELEASE" -eq 0 ]; then
+                pending="$pending, no tag yet"
+            fi
+        fi
+    fi
+
+    case "$ROW_SITE" in
+        "200, "* | "200 "*) site="site ok" ;;
+        "not checked"*) site="site not checked" ;;
+        *) site="site ${ROW_SITE%%,*}" ;;
+    esac
+    [ "$ROW_SITE_BAD" -eq 0 ] || problems+=("site not on the live release")
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$ship" "$PROJECT" "$PROJECT" "$version" "$pending" "$site" \
+        "$(join_notes ${problems[@]+"${problems[@]}"} ${ROW_PROBLEMS[@]+"${ROW_PROBLEMS[@]}"})"
+}
+
+# The engine's menu row, in the format of menu_row, with the target "self". Fetching only updates
+# the engine's remote refs, never its files.
+engine_menu_row() {
+    local version behind pending="up to date" ship=0 problems=()
+    version="$(engine_version)"
+
+    if ! git -C "$ENGINE_DIR" fetch --quiet 2>/dev/null; then
+        problems+=("cannot reach the repo")
+    elif ! behind="$(git -C "$ENGINE_DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"; then
+        problems+=("no upstream branch")
+    elif [ "$behind" -gt 0 ]; then
+        ship=1
+        version="$version → $(engine_version '@{upstream}')"
+        pending="run deploy self"
+    fi
+
+    printf '%s\tself\trelease-switch\t%s\t%s\t-\t%s\n' "$ship" "$version" "$pending" \
+        "$(join_notes ${problems[@]+"${problems[@]}"})"
+}
+
+# Gives the terminal back: its settings and the cursor.
+menu_restore() {
+    [ -n "$MENU_STTY" ] || return 0
+    stty "$MENU_STTY" 2>/dev/null || true
+    printf '\033[?25h'
+    MENU_STTY=""
+}
+
+menu_cleanup() {
+    # shellcheck disable=SC2086 # One pid per word.
+    [ -z "$MENU_PIDS" ] || kill $MENU_PIDS 2>/dev/null || true
+    MENU_PIDS=""
+    [ -z "$MENU_TMP" ] || rm -rf "$MENU_TMP"
+    MENU_TMP=""
+    menu_restore
+}
+
+# How many columns $1 takes: bytes, with each → (3 bytes) as one.
+text_width() {
+    local LC_ALL=C
+    local plain="${1//→/}"
+    printf '%s' $((${#plain} + (${#1} - ${#plain}) / 3))
+}
+
+# $1 padded with spaces to $2 columns.
+pad() {
+    printf '%s%*s' "$1" $(($2 - $(text_width "$1"))) ''
+}
+
+# Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1.
+menu_line() {
+    local i="$1" mark="  " color="" name version pending site problems
+    name="${M_NAME[$i]}"
+    version="${M_VERSION[$i]}"
+    pending="${M_PENDING[$i]}"
+    site="${M_SITE[$i]}"
+    problems="${M_PROBLEMS[$i]}"
+    [ "$version" != - ] || version=""
+    [ "$pending" != - ] || pending=""
+    [ "$site" != - ] || site=""
+    [ "$problems" != - ] || problems=""
+
+    [ "${M_SHIP[$i]}" -eq 1 ] || color="$C_DIM"
+    if [ "${2:-0}" -eq 1 ]; then
+        mark="$C_GREEN❯$C_OFF "
+        color="$C_BOLD"
+    fi
+
+    printf '%s%s%s  %s  %s  %s  %s%s%s%s%s' "$mark" "$color" "$(pad $((i + 1)) ${#M_COUNT})" \
+        "$(pad "$name" "$W_NAME")" "$(pad "$version" "$W_VERSION")" "$(pad "$pending" "$W_PENDING")" \
+        "$(pad "$site" "$W_SITE")" "$C_OFF" "${problems:+  $C_RED}" "$problems" "${problems:+$C_OFF}"
+}
+
+# Prints the menu rows on the rail, with ❯ at row $1, then the key hint.
+menu_draw() {
+    local i prefix="  "
+    [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        printf '\r\033[K%s%s\n' "$prefix" "$(menu_line "$i" $((i == $1)))"
+    done
+
+    printf '\r\033[K%s\n\r\033[K%s%s↑↓ or 1–%s to pick · enter to deploy · q to quit%s\n' "${prefix%  }" \
+        "$prefix" "$C_DIM" "$M_COUNT" "$C_OFF"
+}
+
+# Lets the user pick a row with the arrow keys, j/k, a number and enter. Sets M_PICK, or exits on
+# q or Esc.
+menu_keys() {
+    local key rest wait=1 pick=0
+    # bash 3.2 reads whole seconds only, so Esc on its own waits a second there.
+    [ "${BASH_VERSINFO[0]}" -lt 4 ] || wait=0.1
+
+    MENU_STTY="$(stty -g 2>/dev/null)" || MENU_STTY=""
+    [ -n "$MENU_STTY" ] || MENU_STTY="sane"
+    printf '\033[?25l'
+    menu_draw "$pick"
+
+    while :; do
+        IFS= read -rsn1 key || key=q
+
+        case "$key" in
+            $'\033')
+                rest=""
+                IFS= read -rsn2 -t "$wait" rest || true
+
+                case "$rest" in
+                    '[A' | OA) key=k ;;
+                    '[B' | OB) key=j ;;
+                    '') key=q ;;
+                esac
+                ;;
+        esac
+
+        case "$key" in
+            k) [ "$pick" -eq 0 ] || pick=$((pick - 1)) ;;
+            j) [ "$pick" -eq $((M_COUNT - 1)) ] || pick=$((pick + 1)) ;;
+            [1-9]) [ "$key" -gt "$M_COUNT" ] || pick=$((key - 1)) ;;
+            '') break ;;
+            q | Q)
+                menu_restore
+                say "Nothing done"
+                exit 0
+                ;;
+        esac
+
+        printf '\033[%sA' $((M_COUNT + 2))
+        menu_draw "$pick"
+    done
+
+    menu_restore
+    M_PICK="$pick"
+}
+
+# Without cursor control: a numbered list and "Pick 1–N:". Sets M_PICK, or exits on q, an empty
+# answer or the end of input.
+menu_numbers() {
+    local i answer
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        printf '%s\n' "$(menu_line "$i")"
+    done | rail
+
+    while :; do
+        printf '%s' "$(say "Pick 1–$M_COUNT: ")"
+        read -r answer || answer=""
+
+        case "$answer" in
+            "" | q | Q)
+                say "Nothing done"
+                exit 0
+                ;;
+            *[!0-9]*) ;;
+            *)
+                if [ "$answer" -ge 1 ] && [ "$answer" -le "$M_COUNT" ]; then
+                    M_PICK=$((answer - 1))
+
+                    return
+                fi
+                ;;
+        esac
+
+        warn "no such choice: $answer"
+    done
+}
+
+# A bare `deploy` on a terminal: one row per project, slot in use and the engine, read in parallel.
+# The picked one shows its pending commits, asks, then runs as `deploy <project>` (or `deploy self`).
+project_menu() {
+    local targets=() project i row width rows="" ship target name version pending site problems engine
+    M_NAME=() M_VERSION=() M_PENDING=() M_SITE=() M_PROBLEMS=() M_SHIP=() M_TARGET=()
+
+    intro ""
+
+    for project in $(list_projects); do
+        targets+=("$project")
+        # shellcheck disable=SC2207 # Slot names have no spaces.
+        targets+=($(menu_load "$project" 2> /dev/null && slots_in_use 2> /dev/null || true))
+    done
+
+    say "Checking ${#targets[@]} projects…"
+    MENU_TMP="$(mktemp -d)"
+
+    for i in "${!targets[@]}"; do
+        (menu_load "${targets[$i]}" && menu_row) < /dev/null > "$MENU_TMP/$i" 2> /dev/null &
+        MENU_PIDS+=" $!"
+    done
+
+    engine_menu_row < /dev/null > "$MENU_TMP/engine" 2> /dev/null &
+    MENU_PIDS+=" $!"
+    wait
+    MENU_PIDS=""
+
+    for i in "${!targets[@]}"; do
+        row="$(cat "$MENU_TMP/$i")"
+        [ -n "$row" ] || row="$(printf '0\t%s\t%s\t-\t-\t-\tcannot read' "${targets[$i]}" "${targets[$i]}")"
+        rows+="${row%%$'\t'*}"$'\t'"$i"$'\t'"${row#*$'\t'}"$'\n'
+    done
+
+    # Projects with something to ship first, else in their order; the engine last.
+    rows="$(printf '%s' "$rows" | sort -t $'\t' -k1,1r -k2,2n)"
+    engine="$(cat "$MENU_TMP/engine")"
+    [ -n "$engine" ] || engine="$(printf '0\tself\trelease-switch\t%s\t-\t-\tcannot read' "$(engine_version)")"
+    rows+=$'\n'"${engine%%$'\t'*}"$'\t'"-"$'\t'"${engine#*$'\t'}"
+    rm -rf "$MENU_TMP"
+    MENU_TMP=""
+
+    while IFS=$'\t' read -r ship _ target name version pending site problems; do
+        M_SHIP+=("$ship")
+        M_TARGET+=("$target")
+        M_NAME+=("$name")
+        M_VERSION+=("$version")
+        M_PENDING+=("$pending")
+        M_SITE+=("$site")
+        M_PROBLEMS+=("$problems")
+    done <<< "$rows"
+
+    M_COUNT="${#M_NAME[@]}"
+    W_NAME=0 W_VERSION=0 W_PENDING=0 W_SITE=0
+    for ((i = 0; i < M_COUNT; i++)); do
+        width="$(text_width "${M_NAME[$i]}")"
+        [ "$width" -le "$W_NAME" ] || W_NAME="$width"
+        width="$(text_width "${M_VERSION[$i]#-}")"
+        [ "$width" -le "$W_VERSION" ] || W_VERSION="$width"
+        width="$(text_width "${M_PENDING[$i]#-}")"
+        [ "$width" -le "$W_PENDING" ] || W_PENDING="$width"
+        width="$(text_width "${M_SITE[$i]#-}")"
+        [ "$width" -le "$W_SITE" ] || W_SITE="$width"
+    done
+
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s◆%s  Which project to deploy?\n' "$C_GREEN" "$C_OFF"
+    else
+        say "Which project to deploy?"
+    fi
+
+    case "${TERM:-dumb}" in
+        dumb | unknown) menu_numbers ;;
+        *) menu_keys ;;
+    esac
+
+    target="${M_TARGET[$M_PICK]}"
+    name="${M_NAME[$M_PICK]}"
+    version="${M_VERSION[$M_PICK]}"
+    [ "$version" != - ] || version=""
+
+    if [ "$target" = self ]; then
+        git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null | rail
+        ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; exit 0; }
+    else
+        (
+            menu_load "$target"
+            [ -z "$(current_release)" ] || show_pending "$(current_release)"
+        ) 2>&1 | rail
+        ask_yes "Deploy $name${version:+ $version}?" || { say "Nothing done"; exit 0; }
+    fi
+
+    menu_cleanup
+    [ "$RAILS" -eq 0 ] || printf '%s└%s\n' "$C_DIM" "$C_OFF"
+    exec "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$target"
 }
 
 # Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.
@@ -3650,6 +4015,11 @@ main() {
         exit 0
     fi
 
+    # A bare deploy on a terminal picks the project from a menu.
+    if [ $# -eq 0 ] && is_terminal && [ -n "$(list_projects)" ]; then
+        project_menu
+    fi
+
     # `deploy path <project>` reads like `deploy <project> path`. Its output is only the path, so
     # never on the rails.
     if [ "${1:-}" = path ] && [ $# -gt 1 ] && is_project "$2"; then
@@ -3770,4 +4140,5 @@ main() {
     esac
 }
 
-main "$@"
+# Sourced (by the tests), it only defines the functions.
+[ "${BASH_SOURCE[0]}" != "$0" ] || main "$@"

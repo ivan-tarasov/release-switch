@@ -1988,6 +1988,45 @@ else
     check "skipped: no script command to make a terminal"
 fi
 
+step "A bare deploy on a terminal shows the project menu"
+# The menu row of project $1, from the engine's own function.
+menu_row() {
+    run bash -c '. "$1"; menu_load "$2" && menu_row' _ "$ROOT/deploy" "$1"
+}
+row="$(menu_row fixture)"
+[[ "$row" == $'0\tfixture\tfixture\t'*$'\tup to date\tsite ok\t-' ]] || fail "up-to-date menu row: $row"
+deploy fixture freeze "menu test" > /dev/null
+row="$(menu_row fixture)"
+[[ "$row" == *$'\tup to date\tsite ok\tfrozen' ]] || fail "frozen menu row: $row"
+deploy fixture unfreeze > /dev/null
+commit "fixture menu"
+row="$(menu_row fixture)"
+[[ "$row" == $'1\tfixture\tfixture\t'*$'\t1 commit, no tag yet\tsite ok\t-' ]] || fail "untagged menu row: $row"
+git -C "$REPO" tag v2026.11.20000 develop
+row="$(menu_row fixture)"
+[[ "$row" == $'1\tfixture\tfixture\t'*$' → v2026.11.20000\t1 commit\tsite ok\t-' ]] || fail "tagged menu row: $row"
+cp "$WORK/projects/fixture.env" "$WORK/projects/other.env"
+! deploy < /dev/null > /dev/null 2> "$WORK/menu.log" || fail "a bare deploy in a pipe with two projects succeeded"
+grep -q "name a project (fixture other)" "$WORK/menu.log" || fail "a bare deploy in a pipe does not ask for a project"
+rm "$WORK/projects/other.env"
+if command -v script > /dev/null; then
+    live="$(live_release)"
+    on_terminal_hold 2 q env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+        || { cat "$WORK/menu.log"; fail "the menu failed on q"; }
+    grep -q "Which project to deploy?" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
+    grep -q "Nothing done" "$WORK/menu.log" || fail "q in the menu does not stop"
+    [ "$(live_release)" = "$live" ] || fail "q in the menu deployed"
+    on_terminal_hold 10 $'1\ny' env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 \
+        "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
+    grep -q "Pick 1–" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
+    grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
+    grep -q "Deploy fixture .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" || fail "the menu does not ask before the deploy"
+    [[ "$(live_release)" == *-v2026.11.20000-* ]] || { cat "$WORK/menu.log"; fail "the menu did not deploy on y"; }
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; q did nothing; the numbered list picked and deployed fixture"
+else
+    check "skipped: no script command to make a terminal"
+fi
+
 step "self-update pulls the engine"
 # A throwaway copy of the engine, so the test never pulls this checkout.
 mkdir "$WORK/engine-src"

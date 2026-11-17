@@ -184,6 +184,35 @@ reason and that the site will show its maintenance page, `deploy --force` the co
 question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
 `copy-from` asks the same way.
 
+### Project menu
+
+A bare `deploy` on a terminal shows a menu instead of deploying. It reads every project, each staging
+slot in use and the engine at the same time, then lists what is waiting to ship:
+
+```
+┌  release-switch v2026.11.32
+│
+◇  Checking 3 projects…
+◆  Which project to deploy?
+│  ❯ 1  tarasov.ca      v2026.11.4 → v2026.11.5   3 commits   site ok
+│    2  other           v2026.11.2                up to date  site ok
+│    3  other@s1        feature/search            1 commit    site ok
+│    4  release-switch  v2026.11.32 → v2026.11.33  run deploy self
+│
+│  ↑↓ or 1–4 to pick · enter to deploy · q to quit
+```
+
+`live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
+none, and the deploy waits for the tag as usual. Problems (frozen, down, lock held, failed releases,
+a site that does not serve the live release) show in red at the end of the row. Rows with something
+to ship come first; up-to-date ones are dimmed.
+
+Pick with the arrow keys, `j`/`k` or a number, then Enter: the menu shows the pending commits and
+asks `Deploy <project> <live> → <new>? [y/N]`. `y` runs exactly `deploy <project>` (or `deploy self`
+for the engine). `q` or Esc quits. With `TERM=dumb` the menu is a numbered list with `Pick 1–N:`.
+Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or
+fails with `name a project (…)` when there are several.
+
 ## Setup on a server
 
 The repos are private. A GitHub deploy key works for one repo only, so each repo gets its own key,

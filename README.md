@@ -585,7 +585,7 @@ In a terminal, each command runs on rails, like this:
 ◇  Cloning develop
 ◇  Running build
 │  (the step's own output)
-◇  Deployed 20261112-195410-v2026.11.4-55fc7c8
+◇  Deployed v2026.11.3 → v2026.11.4
 │
 └  Done in 42s
 ```

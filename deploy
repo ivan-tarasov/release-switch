@@ -874,10 +874,19 @@ rollback_target() {
     printf '%s\n' "$target"
 }
 
-# The one release whose name is or contains $1 (a full name, a sha, a tag).
+# The one release whose name is or contains $1 (a full name, a sha, a tag). A whole part of a
+# name wins, so v2026.11.1 does not also match v2026.11.10.
 find_release() {
-    local matches count
+    local matches count name exact=""
     matches="$(list_releases | grep -F -- "$1" || true)"
+
+    while IFS= read -r name; do
+        case "-$name-" in
+            *"-$1-"*) exact="$exact$name"$'\n' ;;
+        esac
+    done <<< "$matches"
+
+    [ -z "$exact" ] || matches="${exact%$'\n'}"
     count="$(printf '%s' "$matches" | grep -c . || true)"
 
     [ "$count" -gt 0 ] || fail "no release matches '$1' (see: deploy status)"
@@ -909,7 +918,7 @@ release_time() {
 }
 
 # Reads the remote's release tags and the no-release marker of commit $1 in one call. Sets TAG to
-# the release tag on the commit (v2026.11.21), HAS_TAGS to 1 when the repo has any `v*` tag, and
+# the highest release tag on the commit (v2026.11.21), HAS_TAGS to 1 when the repo has any `v*` tag, and
 # NO_RELEASE to 1 when the release workflow marked the commit with refs/no-release/<sha>.
 release_refs() {
     local refs
@@ -917,7 +926,7 @@ release_refs() {
 
     TAG="$(printf '%s\n' "$refs" \
         | awk -v sha="$1" '$1 == sha { sub(/^refs\/tags\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
-        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -n1 || true)"
     HAS_TAGS=0
     NO_RELEASE=0
 
@@ -1335,10 +1344,18 @@ step_body() {
     )
 }
 
+# Fails unless SHARED path $1 stays inside the release folder.
+check_shared_path() {
+    case "/$1/" in
+        //* | */../*) fail "SHARED path '$1' must stay inside the release: no leading / and no .." ;;
+    esac
+}
+
 link_shared() {
     local path
 
     for path in ${SHARED[@]+"${SHARED[@]}"}; do
+        check_shared_path "$path"
         [ -e "$DEPLOY_BASE/shared/$path" ] || fail "shared/$path is missing (run init, or create it)"
 
         rm -rf "${RELEASE_DIR:?}/$path"
@@ -1391,7 +1408,11 @@ probe() {
     headers="$(curl --silent --show-error --max-time "$limit" --location --output /dev/null --dump-header - \
         --header 'Cache-Control: no-cache' --header 'Pragma: no-cache' "$url" 2>&1)" || true
     PROBE_STATUS="$(printf '%s\n' "$headers" | sed -nE 's#^HTTP/[0-9.]+ ([0-9]+).*#\1#p' | tail -n1)"
-    PROBE_VERSION="$(printf '%s\n' "$headers" | sed -nE 's#^[Xx]-[Aa]pp-[Vv]ersion: *([^[:space:]]+).*#\1#p' | tail -n1)"
+    # Only the last answer counts: a redirect hop may send a version of its own.
+    PROBE_VERSION="$(printf '%s\n' "$headers" | awk '
+        /^HTTP\// { version = "" }
+        /^[Xx]-[Aa]pp-[Vv]ersion:/ { version = $0; sub(/^[^:]*: */, "", version); sub(/[[:space:]].*$/, "", version) }
+        END { print version }')"
 }
 
 # Polls CHECK_URL until it answers 200 (with the new version, unless CHECK_VERSION=0),
@@ -1829,7 +1850,7 @@ deploy() {
     STAGE=check
     if is_down; then
         # The maintenance page has no version to check.
-        say "Not checking $CHECK_URL: the site is down for maintenance"
+        warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"
     elif say "Checking $CHECK_URL" && ! release_is_serving "$NEW_RELEASE"; then
         if [ -n "$PREVIOUS_RELEASE" ]; then
             STAGE="check, switched back to $PREVIOUS_RELEASE"
@@ -1914,7 +1935,7 @@ rollback() {
     say "Rolled back from $live to $target (data changes stay applied)"
 
     if is_down; then
-        say "Not checking $CHECK_URL: the site is down for maintenance"
+        warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"
     else
         say "Checking $CHECK_URL"
         release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
@@ -2807,9 +2828,11 @@ init() {
     # shellcheck source=/dev/null
     shared="$(SHARED=() && . "$checkout/deploy.conf" && printf '%s\n' ${SHARED[@]+"${SHARED[@]}"})"
 
-    for path in $shared; do
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        check_shared_path "$path"
         move_to_shared "$checkout/$path" "$DEPLOY_BASE/shared/$path" "$dry_run"
-    done
+    done <<< "$shared"
 
     if [ "$dry_run" -eq 0 ]; then
         mkdir -p "$DEPLOY_BASE/releases"

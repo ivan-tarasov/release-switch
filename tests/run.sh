@@ -1316,6 +1316,18 @@ serves "$r4" || fail "server does not show $r4"
 check "prune kept $r1 after a rollback, then kept the newest 2 and deleted the oldest"
 
 step "A new untagged commit waits for its release tag"
+# Run a command once the deploy logs that it waits for the release tag on $1.
+# A fixed sleep loses the race on a busy machine.
+when_waiting() {
+    local short="$1" tries=60
+    shift
+    until grep -q "Waiting for the release tag on $short" "$WORK/wait.log" 2>/dev/null; do
+        tries=$((tries - 1))
+        [ "$tries" -gt 0 ] || break
+        sleep 0.5
+    done
+    "$@"
+}
 commit "fixture wait killed"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 releases_now="$(release_count)"
@@ -1357,13 +1369,12 @@ check "the wait ran out after 2 s; $waiting deployed without a tag"
 
 sleep 1
 commit "fixture wait tagged"
-(
-    sleep 2
-    git -C "$REPO" tag v2026.11.100 develop
-) &
-RELEASE_WAIT=30 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
+waiting="$(git -C "$REPO" rev-parse --short develop)"
+: > "$WORK/wait.log"
+when_waiting "$waiting" git -C "$REPO" tag v2026.11.100 develop &
+RELEASE_WAIT=60 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
 wait $!
-grep -q "Waiting for the release tag on" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
+grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
 if grep -q "no release tag" "$WORK/wait.log"; then
     fail "a warning although the tag came"
 fi
@@ -1400,10 +1411,8 @@ check "a commit with a no-release marker deployed $waiting at once"
 sleep 1
 commit "fixture no-release marker during the wait"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
-(
-    sleep 2
-    git -C "$REPO" update-ref "refs/no-release/$(git -C "$REPO" rev-parse develop)" develop
-) &
+: > "$WORK/wait.log"
+when_waiting "$waiting" git -C "$REPO" update-ref "refs/no-release/$(git -C "$REPO" rev-parse develop)" develop &
 started="$(date +%s)"
 RELEASE_WAIT=60 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
 wait $!

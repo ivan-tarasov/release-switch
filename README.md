@@ -485,7 +485,8 @@ A bash file in the project's repo root. The engine reads it from the release it 
 steps change together with the code. Every step runs in the release folder, with `set -e`.
 
 ```bash
-# Paths under the release that live in shared/ instead.
+# Paths under the release that live in shared/ instead. Quote one with a space; a leading / or ..
+# is refused.
 SHARED=(.env storage database/database.sqlite)
 
 # Optional. Paths copied from the live release before the build, so Composer only installs what

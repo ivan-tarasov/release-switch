@@ -180,9 +180,18 @@ check "shared/ holds .env and data/; the old checkout links to them"
 # request has an rs query or Cache-Control: no-cache. /stall hangs for 15 s once, when the
 # stall file exists, then serves the site. A one-time OPcache reset file is logged in opcache.log
 # and run from the web root; it answers 500 when opcache-fail exists, and waits 20 s first when
-# opcache-stall exists.
+# opcache-stall exists. /hop redirects to /plain with the live version on the redirect only;
+# /plain answers 200 with no version.
 cat > "$WORK/router.php" <<EOF
 <?php
+if (\$_SERVER['REQUEST_URI'] === '/plain') {
+    return;
+}
+if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/hop') {
+    header('X-App-Version: ' . trim((string) @file_get_contents('$BASE/current/RELEASE')));
+    header('Location: /plain', true, 302);
+    return;
+}
 if (parse_url(\$_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/stall') {
     if (@unlink('$WORK/stall')) {
         sleep(15);
@@ -599,8 +608,9 @@ grep -q "^ok    fixture: site: 503, down for maintenance$" "$WORK/down-check.log
 grep -q "^ok    fixture: health: not checked, down for maintenance$" "$WORK/down-check.log" \
     || fail "check ran health() while down"
 sleep 1
-deploy fixture --force > "$WORK/down-deploy.log" || fail "deploy failed while down"
-grep -q "Not checking .*: the site is down for maintenance" "$WORK/down-deploy.log" || fail "deploy checked the site while down"
+deploy fixture --force > "$WORK/down-deploy.log" 2>&1 || fail "deploy failed while down"
+grep -q "not checking .*: the site is down for maintenance; check it with: deploy fixture up$" "$WORK/down-deploy.log" \
+    || fail "deploy while down does not warn to run up"
 fresh="$(live_release)"
 deploy fixture up > /dev/null || fail "up failed"
 [ ! -e "$BASE/.down" ] || fail "up left the down file"
@@ -1073,6 +1083,11 @@ took=$(($(date +%s) - started))
 [ "$took" -lt 15 ] || fail "the deploy waited ${took} s on a stuck request"
 check "the stuck request was cut at CHECK_WAIT / 3 and the retry passed (${took} s)"
 
+step "The version comes from the last answer, not a redirect"
+CHECK_URL="http://127.0.0.1:$PORT/hop" deploy fixture status > "$WORK/hop.out" || fail "status failed behind a redirect"
+grep -qF "/hop answered 200, version none" "$WORK/hop.out" || { cat "$WORK/hop.out"; fail "status took the version of a redirect hop"; }
+check "a version sent only on a redirect hop is not taken"
+
 step "A git remote that never answers fails fast"
 # A TCP port that takes connections and never says a word, like a stalled network.
 # shellcheck disable=SC2016 # PHP code, not shell.
@@ -1301,6 +1316,18 @@ fi
 [[ "$(live_release)" =~ -v2026\.11\.100-[0-9a-f]{7,}$ ]] || fail "the tag pushed during the wait is not in $(live_release)"
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "the tag pushed during the wait is in $(live_release)"
+
+sleep 1
+commit "fixture two tags"
+git -C "$REPO" tag v2026.11.1000 develop
+git -C "$REPO" tag v2026.11.10000 develop
+deploy fixture > /dev/null
+[[ "$(live_release)" =~ -v2026\.11\.10000-[0-9a-f]{7,}$ ]] || fail "a commit with two tags did not get the higher one"
+deploy fixture rollback v2026.11.100 > /dev/null 2> "$WORK/exact.err" \
+    || { cat "$WORK/exact.err"; fail "rollback v2026.11.100 failed next to v2026.11.10000"; }
+[[ "$(live_release)" =~ -v2026\.11\.100-[0-9a-f]{7,}$ ]] || fail "rollback v2026.11.100 did not go to its release"
+serves "$(live_release)" || fail "server does not show $(live_release)"
+check "a commit with two tags got the higher one; rollback v2026.11.100 picked the exact tag over v2026.11.10000"
 
 sleep 1
 commit "fixture no-release marker"
@@ -1975,5 +2002,46 @@ if "$WORK/engine/deploy" self nope 2> "$WORK/self-log.log"; then
 fi
 grep -q "unknown command: deploy self nope" "$WORK/self-log.log" || fail "no message for an unknown self command"
 check "self log lists installed and unpulled commits; an unknown self command fails"
+
+step "SHARED paths with spaces work; a leading / or .. is refused"
+SPACES="$WORK/spaces-old"
+git clone --quiet --branch develop "file://$REPO" "$SPACES"
+sed -i.bak 's/^SHARED=(.env data)$/SHARED=(.env data "user files")/' "$SPACES/deploy.conf"
+rm "$SPACES/deploy.conf.bak"
+grep -q '"user files"' "$SPACES/deploy.conf" || fail "the spaces fixture has no path with a space"
+git -C "$SPACES" -c user.name=test -c user.email=test@example.com commit --quiet -am "spaces"
+git -C "$SPACES" push --quiet origin develop:spaces
+printf 'APP_ENV=production\n' > "$SPACES/.env"
+mkdir -p "$SPACES/data" "$SPACES/user files"
+printf 'upload\n' > "$SPACES/user files/a.txt"
+cat > "$WORK/projects/spaces.env" <<EOF
+DEPLOY_BASE="$WORK/spaces"
+CHECK_URL="http://127.0.0.1:$PORT/"
+CHECK_VERSION=0
+REPO_URL="file://$REPO"
+DEPLOY_BRANCH=spaces
+EOF
+deploy spaces init "$SPACES" --dry-run > "$WORK/spaces.log" 2>&1 \
+    || { cat "$WORK/spaces.log"; fail "init --dry-run failed on a path with a space"; }
+grep -qF "Would move $SPACES/user files to" "$WORK/spaces.log" || fail "init --dry-run split a path with a space"
+deploy spaces init "$SPACES" > /dev/null || fail "init failed on a path with a space"
+[ -f "$WORK/spaces/shared/user files/a.txt" ] || fail "init did not move the path with a space"
+deploy spaces > "$WORK/spaces.log" 2>&1 || { cat "$WORK/spaces.log"; fail "a deploy with a SHARED path with a space failed"; }
+[ "$(cat "$WORK/spaces/current/user files/a.txt")" = upload ] || fail "the path with a space is not linked"
+for bad in '../outside' '/etc' 'data/../../outside'; do
+    git -C "$SPACES" checkout --quiet -- deploy.conf
+    sed -i.bak "s#^SHARED=.*#SHARED=(.env '$bad')#" "$SPACES/deploy.conf"
+    rm "$SPACES/deploy.conf.bak"
+    git -C "$SPACES" -c user.name=test -c user.email=test@example.com commit --quiet -am "bad $bad"
+    git -C "$SPACES" push --quiet origin HEAD:spaces
+    live="$(readlink "$WORK/spaces/current")"
+    if deploy spaces > /dev/null 2> "$WORK/spaces.err"; then
+        fail "a deploy with SHARED path $bad succeeded"
+    fi
+    grep -qF "SHARED path '$bad' must stay inside the release: no leading / and no .." "$WORK/spaces.err" \
+        || { cat "$WORK/spaces.err"; fail "no message for SHARED path $bad"; }
+    [ "$(readlink "$WORK/spaces/current")" = "$live" ] || fail "a refused SHARED path $bad changed the live release"
+done
+check "init and deploy handle a SHARED path with a space; ../outside, /etc and data/../../outside are refused"
 
 printf '\nAll deploy tests passed.\n'

@@ -186,30 +186,37 @@ question. Without a terminal (cron, pipes, `slots update`, `stage`) they never a
 
 ### Project menu
 
-A bare `deploy` on a terminal shows a menu instead of deploying. It reads every project, each staging
-slot in use and the engine at the same time, then lists what is waiting to ship:
+A bare `deploy` on a terminal shows a menu instead of deploying. It reads every project, its staging
+slots and the engine at the same time, then lists what is waiting to ship. Each project's slots hang
+under it as a tree:
 
 ```
 ┌  release-switch v2026.11.32
 │
-◇  Checking 3 projects…
+◇  Checking 5 projects…
 ◆  Which project to deploy?
-│  ❯ 1  tarasov.ca      v2026.11.4 → v2026.11.5   3 commits   site ok
-│    2  other           v2026.11.2                up to date  site ok
-│    3  other@s1        feature/search            1 commit    site ok
-│    4  release-switch  v2026.11.32 → v2026.11.33  run deploy self
+│  ❯ 1  tarasov.ca      v2026.11.4 → v2026.11.5    3 commits       site ok
+│    2  ├ s1            develop                    up to date      site ok
+│    3  └ s2            PR #51                     2 commits       site ok
+│    4  other           v2026.11.2                 up to date      site ok
+│    5  ├ s1            feature/search             1 commit        site ok
+│       └ s2, s3        free
+│    6  release-switch  v2026.11.33 → v2026.11.34  run deploy self
 │
-│  ↑↓ or 1–4 to pick · enter to deploy · q to quit
+│  ↑↓ or 1–6 to pick · enter to deploy · q to quit
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
 none, and the deploy waits for the tag as usual. Problems (frozen, down, lock held, failed releases,
-a site that does not serve the live release) show in red at the end of the row. Rows with something
-to ship come first; up-to-date ones are dimmed.
+a site that does not serve the live release) show in red at the end of the row. Production names are
+bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf that cannot be
+picked. Projects with something to ship come first, each with its slots right under it; up-to-date
+rows are dimmed.
 
 Pick with the arrow keys, `j`/`k` or a number, then Enter: the menu shows the pending commits and
-asks `Deploy <project> <live> → <new>? [y/N]`. `y` runs exactly `deploy <project>` (or `deploy self`
-for the engine). `q` or Esc quits. With `TERM=dumb` the menu is a numbered list with `Pick 1–N:`.
+asks `Deploy <project> (production) <live> → <new>? [y/N]`, or `Deploy <project> sN (staging)
+<branch>? [y/N]` for a slot. `y` runs exactly `deploy <project>`, `deploy <project>@sN` or
+`deploy self` for the engine. `q` or Esc quits. With `TERM=dumb` the menu is a numbered list with `Pick 1–N:`.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or
 fails with `name a project (…)` when there are several.
 

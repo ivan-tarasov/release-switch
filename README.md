@@ -4,6 +4,44 @@ Zero-downtime deploys with release folders, for several PHP projects on one serv
 One script (`deploy`) does the parts every project shares. Each project keeps its own steps in a
 `deploy.conf` file in its repo.
 
+If something fails, see [Troubleshooting](#troubleshooting).
+
+## Quick start
+
+Once the server can read the project's repo (see [Setup on a server](#setup-on-a-server)):
+
+1. Install the engine and add the `deploy` alias:
+
+   ```bash
+   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
+   echo 'alias deploy="$HOME/release-switch/deploy"' >> ~/.bashrc && source ~/.bashrc
+   ```
+
+2. Add the project file and set `DEPLOY_BASE`, `CHECK_URL` and `REPO_URL` in it. Add a
+   `deploy.conf` with at least a `build()` step to the project's repo (see [deploy.conf](#deployconf)).
+
+   ```bash
+   cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
+   ```
+
+3. Move the existing checkout in, then deploy:
+
+   ```bash
+   deploy <project> init <checkout> --dry-run
+   deploy <project> init <checkout>
+   deploy <project>
+   ```
+
+   A project with no checkout yet skips `init`; create its `SHARED` paths in `<base>/shared/` first.
+
+Then `deploy <project> status` shows the live release, and a bare `deploy` on a terminal opens a menu
+of every project (see [Project menu](#project-menu)). To deploy from cron and get mail only on
+problems:
+
+```cron
+*/10 * * * * $HOME/release-switch/deploy <project> --quiet
+```
+
 ## How it works
 
 Each project has a base folder on the server:
@@ -193,7 +231,7 @@ Common errors end with one more line that says what to do next, like
 `Try: deploy <project> status, or wait for PID 4242` for a held lock, or
 `Try: deploy <project> unfreeze` for a frozen project. The same goes for a missing `deploy.conf`,
 a failed site check (the URL and the version it got), a failed clone and an unknown release. Alerts
-carry the error only.
+carry the error only. See [Troubleshooting](#troubleshooting) for each one.
 
 ### Questions before risky commands
 
@@ -764,6 +802,168 @@ Each step and stage shows its time when it ends (`1m 12s` from a minute on). On 
 for `CHECK_URL` shows a spinner with the time waited out of `CHECK_WAIT` on one line. A failure is marked with `■` on stderr and ends with `└  Failed after Ns`. In a pipe or cron, the
 output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and mail stay clean.
 `DEPLOY_RAILS=1` forces the rails, `DEPLOY_RAILS=0` turns them off. `NO_COLOR` turns off colors.
+
+## Troubleshooting
+
+Errors print as `deploy: <message>` in a pipe or cron, or after `■` on a terminal. Many end with a
+`Try:` line that says what to do next. Warnings look the same, but the run goes on. Below,
+`example` is the project, and `<base>` its `DEPLOY_BASE`.
+
+### Another deploy is running
+
+```
+deploy: another deploy is running (PID 4242, deploy, 3 min); remove <base>/.deploy.lock if it is not
+Try: deploy example status, or wait for PID 4242
+```
+
+A project runs one deploy, rollback, `down`, `up` or `cache` at a time; the message names the
+other run. Wait for it to end. A lock whose process is gone is removed on its own, so remove
+`<base>/.deploy.lock` by hand only when that process is not running (`ps -p 4242`). `check` warns about a lock held for 30 min or more:
+`lock: held for 30 min (...); a deploy may be stuck`.
+
+If a run died while it removed a stale lock, you get
+`a stale lock removal stopped half way; remove <base>/.deploy.lock.break and <base>/.deploy.lock if no deploy is running`.
+Do what it says once no deploy runs.
+
+### Deploys are frozen
+
+```
+deploy: deploys are frozen since <time>: <reason>
+Try: deploy example unfreeze
+```
+
+Someone ran `deploy example freeze`. Deploys and rollbacks stop until `deploy example unfreeze`.
+Ask why first: the reason is in the message and in `status`.
+
+### The site is down for maintenance
+
+```
+deploy: not checking https://example.com/: the site is down for maintenance; check it with: deploy example up
+```
+
+A warning, not an error. Someone ran `deploy example down`, so the deploy or rollback cannot see
+the new version behind the maintenance page and does not check it. Run `deploy example up` when the
+work is done; it checks the site then. If `up` says
+`up ran, but the site does not serve <release>`, see
+[The check failed after the switch](#the-check-failed-after-the-switch).
+
+### No deploy.conf
+
+```
+deploy: develop has no deploy.conf
+Try: add one to the repo, see README.md#deployconf
+```
+
+The deployed branch has no `deploy.conf` in the repo root. Add one with at least a `build()` step
+(see [deploy.conf](#deployconf)); without that step the deploy stops with
+`deploy.conf has no build step`. `init` says
+`<checkout> has no deploy.conf; update it to a commit that has one`: pull the checkout first.
+
+### A step failed or ran too long
+
+```
+deploy: build failed
+deploy: build ran past STEP_TIMEOUT (600 s)
+```
+
+A `deploy.conf` step (`preflight`, `backup`, `build`, `verify`) exited with an error, or ran
+longer than `STEP_TIMEOUT` and was stopped with all it started. The step's own output is above the
+error. Nothing was switched: the new folder is deleted and the old release stays live. Fix the step,
+or raise `STEP_TIMEOUT` in `projects/example.env` if the step is slow but fine (`0` turns the limit
+off). `check` reports a slow `health()` step as `health: ran past STEP_TIMEOUT (600 s)`.
+
+### The check failed after the switch
+
+```
+deploy: the check failed; <old release> is live (data changes stay applied)
+Try: open https://example.com/: it answered 500 with version none, not v2026.11.4-abc1234
+```
+
+After the switch, `CHECK_URL` did not answer 200 with the new release in `X-App-Version` within
+`CHECK_WAIT` seconds. The deploy switched back to the old release on its own and set the new one
+aside as `releases/.failed-<name>`. Migrations that ran stay applied. Open the URL from the hint:
+
+- a 500 or no answer: read the app's log in the failed release;
+- a 200 with an old or no version: the app does not send `X-App-Version` from its `RELEASE` file
+  (set `CHECK_VERSION=0` until it does), or a cache serves an old page (see [OPcache](#opcache));
+- it is just slow to start: raise `CHECK_WAIT`.
+
+A rollback that cannot see its target says `<release> is linked, but the site does not serve it yet`
+with the same hint. The rollback stands; check the site.
+
+### Cannot clone or fetch the repo
+
+```
+deploy: could not clone git@github-example:owner/example.git
+Try: git ls-remote git@github-example:owner/example.git, and check REPO_URL, the SSH key or host alias, and the network
+```
+
+The server cannot read the repo. Run the `git ls-remote` from the hint. If it fails, check
+`REPO_URL` in `projects/example.env`, the deploy key and the `Host` entry in `~/.ssh/config` (see
+[Adding a project](#adding-a-project)). A staging slot says
+`could not fetch PR #N from <repo>` for the same cause. A wrong name says
+`no branch <name> in the repo` or `no tag, branch or commit <ref> in the repo`.
+
+### Unknown release in rollback
+
+```
+deploy: no release matches 'abc1234'
+Try: deploy example status (it lists the releases)
+```
+
+No kept release has that text in its name. Pick one from `status`. A release that `KEEP_RELEASES`
+no longer keeps can come back with `deploy example --ref <tag or sha>`. Other rollback errors:
+
+- `'2026' matches 3 releases; use more of the name`: add more of the name, like the time or sha;
+- `no good release older than <release>`: there is no older release, or all are marked bad; name one;
+- `<release> is already live`: nothing to do.
+
+### deploy self cannot update
+
+```
+deploy: could not update <engine folder>; it may have local changes or a branch that moved apart
+```
+
+`deploy self` only does a fast-forward `git pull`. It stops when the engine folder has local
+changes or its branch has commits the remote lacks. Run `git -C ~/release-switch status` and
+`git -C ~/release-switch log @{u}..`, then undo or move the changes and run `deploy self`
+again. Project files in `projects/` are not tracked, so they never block it. The last line of
+`deploy status --all` also says when the engine has local changes.
+
+### No release tag
+
+```
+deploy: no release tag on abc1234 after 90 s; deploying without one
+```
+
+A warning: the deploy goes on, and the release name has no tag. The release workflow did not tag
+the merge within `RELEASE_WAIT` seconds. Check the workflow run in GitHub. If the repo does not tag
+every merge, use `deploy example --no-wait`, set `RELEASE_WAIT=0`, or add the no-release marker job
+(see [How it works](#how-it-works)). `no release tag on abc1234; deploying without one` means the
+commit is over 5 minutes old, so the deploy did not wait.
+
+### Nothing to clear
+
+```
+deploy: nothing to clear: deploy.conf of <release> has no cache() step and OPCACHE_RESET_DIR is not set
+Try: define cache() in deploy.conf, or set OPCACHE_RESET_DIR in <engine folder>/projects/example.env
+```
+
+`cache` has nothing to run. Add a `cache()` step to `deploy.conf` (it runs in the live release
+after the next deploy), or set `OPCACHE_RESET_DIR` (see [OPcache](#opcache)).
+
+### Disk space
+
+```
+deploy: only 312.0M free on the disk of <base>, under MIN_FREE_MB (500M); free some space before deploying
+deploy: disk: 2.3G used of 2.0G, 40.1G free, over DISK_LIMIT (2G); prune after the deploy may help
+```
+
+The first is an error: the deploy stops before it writes anything when free space is under
+`MIN_FREE_MB`. Free space, or lower `MIN_FREE_MB` (`0` turns it off). The second is a warning: the
+base folder is bigger than `DISK_LIMIT`. The deploy goes on and deletes old releases at the end,
+which may bring it back down; if not, lower `KEEP_RELEASES` or clean `shared/`. `check` fails on
+both, as `disk: ...; over DISK_LIMIT (2G)` or `disk: ...; under MIN_FREE_MB (500M free)`.
 
 ## Tests
 

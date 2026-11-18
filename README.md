@@ -126,7 +126,11 @@ Commands:
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
-                    and clears the mark if that release had one. On a terminal it asks first
+                    and clears the mark if that release had one. On a terminal it asks first.
+                    `--dry-run` (before or after the name) shows the live release, the target,
+                    the bad mark it would set or clear, the migration warning and whether
+                    `after_rollback()` would run, then stops. It changes nothing: no switch,
+                    mark, lock, log line or alert. Errors are the same as for a real rollback
   check             A quick health check that changes nothing: the live release, its shared
                     links, the project's health() step, the site, the disk (size of the base
                     folder past DISK_LIMIT, or free space under MIN_FREE_MB), and a lock held

@@ -132,7 +132,7 @@ check "--help works, lists projects and shows env overrides; an unknown command 
 
 step "Per-command help and typo hints"
 deploy rollback --help > "$WORK/help.log"
-grep -q "^Usage: deploy \[project\] rollback \[name\] \[--yes\]$" "$WORK/help.log" || fail "rollback --help shows no usage line"
+grep -q "^Usage: deploy \[project\] rollback \[name\] \[--yes\] \[--dry-run\]$" "$WORK/help.log" || fail "rollback --help shows no usage line"
 grep -q "^Examples:$" "$WORK/help.log" || fail "rollback --help shows no examples"
 ! grep -q "^Settings" "$WORK/help.log" || fail "rollback --help shows the full usage"
 [ ! -e "$BASE" ] || fail "rollback --help touched DEPLOY_BASE"
@@ -1121,6 +1121,38 @@ deploy fixture rollback "$newer" > /dev/null 2>&1 || fail "a rollback back to $n
 serves "$newer" || fail "server does not show $newer"
 check "the warning named the missing file; none when nothing is missing or MIGRATIONS_DIR is empty; ../ is refused"
 
+step "rollback --dry-run shows the plan and changes nothing"
+bad_before="$(ls "$BASE"/releases/*/.bad 2>/dev/null || true)"
+log_before="$(cat "$BASE/deploy.log")"
+rolled_before="$(cat "$BASE/shared/data/rolled_back" 2>/dev/null || true)"
+deploy fixture rollback --dry-run > "$WORK/dry-run.out" 2> "$WORK/dry-run.err" || fail "rollback --dry-run failed"
+grep -q "Would roll back fixture: [^ ]* → [^ ]*$" "$WORK/dry-run.out" \
+    || fail "rollback --dry-run shows no version line"
+grep -q "^==> Live: *$newer$" "$WORK/dry-run.out" || fail "rollback --dry-run does not show the live release"
+grep -q "^==> Target: *$older$" "$WORK/dry-run.out" || fail "rollback --dry-run does not show the target"
+grep -q "Would mark $newer as bad" "$WORK/dry-run.out" || fail "rollback --dry-run does not show the bad mark"
+grep -q "Would run after_rollback of $older" "$WORK/dry-run.out" || fail "rollback --dry-run does not show after_rollback"
+grep -q "the target lacks 1 migration" "$WORK/dry-run.err" || fail "rollback --dry-run does not show the migration warning"
+deploy fixture rollback "$older" --dry-run > "$WORK/dry-run.out" 2>/dev/null || fail "a named rollback --dry-run failed"
+grep -q "$newer would not be marked bad" "$WORK/dry-run.out" || fail "a named rollback --dry-run shows a bad mark"
+[ "$(live_release)" = "$newer" ] || fail "rollback --dry-run switched"
+[ "$(ls "$BASE"/releases/*/.bad 2>/dev/null || true)" = "$bad_before" ] || fail "rollback --dry-run changed the bad marks"
+[ "$(cat "$BASE/deploy.log")" = "$log_before" ] || fail "rollback --dry-run wrote to deploy.log"
+[ "$(cat "$BASE/shared/data/rolled_back" 2>/dev/null || true)" = "$rolled_before" ] || fail "rollback --dry-run ran after_rollback"
+[ ! -e "$BASE/.deploy.lock" ] || fail "rollback --dry-run left the lock"
+if deploy fixture rollback --dry-run nope 2> "$WORK/dry-run.err"; then
+    fail "rollback --dry-run with an unknown name passed"
+fi
+grep -q "no release matches 'nope'" "$WORK/dry-run.err" || fail "rollback --dry-run with an unknown name shows another error"
+deploy fixture freeze "dry run" > /dev/null
+if deploy fixture rollback --dry-run 2> "$WORK/dry-run.err"; then
+    fail "rollback --dry-run passed while frozen"
+fi
+deploy fixture unfreeze > /dev/null
+grep -q "frozen" "$WORK/dry-run.err" || fail "rollback --dry-run while frozen shows another error"
+[ "$(live_release)" = "$newer" ] || fail "a failed rollback --dry-run switched"
+check "dry-run showed live, target, mark, after_rollback and the migration warning; nothing changed; errors match a real rollback"
+
 step "The site check gets past a cache"
 sleep 1
 rm -f "$WORK/cached.log"
@@ -1528,7 +1560,10 @@ deploy fixture@s1 > /dev/null
 [ "$(slot_live)" != "$first_slot" ] || fail "a plain slot deploy built nothing new"
 deploy fixture@s1 > "$WORK/slot.log"
 grep -q "Nothing new on feature/x" "$WORK/slot.log" || fail "a slot deploy with nothing new built again"
-check "a plain deploy of fixture@s1 deployed the newest feature/x, then stopped with nothing new"
+deploy fixture@s1 rollback --dry-run > "$WORK/slot.log" || fail "a slot rollback --dry-run failed"
+grep -q "^==> Target: *$first_slot$" "$WORK/slot.log" || fail "a slot rollback --dry-run shows the wrong target"
+[ "$(slot_live)" != "$first_slot" ] || fail "a slot rollback --dry-run switched"
+check "a plain deploy of fixture@s1 deployed the newest feature/x, then stopped with nothing new; rollback --dry-run changed nothing"
 
 step "Slots are listed, refused when wrong, and leave production alone"
 deploy fixture slots > "$WORK/slots.log"

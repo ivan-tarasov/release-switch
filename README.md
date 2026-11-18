@@ -182,6 +182,12 @@ A mistyped command prints one line with the closest command, like
 `staging` subcommands: `deploy staging checkout --help`, and
 `Unknown staging command: chekout. Did you mean checkout?`.
 
+Common errors end with one more line that says what to do next, like
+`Try: deploy <project> status, or wait for PID 4242` for a held lock, or
+`Try: deploy <project> unfreeze` for a frozen project. The same goes for a missing `deploy.conf`,
+a failed site check (the URL and the version it got), a failed clone and an unknown release. Alerts
+carry the error only.
+
 ### Questions before risky commands
 
 `rollback`, `down` and `deploy --force` change the live site, so on a terminal they first show what

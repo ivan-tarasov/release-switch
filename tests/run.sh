@@ -161,6 +161,14 @@ fi
 grep -q "Unknown command: xyzzy.$" "$WORK/typo.log" || fail "a far typo got a hint"
 check "<command> --help, -h and help <command> show one command, with or without a project; a typo gets one hint and exits 2"
 
+step "init refuses a checkout with no deploy.conf"
+mkdir "$WORK/no-conf"
+if deploy fixture init "$WORK/no-conf" 2> "$WORK/no-conf.log"; then
+    fail "init ran on a checkout with no deploy.conf"
+fi
+grep -q "^Try: add one to the repo, see README.md#deployconf$" "$WORK/no-conf.log" || fail "no hint for a missing deploy.conf"
+check "init refused it and pointed to the README"
+
 step "init --dry-run changes nothing"
 deploy fixture init "$OLD" --dry-run
 [ ! -L "$OLD/.env" ] || fail "dry run moved .env"
@@ -333,6 +341,8 @@ if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture 2> "$WORK/check.log
 fi
 cat "$WORK/check.log" >&2
 grep -q "answered 404" "$WORK/check.log" || fail "the failure does not show the 404"
+grep -q "^Try: open http://127.0.0.1:$PORT/missing: it answered 404 with version " "$WORK/check.log" \
+    || fail "no hint for the failed check"
 [ "$(live_release)" = "$first" ] || fail "no automatic rollback to $first"
 serves "$first" || fail "server does not show $first after the rollback"
 [ "$(release_count)" = "$((releases_before + 1))" ] || fail "the failed release was not set aside"
@@ -426,9 +436,10 @@ if deploy fixture rollback v2026.11.99 2> "$WORK/ambiguous.log"; then
     fail "rollback to a part shared by two releases succeeded"
 fi
 grep -q "matches 2 releases" "$WORK/ambiguous.log" || fail "no message for a part shared by two releases"
-if deploy fixture rollback nope 2> /dev/null; then
+if deploy fixture rollback nope 2> "$WORK/nope.log"; then
     fail "rollback to a missing release succeeded"
 fi
+grep -q "^Try: deploy fixture status (it lists the releases)$" "$WORK/nope.log" || fail "no hint for a missing release"
 deploy fixture rollback
 [ "$(live_release)" = "$first" ] || fail "rollback did not skip the bad $second"
 serves "$first" || fail "server does not show $first"
@@ -454,6 +465,7 @@ if deploy fixture 2> "$WORK/lock.log"; then
     fail "deploy ran while a live process held the lock"
 fi
 grep -q "another deploy is running (PID $$, deploy, 0 min)" "$WORK/lock.log" || fail "the lock message does not name the owner"
+grep -q "^Try: deploy fixture status, or wait for PID $$$" "$WORK/lock.log" || fail "no hint for a held lock"
 deploy fixture status > "$WORK/lock-status.log"
 grep -q "^Lock: *held (PID $$, deploy, 0 min)" "$WORK/lock-status.log" || fail "status does not show the lock owner"
 check "locked deploy refused; the message and status name the owner"
@@ -535,7 +547,7 @@ for round in $(seq 40); do
     [ -e "$WORK/race/won" ] || fail "no run took the stale lock in round $round"
     [ ! -e "$WORK/race/.deploy.lock" ] || fail "the lock is left behind after round $round"
     [ ! -e "$WORK/race/.deploy.lock.break" ] || fail "the break folder is left behind after round $round"
-    others="$(cat "$WORK/race/err."* | grep -v "another deploy is running" || true)"
+    others="$(cat "$WORK/race/err."* | grep -v -e "another deploy is running" -e "^Try: deploy status" || true)"
     [ -z "$others" ] || fail "a losing run failed for another reason in round $round: $others"
 done
 check "40 rounds of three runs on one stale lock: one holder at a time, losers say another deploy runs"
@@ -572,8 +584,8 @@ deploy fixture freeze "moving hosts" > /dev/null
 if deploy fixture --force 2> "$WORK/freeze.log"; then
     fail "deploy ran while frozen"
 fi
-grep -q "deploys are frozen since today at .*: moving hosts (run: deploy fixture unfreeze)" "$WORK/freeze.log" \
-    || fail "no freeze message for deploy"
+grep -q "deploys are frozen since today at .*: moving hosts$" "$WORK/freeze.log" || fail "no freeze message for deploy"
+grep -q "^Try: deploy fixture unfreeze$" "$WORK/freeze.log" || fail "no hint for a frozen deploy"
 if deploy fixture rollback 2> /dev/null; then
     fail "rollback ran while frozen"
 fi

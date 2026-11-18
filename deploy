@@ -2522,7 +2522,7 @@ pad() {
 }
 
 # Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1. Production names are bold; slots
-# hang under their project on dim tree lines.
+# hang under their project on dim tree lines. The Quit row is dim.
 menu_line() {
     local i="$1" mark="  " color="" name version pending site problems
     name="${M_NAME[$i]}"
@@ -2541,20 +2541,26 @@ menu_line() {
         color="$C_BOLD"
     fi
 
+    if [ "${M_TARGET[$i]}" = quit ]; then
+        printf '%s%s%s  %s%s' "$mark" "$C_DIM" "$(pad "" ${#M_NUMBERED})" "$name" "$C_OFF"
+
+        return
+    fi
+
     if [ -n "${M_TREE[$i]}" ]; then
         name="$C_DIM${M_TREE[$i]}$C_OFF$color $(pad "$name" $((W_NAME - 2)))"
     else
         name="$C_BOLD$(pad "$name" "$W_NAME")$C_OFF$color"
     fi
 
-    printf '%s%s%s  %s  %s  %s  %s%s%s%s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_PICKS})" \
+    printf '%s%s%s  %s  %s  %s  %s%s%s%s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_NUMBERED})" \
         "$name" "$(pad "$version" "$W_VERSION")" "$(pad "$pending" "$W_PENDING")" \
         "$(pad "$site" "$W_SITE")" "$C_OFF" "${problems:+  $C_RED}" "$problems" "${problems:+$C_OFF}"
 }
 
 # Prints the menu rows on the rail, with ❯ at pick $1, then the key bar.
 menu_draw() {
-    local i prefix="  " last="$M_PICKS"
+    local i prefix="  " last="$M_NUMBERED"
     [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
     [ "$last" -le 9 ] || last=9
 
@@ -2566,39 +2572,56 @@ menu_draw() {
         "$prefix" "$C_DIM" "$last" "$C_OFF"
 }
 
-# Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR. Sets
-# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). Free slots cannot be picked.
-menu_keys() {
-    local key rest wait=1
+# Reads one key into M_KEY: up (↑, k), down (↓, j), left (←), enter, esc, q (also Ctrl-D and the end of
+# input), or the key itself.
+menu_key() {
+    local rest wait=1
     # bash 3.2 reads whole seconds only, so Esc on its own waits a second there.
     [ "${BASH_VERSINFO[0]}" -lt 4 ] || wait=0.1
 
+    IFS= read -rsn1 M_KEY || M_KEY=q
+
+    case "$M_KEY" in
+        $'\033')
+            rest=""
+            IFS= read -rsn2 -t "$wait" rest || true
+
+            case "$rest" in
+                '[A' | OA) M_KEY=up ;;
+                '[B' | OB) M_KEY=down ;;
+                '[D' | OD) M_KEY=left ;;
+                '') M_KEY=esc ;;
+                *) M_KEY=other ;;
+            esac
+            ;;
+        '') M_KEY=enter ;;
+        k) M_KEY=up ;;
+        j) M_KEY=down ;;
+        Q | $'\004') M_KEY=q ;;
+    esac
+}
+
+# Hides the cursor and keeps the terminal settings for menu_restore.
+menu_raw() {
     MENU_STTY="$(stty -g 2>/dev/null)" || MENU_STTY=""
     [ -n "$MENU_STTY" ] || MENU_STTY="sane"
     printf '\033[?25l'
+}
+
+# Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR. Sets
+# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc).
+menu_keys() {
+    menu_raw
     menu_draw "$M_CUR"
 
     while :; do
-        IFS= read -rsn1 key || key=q
+        menu_key
 
-        case "$key" in
-            $'\033')
-                rest=""
-                IFS= read -rsn2 -t "$wait" rest || true
-
-                case "$rest" in
-                    '[A' | OA) key=k ;;
-                    '[B' | OB) key=j ;;
-                    '') key=q ;;
-                esac
-                ;;
-        esac
-
-        case "$key" in
-            k) [ "$M_CUR" -eq 0 ] || M_CUR=$((M_CUR - 1)) ;;
-            j) [ "$M_CUR" -eq $((M_PICKS - 1)) ] || M_CUR=$((M_CUR + 1)) ;;
-            [1-9]) [ "$key" -gt "$M_PICKS" ] || M_CUR=$((key - 1)) ;;
-            '')
+        case "$M_KEY" in
+            up) [ "$M_CUR" -eq 0 ] || M_CUR=$((M_CUR - 1)) ;;
+            down) [ "$M_CUR" -eq $((M_PICKS - 1)) ] || M_CUR=$((M_CUR + 1)) ;;
+            [1-9]) [ "$M_KEY" -gt "$M_NUMBERED" ] || M_CUR=$((M_KEY - 1)) ;;
+            enter)
                 M_DO=open
                 break
                 ;;
@@ -2606,7 +2629,7 @@ menu_keys() {
                 M_DO=refresh
                 break
                 ;;
-            q | Q | $'\004')
+            q | esc)
                 M_DO=quit
                 break
                 ;;
@@ -2625,11 +2648,11 @@ menu_numbers() {
     local i answer
 
     for ((i = 0; i < M_COUNT; i++)); do
-        printf '%s\n' "$(menu_line "$i")"
+        [ "${M_TARGET[$i]}" = quit ] || printf '%s\n' "$(menu_line "$i")"
     done | rail
 
     while :; do
-        printf '%s' "$(say "Pick 1–$M_PICKS, r to refresh, q to quit: ")"
+        printf '%s' "$(say "Pick 1–$M_NUMBERED, r to refresh, q to quit: ")"
         read -r answer || answer=""
 
         case "$answer" in
@@ -2645,7 +2668,7 @@ menu_numbers() {
                 ;;
             *[!0-9]*) ;;
             *)
-                if [ "$answer" -ge 1 ] && [ "$answer" -le "$M_PICKS" ]; then
+                if [ "$answer" -ge 1 ] && [ "$answer" -le "$M_NUMBERED" ]; then
                     M_DO=open
                     M_CUR=$((answer - 1))
 
@@ -2659,10 +2682,10 @@ menu_numbers() {
 }
 
 # Reads the menu rows: one per project, its slots in use as a tree under it, one leaf for its free
-# slots, and the engine, read in parallel.
+# slots, the engine, read in parallel, and Quit.
 menu_read() {
-    local targets=() groups=() subs=() frees=() pships=() project slot free group=-1 i row width rows=""
-    local ship target name version pending site problems engine sub
+    local targets=() groups=() subs=() frees=() pships=() gprojects=() project slot free group=-1 i row width
+    local rows="" ship target name version pending site problems engine sub
     M_NAME=() M_VERSION=() M_PENDING=() M_SITE=() M_PROBLEMS=() M_SHIP=() M_TARGET=() M_GROUP=() M_SUB=()
     M_TREE=() M_NUM=() M_SEL=()
 
@@ -2671,6 +2694,7 @@ menu_read() {
         targets+=("$project")
         groups+=("$group")
         subs+=(0)
+        gprojects+=("$project")
         free=""
 
         for slot in $(menu_load "$project" 2> /dev/null && menu_slots 2> /dev/null || true); do
@@ -2712,16 +2736,16 @@ menu_read() {
     done
 
     for group in "${!frees[@]}"; do
-        [ -z "${frees[$group]}" ] \
-            || rows+="${pships[$group]}"$'\t'"$group"$'\t'"9999"$'\t'"0"$'\t-\t'"${frees[$group]}"$'\tfree\t-\t-\t-\n'
+        [ -z "${frees[$group]}" ] || rows+="${pships[$group]}"$'\t'"$group"$'\t'"9999"$'\t'"0"$'\t'"${gprojects[$group]}:free"$'\t'"${frees[$group]}"$'\tfree\t-\t-\t-\n'
     done
 
     # Projects with something to ship first, else in their order; slots under their project in slot
-    # order, free ones last; the engine last.
+    # order, free ones last; the engine, then Quit, last.
     rows="$(printf '%s' "$rows" | sort -t $'\t' -k1,1r -k2,2n -k3,3n)"
     engine="$(cat "$MENU_TMP/engine")"
     [ -n "$engine" ] || engine="$(printf '0\tself\trelease-switch\t%s\t-\t-\tcannot read' "$(engine_version)")"
     rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"$engine"
+    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\tquit\tQuit\t-\t-\t-\t-'
     rm -rf "$MENU_TMP"
     MENU_TMP=""
 
@@ -2738,6 +2762,7 @@ menu_read() {
     done <<< "$rows"
 
     M_COUNT="${#M_NAME[@]}"
+    M_NUMBERED=0
     for ((i = 0; i < M_COUNT; i++)); do
         case "${M_SUB[$i]}" in
             0 | -) M_TREE+=("") ;;
@@ -2750,11 +2775,12 @@ menu_read() {
                 ;;
         esac
 
-        if [ "${M_TARGET[$i]}" = - ]; then
+        M_SEL+=("$i")
+        if [ "${M_TARGET[$i]}" = quit ]; then
             M_NUM+=("")
         else
-            M_SEL+=("$i")
-            M_NUM+=("${#M_SEL[@]}")
+            M_NUMBERED=$((M_NUMBERED + 1))
+            M_NUM+=("$M_NUMBERED")
         fi
     done
     M_PICKS="${#M_SEL[@]}"
@@ -2773,56 +2799,409 @@ menu_read() {
     done
 }
 
-# The action for menu line $1: shows the pending commits, asks, then runs `deploy <project>`,
-# `deploy <project>@sN` or `deploy self` as a child process, so a failed run keeps the menu. Sets
-# M_RAN to 1 when it ran.
-menu_open() {
-    local target="${M_TARGET[$1]}" name="${M_NAME[$1]}" version="${M_VERSION[$1]}" tty status=0 answer
-    [ "$version" != - ] || version=""
-    M_RAN=0
+# Reads row $1 again, after an action changed it.
+menu_refresh() {
+    local target="${M_TARGET[$1]}" row ship version pending site problems
 
     if [ "$target" = self ]; then
-        { git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null || true; } | rail
-        ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; return 0; }
+        row="$(engine_menu_row < /dev/null 2> /dev/null)" || row=""
     else
-        (
-            menu_load "$target"
-            [ -z "$(current_release)" ] || show_pending "$(current_release)"
-        ) 2>&1 | rail
-        case "$target" in
-            *@*) name="${target%@*} ${target#*@} (staging)" ;;
-            *) name="$name (production)" ;;
-        esac
-        ask_yes "Deploy $name${version:+ $version}?" || { say "Nothing done"; return 0; }
+        row="$( (menu_load "$target" && menu_row) < /dev/null 2> /dev/null)" || row=""
+    fi
+    [ -n "$row" ] || return 0
+
+    IFS=$'\t' read -r ship _ _ version pending site problems <<< "$row"
+    M_SHIP[$1]="$ship"
+    M_VERSION[$1]="$version"
+    M_PENDING[$1]="$pending"
+    M_SITE[$1]="$site"
+    M_PROBLEMS[$1]="$problems"
+}
+
+# True when row $1 has the problem $2 (like frozen or down).
+menu_has() {
+    case ", ${M_PROBLEMS[$1]}, " in
+        *", $2, "*) return 0 ;;
+    esac
+
+    return 1
+}
+
+# Adds action $1 with label $2 to the action list.
+menu_add() {
+    A_KEY+=("$1")
+    A_LABEL+=("$2")
+}
+
+# The action list of row $1 into A_KEY and A_LABEL. Only actions that fit the row's state show.
+menu_actions() {
+    local i="$1" target="${M_TARGET[$1]}" pending="${M_PENDING[$1]}" version="${M_VERSION[$1]}"
+    [ "$pending" != - ] || pending=""
+    [ "$version" != - ] || version=""
+    A_KEY=()
+    A_LABEL=()
+
+    case "$target" in
+        self)
+            if [ "${M_SHIP[$i]}" -eq 1 ]; then
+                menu_add deploy "Update engine ($version)"
+            else
+                menu_add deploy "Update engine${pending:+ ($pending)}"
+            fi
+            menu_add selflog "Log"
+            ;;
+        *)
+            if [ "$pending" = "up to date" ]; then
+                case "$target" in
+                    *@*) menu_add redeploy "Update (up to date)" ;;
+                    *) menu_add redeploy "Redeploy (up to date)" ;;
+                esac
+            else
+                case "$target" in
+                    *@*) menu_add deploy "Update${pending:+ ($pending)}" ;;
+                    *) menu_add deploy "Deploy new release${pending:+ ($pending)}" ;;
+                esac
+            fi
+
+            case "$target" in
+                *@*)
+                    menu_add checkout "Checkout branch or PR…"
+                    menu_add cache "Clear cache"
+                    menu_add copy "Copy data from production…"
+                    menu_add status "Status"
+                    ;;
+                *)
+                    menu_add status "Status"
+                    menu_add check "Check site"
+                    ;;
+            esac
+
+            menu_add log "Log"
+            menu_add rollback "Rollback…"
+
+            case "$target" in
+                *@*) ;;
+                *)
+                    menu_add cache "Clear cache"
+                    if menu_has "$i" frozen; then
+                        menu_add unfreeze "Unfreeze"
+                    else
+                        menu_add freeze "Freeze…"
+                    fi
+                    ;;
+            esac
+
+            if menu_has "$i" down; then
+                menu_add up "Up"
+            else
+                menu_add down "Down…"
+            fi
+
+            case "$target" in
+                *@*) menu_add free "Free slot" ;;
+            esac
+            ;;
+    esac
+
+    menu_add back "Back"
+}
+
+# The name of row $1 in questions: "example (production)", "example s1 (staging)" or "the engine".
+menu_name() {
+    case "${M_TARGET[$1]}" in
+        self) printf 'the engine' ;;
+        *@*) printf '%s %s (staging)' "${M_TARGET[$1]%@*}" "${M_TARGET[$1]#*@}" ;;
+        *) printf '%s (production)' "${M_TARGET[$1]}" ;;
+    esac
+}
+
+# The title of row $1's action list: its name, version and problems.
+menu_heading() {
+    local version="${M_VERSION[$1]}" problems="${M_PROBLEMS[$1]}" name
+    [ "$version" != - ] || version=""
+    [ "$problems" != - ] || problems=""
+
+    case "${M_TARGET[$1]}" in
+        self) name="${M_NAME[$1]} — engine" ;;
+        *@*) name="${M_TARGET[$1]%@*} ${M_TARGET[$1]#*@} — staging" ;;
+        *) name="${M_TARGET[$1]} — production" ;;
+    esac
+
+    printf '%s%s%s' "$name" "${version:+ · $version}" "${problems:+ · $problems}"
+}
+
+# The question above a list: $1 after a ◆ on the rails.
+menu_title() {
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s◆%s  %s\n' "$C_GREEN" "$C_OFF" "$1"
+    else
+        say "$1"
+    fi
+}
+
+# Line $1 of the action list, with ❯ in front when $2 is 1. Back has no number and is dim.
+menu_action_line() {
+    local mark="  " color="" num="$(($1 + 1))"
+
+    if [ "${2:-0}" -eq 1 ]; then
+        mark="$C_GREEN❯$C_OFF "
+        color="$C_BOLD"
+    fi
+    if [ "${A_KEY[$1]}" = back ]; then
+        num=""
+        color="$C_DIM"
     fi
 
+    printf '%s%s%s  %s%s' "$mark" "$color" "$(pad "$num" 1)" "${A_LABEL[$1]}" "$C_OFF"
+}
+
+# Prints the action list on the rail, with ❯ at $1, then the key bar.
+menu_action_draw() {
+    local i prefix="  "
+    [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+
+    for i in "${!A_KEY[@]}"; do
+        printf '\r\033[K%s%s\n' "$prefix" "$(menu_action_line "$i" $((i == $1)))"
+    done
+
+    printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter run · b back · q quit%s\n' "${prefix%  }" \
+        "$prefix" "$C_DIM" $((${#A_KEY[@]} - 1)) "$C_OFF"
+}
+
+# Lets the user pick an action like menu_keys, starting at A_CUR. Sets A_CUR, and A_DO to run, back
+# (b, ←, Esc) or quit (q).
+menu_action_keys() {
+    local count="${#A_KEY[@]}"
+    [ "$A_CUR" -lt "$count" ] || A_CUR=$((count - 1))
+    menu_raw
+    menu_action_draw "$A_CUR"
+
+    while :; do
+        menu_key
+
+        case "$M_KEY" in
+            up) [ "$A_CUR" -eq 0 ] || A_CUR=$((A_CUR - 1)) ;;
+            down) [ "$A_CUR" -eq $((count - 1)) ] || A_CUR=$((A_CUR + 1)) ;;
+            [1-9]) [ "$M_KEY" -ge "$count" ] || A_CUR=$((M_KEY - 1)) ;;
+            enter)
+                A_DO=run
+                break
+                ;;
+            b | B | left | esc)
+                A_DO=back
+                break
+                ;;
+            q)
+                A_DO=quit
+                break
+                ;;
+        esac
+
+        printf '\033[%sA' $((count + 2))
+        menu_action_draw "$A_CUR"
+    done
+
+    menu_restore
+}
+
+# The action list without cursor control: numbered, without Back. Sets A_CUR and A_DO like
+# menu_action_keys; b and an empty answer go back, q and the end of input quit.
+menu_action_numbers() {
+    local i answer last=$((${#A_KEY[@]} - 1))
+
+    for ((i = 0; i < last; i++)); do
+        printf '%s\n' "$(menu_action_line "$i")"
+    done | rail
+
+    while :; do
+        printf '%s' "$(say "Pick 1–$last, b to go back, q to quit: ")"
+        read -r answer || answer=q
+
+        case "$answer" in
+            "" | b | B)
+                A_DO=back
+
+                return
+                ;;
+            q | Q)
+                A_DO=quit
+
+                return
+                ;;
+            *[!0-9]*) ;;
+            *)
+                if [ "$answer" -ge 1 ] && [ "$answer" -le "$last" ]; then
+                    A_DO=run
+                    A_CUR=$((answer - 1))
+
+                    return
+                fi
+                ;;
+        esac
+
+        warn "no such choice: $answer"
+    done
+}
+
+# Asks $1 and reads one line into M_ANSWER. The end of input quits.
+menu_ask() {
+    printf '%s' "$(say "$1")"
+    read -r M_ANSWER || exit 0
+}
+
+# Runs `deploy $@` as a child process, so a failed run keeps the menu. Sets M_STATUS, and M_RAN to 1.
+menu_child() {
+    local tty
+    M_STATUS=0
     M_RAN=1
     [ "$RAILS" -eq 0 ] || printf '%s└%s\n' "$C_DIM" "$C_OFF"
     tty="$(stty -g 2>/dev/null)" || tty=""
     # A trap that does nothing, not '', so the child still stops on Ctrl-C and the menu stays.
     trap ':' INT
-    "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$target" || status=$?
+    "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$@" || M_STATUS=$?
     trap 'exit 130' INT
     [ -z "$tty" ] || stty "$tty" 2>/dev/null || true
     printf '\033[?25h'
-
     intro ""
-    case "$status" in
-        0) say "deploy $target finished" ;;
-        130) warn "deploy $target stopped" ;;
-        *) warn "deploy $target failed with exit code $status" ;;
+}
+
+# Says how `deploy $*` ended, then waits for Enter.
+menu_done() {
+    local answer
+
+    case "$M_STATUS" in
+        0) say "deploy $* finished" ;;
+        130) warn "deploy $* stopped" ;;
+        *) warn "deploy $* failed with exit code $M_STATUS" ;;
     esac
     printf '%s' "$(say "Press Enter to go back ")"
     read -r answer || exit 0
-
-    # A new engine draws its own menu.
-    if [ "$target" = self ] && [ "$status" -eq 0 ]; then
-        menu_cleanup
-        exec "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")"
-    fi
 }
 
-# A bare `deploy` on a terminal: the menu rows, a pick, its action, and back to the rows until q.
+# Runs `deploy $@` and waits for Enter.
+menu_run() {
+    menu_child "$@"
+    menu_done "$@"
+}
+
+# Asks for a branch or a pull request (#N or N) and checks it out on $1: a slot, or a project, where
+# it goes to the first free slot.
+menu_checkout() {
+    local ref
+
+    menu_ask "Branch, or #N for a pull request: "
+    ref="${M_ANSWER#\#}"
+
+    case "$ref" in
+        "")
+            say "Nothing done"
+            ;;
+        *[!0-9]*) menu_run staging "$1" checkout "$M_ANSWER" ;;
+        *) menu_run staging "$1" checkout --pr "$ref" ;;
+    esac
+}
+
+# Runs action $1 of row $2. Sets M_LEAVE to 1 when the row is gone after it (a freed slot).
+menu_act() {
+    local target="${M_TARGET[$2]}" version="${M_VERSION[$2]}"
+    [ "$version" != - ] || version=""
+
+    case "$1" in
+        deploy)
+            if [ "$target" = self ]; then
+                { git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null || true; } | rail
+                ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; return 0; }
+                menu_run self
+
+                # A new engine draws its own menu.
+                if [ "$M_STATUS" -eq 0 ]; then
+                    menu_cleanup
+                    exec "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")"
+                fi
+
+                return 0
+            fi
+
+            (
+                menu_load "$target"
+                [ -z "$(current_release)" ] || show_pending "$(current_release)"
+            ) 2>&1 | rail
+            ask_yes "Deploy $(menu_name "$2")${version:+ $version}?" || { say "Nothing done"; return 0; }
+            menu_run "$target"
+            ;;
+        redeploy) menu_run "$target" --force ;;
+        selflog) menu_run self log ;;
+        status | check | log | cache | unfreeze | up) menu_run "$target" "$1" ;;
+        rollback)
+            menu_child "$target" rollback --dry-run
+
+            if [ "$M_STATUS" -ne 0 ]; then
+                menu_done "$target" rollback --dry-run
+            elif ask_yes "Roll back $(menu_name "$2")?"; then
+                menu_run "$target" rollback --yes
+            else
+                say "Nothing done"
+            fi
+            ;;
+        freeze | down)
+            menu_ask "Reason (optional): "
+            if [ -n "$M_ANSWER" ]; then
+                menu_run "$target" "$1" "$M_ANSWER"
+            else
+                menu_run "$target" "$1"
+            fi
+            ;;
+        checkout) menu_checkout "$target" ;;
+        copy) menu_run "$target" copy-from "${target%@*}" ;;
+        free)
+            ask_yes "Free $(menu_name "$2") and deploy the production branch to it?" \
+                || { say "Nothing done"; return 0; }
+            menu_run "$target" free
+            M_LEAVE=1
+            ;;
+    esac
+}
+
+# The action list of menu line $1, until Back. Sets M_RAN to 1 when an action ran. A free slot leaf
+# has no list: it asks for a branch or a pull request for the first free slot.
+menu_open() {
+    local i="$1" target="${M_TARGET[$1]}" key
+    M_RAN=0
+    M_LEAVE=0
+    A_CUR=0
+
+    case "$target" in
+        *:free)
+            menu_title "Check out into ${M_NAME[$i]%%,*} of ${target%:free}"
+            menu_checkout "${target%:free}"
+
+            return 0
+            ;;
+    esac
+
+    while :; do
+        menu_actions "$i"
+        menu_title "$(menu_heading "$i")"
+
+        case "${TERM:-dumb}" in
+            dumb | unknown) menu_action_numbers ;;
+            *) menu_action_keys ;;
+        esac
+
+        case "$A_DO" in
+            quit) exit 0 ;;
+            back) return 0 ;;
+        esac
+
+        key="${A_KEY[$A_CUR]}"
+        [ "$key" != back ] || return 0
+        menu_act "$key" "$i"
+        [ "$M_LEAVE" -eq 0 ] || return 0
+        [ "$M_RAN" -eq 0 ] || menu_refresh "$i"
+    done
+}
+
+# A bare `deploy` on a terminal: the menu rows, a pick, its action list, and back to the rows until q.
 project_menu() {
     local i last="" reload=1
     M_CUR=0
@@ -2838,11 +3217,7 @@ project_menu() {
             done
         fi
 
-        if [ "$RAILS" -eq 1 ]; then
-            printf '%s◆%s  Which project to deploy?\n' "$C_GREEN" "$C_OFF"
-        else
-            say "Which project to deploy?"
-        fi
+        menu_title "Pick a project"
 
         case "${TERM:-dumb}" in
             dumb | unknown) menu_numbers ;;
@@ -2858,6 +3233,7 @@ project_menu() {
         esac
 
         last="${M_TARGET[${M_SEL[$M_CUR]}]}"
+        [ "$last" != quit ] || exit 0
         menu_open "${M_SEL[$M_CUR]}"
         reload="$M_RAN"
     done

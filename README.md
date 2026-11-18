@@ -212,34 +212,66 @@ under it as a tree:
 ┌  release-switch v2026.11.32
 │
 ◇  Checking 5 projects…
-◆  Which project to deploy?
+◆  Pick a project
 │  ❯ 1  tarasov.ca      v2026.11.4 → v2026.11.5    3 commits       site ok
 │    2  ├ s1            develop                    up to date      site ok
 │    3  └ s2            PR #51                     2 commits       site ok
 │    4  other           v2026.11.2                 up to date      site ok
 │    5  ├ s1            feature/search             1 commit        site ok
-│       └ s2, s3        free
-│    6  release-switch  v2026.11.33 → v2026.11.34  run deploy self
+│    6  └ s2, s3        free
+│    7  release-switch  v2026.11.33 → v2026.11.34  run deploy self
+│       Quit
 │
-│  ↑↓/1-6 pick · Enter open · r refresh · q quit
+│  ↑↓/1-7 pick · Enter open · r refresh · q quit
+```
+
+Enter opens the action list of the picked row:
+
+```
+◆  tarasov.ca — production · v2026.11.4 → v2026.11.5
+│  ❯ 1  Deploy new release (3 commits)
+│    2  Status
+│    3  Check site
+│    4  Log
+│    5  Rollback…
+│    6  Clear cache
+│    7  Freeze…
+│    8  Down…
+│       Back
+│
+│  ↑↓/1-8 pick · Enter run · b back · q quit
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
 none, and the deploy waits for the tag as usual. Problems (frozen, down, lock held, failed releases,
 a site that does not serve the live release) show in red at the end of the row. Production names are
-bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf that cannot be
-picked. Projects with something to ship come first, each with its slots right under it; up-to-date
-rows are dimmed.
+bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf. Projects with
+something to ship come first, each with its slots right under it; up-to-date rows are dimmed. The dim
+`Quit` row is last.
 
-Pick with the arrow keys, `j`/`k` or a number, then Enter: the menu shows the pending commits and
-asks `Deploy <project> (production) <live> → <new>? [y/N]`, or `Deploy <project> sN (staging)
-<branch>? [y/N]` for a slot. `y` runs exactly `deploy <project>`, `deploy <project>@sN` or
-`deploy self` for the engine, as a child process. When it ends, the menu shows whether it worked or
-failed and waits for Enter, then reads the rows again and puts the cursor back on the same row. A
-failed run keeps the menu open. Ctrl-C during a run stops that run and comes back to the menu; Ctrl-C
-in the list quits. After `deploy self` the new engine opens its own menu. `r` reads the rows again;
-`q` or Esc quits with exit code 0. With `TERM=dumb` the menu is a numbered list with `Pick 1–N, r to
-refresh, q to quit:` that loops the same way.
+Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its own action list:
+
+- Production: Deploy new release (or Redeploy when up to date), Status, Check site, Log, Rollback…,
+  Clear cache, Freeze… or Unfreeze, Down… or Up.
+- Staging slot: Update (or a redeploy when up to date), Checkout branch or PR…, Clear cache, Copy
+  data from production…, Status, Log, Rollback…, Down… or Up, Free slot.
+- Free slot leaf: no list; it asks for a branch, or `#N` for a pull request, and runs
+  `deploy staging <project> checkout …`, which uses the first free slot.
+- Engine: Update engine (`deploy self`), Log (`deploy self log`).
+
+Unfreeze shows only on a frozen project, Up only on a site that is down. Deploy and Update show the
+pending commits and ask `Deploy <project> (production) <live> → <new>? [y/N]` first. Rollback… shows
+`rollback --dry-run`, then asks. Freeze… and Down… ask for an optional reason. Each action runs the
+matching command (`deploy <project> status`, `deploy <project>@sN cache`, …) as a child process, with
+its own questions. When it ends, the menu shows whether it worked or failed and waits for Enter, then
+shows the same action list with fresh facts. A failed run keeps the menu open. Ctrl-C during a run
+stops that run and comes back to the menu; Ctrl-C in a list quits. After `deploy self` the new engine
+opens its own menu.
+
+`b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
+action ran and puts the cursor back on the same row. `r` reads the rows again. `q`, Ctrl-D, the
+`Quit` row or Esc in the project list quit with exit code 0. With `TERM=dumb` both lists are
+numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or
 fails with `name a project (…)` when there are several.
 

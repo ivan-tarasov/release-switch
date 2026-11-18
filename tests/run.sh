@@ -2138,9 +2138,9 @@ rm "$WORK/projects/other.env"
 if command -v script > /dev/null; then
     live="$(live_release)"
     # j moves to the second row, r reads the rows again, q quits.
-    on_terminal_hold 2 jrq env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+    on_terminal_hold 2 jrq env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
         || { cat "$WORK/menu.log"; fail "the menu failed on q"; }
-    grep -q "Which project to deploy?" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
+    grep -q "Pick a project" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
     grep -qE "↑↓/1-[0-9] pick · Enter open · r refresh · q quit" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu shows no key bar"; }
     [ "$(grep -cE "Checking [0-9]+ projects" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "r did not read the rows again"; }
@@ -2149,28 +2149,50 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.rows"; fail "the cursor left the second row after r"; }
     [ "$(live_release)" = "$live" ] || fail "q in the menu deployed"
 
-    # A deploy that works, then Enter goes back to a list with fresh rows.
-    on_terminal_hold 15 $'1\ny\n\nq' env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 \
-        "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
-    grep -q "Pick 1–" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
+    # ↓ past the last row stops on Quit, and Enter there quits.
+    on_terminal_hold 2 jjjjjjjjj env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+        || { cat "$WORK/menu.log"; fail "the menu failed on the Quit row"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "❯ " > "$WORK/menu.rows" || true
+    [[ "$(sed -n '$p' "$WORK/menu.rows")" =~ ❯\ +Quit$ ]] || { cat "$WORK/menu.rows"; fail "the cursor did not reach the Quit row"; }
+    ! grep -q "Enter run" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Enter on Quit opened an action list"; }
+    [ "$(live_release)" = "$live" ] || fail "the Quit row deployed"
+
+    # The production list: a deploy that works, Enter goes back to the list with fresh facts, b to
+    # the project list with fresh rows.
+    on_terminal_hold 15 $'1\n1\ny\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb \
+        NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
+    grep -q "r to refresh, q to quit" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
+    grep -q "fixture — production · .* → v2026.11.20000" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the production list has no title"; }
+    for label in "1  Deploy new release (1 commit)" "2  Status" "3  Check site" "4  Log" "5  Rollback…" \
+        "6  Clear cache" "7  Freeze…" "8  Down…"; do
+        grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the production list has no $label"; }
+    done
     grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
     grep -q "Deploy fixture (production) .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" \
         || fail "the menu does not ask before the deploy"
     [[ "$(live_release)" == *-v2026.11.20000-* ]] || { cat "$WORK/menu.log"; fail "the menu did not deploy on y"; }
     grep -q "deploy fixture finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu does not show the deploy ended"; }
     grep -q "Press Enter to go back" "$WORK/menu.log" || fail "the menu does not wait for Enter after the deploy"
-    [ "$(grep -c "Pick 1–" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "the list did not come back after the deploy"; }
+    [ "$(grep -c "b to go back, q to quit" "$WORK/menu.log")" -eq 2 ] \
+        || { cat "$WORK/menu.log"; fail "the action list did not come back after the deploy"; }
+    grep -qF "1  Redeploy (up to date)" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the action list after the deploy has old facts"; }
+    [ "$(grep -c "r to refresh, q to quit" "$WORK/menu.log")" -eq 2 ] \
+        || { cat "$WORK/menu.log"; fail "b did not go back to the project list"; }
     grep -qE "1  fixture +v2026\.11\.20000 +up to date" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the list after the deploy has old rows"; }
 
-    # A failed deploy keeps the menu.
+    # A failed deploy keeps the menu; a frozen project shows Unfreeze, and it unfreezes.
     deploy fixture freeze "menu fail" > /dev/null
-    on_terminal_hold 10 $'1\ny\n\nq' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+    on_terminal_hold 10 $'1\n1\n\n7\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
-    deploy fixture unfreeze > /dev/null
-    grep -q "deploy fixture failed with exit code 1" "$WORK/menu.log" \
+    grep -q "deploy fixture --force failed with exit code 1" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed"; }
-    [ "$(grep -c "Pick 1–" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "the list did not come back after a failed deploy"; }
+    grep -qF "7  Unfreeze" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a frozen project shows no Unfreeze"; }
+    grep -q "deploy fixture unfreeze finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Unfreeze did not run"; }
+    [ ! -e "$BASE/.frozen" ] || fail "Unfreeze in the menu left the project frozen"
+    [ "$(grep -cF "7  Freeze…" "$WORK/menu.log")" -eq 1 ] || { cat "$WORK/menu.log"; fail "the list after Unfreeze shows no Freeze"; }
+    deploy fixture unfreeze > /dev/null 2>&1 || true
 
     # s1 follows feature/x; s2 and the new s3 are free.
     cp "$WORK/projects/fixture.env" "$WORK/fixture.env"
@@ -2178,28 +2200,54 @@ if command -v script > /dev/null; then
     [ ! -e "$SLOT/BRANCH" ] || mv "$SLOT/BRANCH" "$WORK/s1.branch"
     [ ! -e "$SLOT2/BRANCH" ] || mv "$SLOT2/BRANCH" "$WORK/s2.branch"
     printf 'feature/x\n' > "$SLOT/BRANCH"
-    on_terminal_hold 2 $'3\nn\nq' env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
+    # The engine list: 2 runs its log, then q quits.
+    on_terminal_hold 4 $'4\n2\n\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
         > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
-    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "^ +(❯ )?[0-9 ] " > "$WORK/menu.rows"
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    grep -E "^ +(❯ )?[0-9 ] " "$WORK/menu.plain" > "$WORK/menu.rows"
     grep -qE "^ +❯ 1  fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
     [[ "$(sed -n 2p "$WORK/menu.rows")" =~ ^\ +2\ \ ├\ s1\ +feature/x\  ]] \
         || { cat "$WORK/menu.rows"; fail "s1 is not under fixture"; }
-    [[ "$(sed -n 3p "$WORK/menu.rows")" =~ ^\ +└\ s2,\ s3\ +free\ *$ ]] \
-        || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one leaf"; }
-    [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +3\ \ release-switch\  ]] \
-        || { cat "$WORK/menu.rows"; fail "the engine is not number 3"; }
-    # Works with or without an upstream branch for the engine.
-    grep -q "Update the engine" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "key 3 skipped the free leaf wrongly"; }
-    grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "n on the engine row did not stop"; }
-    on_terminal_hold 2 $'2\nn\nq' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
-        || { cat "$WORK/menu.log"; fail "the numbered tree menu failed"; }
-    grep -q "Deploy fixture s1 (staging) feature/x? \[y/N\]" "$WORK/menu.log" \
-        || { cat "$WORK/menu.log"; fail "the menu does not name the slot in its question"; }
-    rm "$SLOT/BRANCH"
+    [[ "$(sed -n 3p "$WORK/menu.rows")" =~ ^\ +3\ \ └\ s2,\ s3\ +free\ *$ ]] \
+        || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one numbered leaf"; }
+    [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +4\ \ release-switch\  ]] \
+        || { cat "$WORK/menu.rows"; fail "the engine is not number 4"; }
+    [[ "$(sed -n 5p "$WORK/menu.rows")" =~ ^\ +Quit$ ]] || { cat "$WORK/menu.rows"; fail "Quit is not the last row"; }
+    grep -q "release-switch — engine" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "key 4 did not open the engine list"; }
+    grep -qE "1  Update engine" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has no Update engine"; }
+    grep -qE "❯ 2  Log" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has no Log"; }
+    grep -qE "\s+Back$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has no Back row"; }
+    grep -q "↑↓/1-2 pick · Enter run · b back · q quit" "$WORK/menu.plain" \
+        || { cat "$WORK/menu.plain"; fail "the engine list shows no key bar"; }
+    grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
+
+    # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
+    on_terminal_hold 6 $'2\n1\nn\n\n5\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
+    grep -q "fixture s1 — staging · feature/x" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no title"; }
+    for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Copy data from production…" "5  Status" \
+        "6  Log" "7  Rollback…" "8  Down…" "9  Free slot"; do
+        grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no $label"; }
+    done
+    grep -q "Build it? \[y/N\]" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not ask"; }
+    grep -q "deploy fixture@s1 --force finished" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not run deploy --force"; }
+    grep -qE "deploy fixture@s1 status (finished|failed)" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "Status in the slot list did not run"; }
+
+    # The free leaf asks for a branch: empty does nothing, a name runs staging checkout.
+    on_terminal_hold 6 $'3\n\n3\nno-such-branch\n\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the free leaf failed"; }
+    grep -q "Check out into s2 of fixture" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf has no title"; }
+    grep -q "Branch, or #N for a pull request:" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf does not ask for a branch"; }
+    grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "an empty branch did something"; }
+    grep -q "deploy staging fixture checkout no-such-branch failed" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the free leaf did not run staging checkout"; }
+    rm -f "$SLOT/BRANCH" "$SLOT2/BRANCH"
     [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
     [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
     mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q did nothing; the numbered list deployed fixture and came back with fresh rows, also after a failed deploy; slots hang under fixture with free ones in one leaf that numbers skip; the question names production or the slot"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout"
 else
     check "skipped: no script command to make a terminal"
 fi

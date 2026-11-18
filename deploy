@@ -58,6 +58,7 @@ RELEASE_DIR=""
 RELEASE_NAME=""
 SHARED=()
 COPY_FROM_LIVE=()
+CLEAR_PATHS=()
 
 # For deploy.log: what runs, on which release, and the stage it has reached.
 ACTION=""
@@ -1207,7 +1208,7 @@ conf_clashes() (
     done
     for conf_name in $(compgen -v); do
         case "$START_VARS$conf_list" in *" $conf_name "*) continue ;; esac
-        case "$conf_name" in conf_* | SHARED | COPY_FROM_LIVE | BASH_REMATCH | PIPESTATUS) continue ;; esac
+        case "$conf_name" in conf_* | SHARED | COPY_FROM_LIVE | CLEAR_PATHS | BASH_REMATCH | PIPESTATUS) continue ;; esac
         conf_list="$conf_list$conf_name "
     done
 
@@ -1245,6 +1246,7 @@ load_conf() {
 
     SHARED=()
     COPY_FROM_LIVE=()
+    CLEAR_PATHS=()
     unset -f preflight backup build verify after_switch failed after_rollback
 
     # shellcheck source=/dev/null
@@ -1390,6 +1392,28 @@ check_shared_path() {
     case "/$1/" in
         //* | */../*) fail "SHARED path '$1' must stay inside the release: no leading / and no .." ;;
     esac
+}
+
+# Deletes CLEAR_PATHS (e.g. tests) from the new release. Checks every path before deleting any.
+# deploy.conf and .git stay: later commands read them from the release.
+clear_paths() {
+    local path
+
+    for path in ${CLEAR_PATHS[@]+"${CLEAR_PATHS[@]}"}; do
+        case "/$path/" in
+            //) fail "CLEAR_PATHS path '' is empty" ;;
+            //* | */../* | */./*)
+                fail "CLEAR_PATHS path '$path' must stay inside the release: no leading /, . or .." ;;
+        esac
+        case "${path%%/*}" in
+            deploy.conf | .git)
+                fail "CLEAR_PATHS path '$path' is refused: the engine reads deploy.conf and .git later" ;;
+        esac
+    done
+
+    for path in ${CLEAR_PATHS[@]+"${CLEAR_PATHS[@]}"}; do
+        rm -rf "${RELEASE_DIR:?}/$path"
+    done
 }
 
 link_shared() {
@@ -1870,6 +1894,7 @@ deploy() {
     printf '%s\n' "$NEW_RELEASE" > "$RELEASE_DIR/RELEASE"
 
     load_conf "$RELEASE_DIR"
+    clear_paths
     link_shared
     copy_from_live
 

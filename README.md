@@ -29,8 +29,9 @@ Each project has a base folder on the server:
    The build runs under the final name, as Laravel caches keep absolute paths; the `.building`
    file goes right before the switch. A commit under 5 minutes old with no release tag yet, in a repo
    that has release tags, waits up to `RELEASE_WAIT` seconds for its tag (see below);
-5. links the project's `SHARED` paths from `shared/` into the release, and copies its
-   `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
+5. deletes the project's `CLEAR_PATHS` (like `tests`) from the release, links its `SHARED` paths
+   from `shared/` into the release, and copies its `COPY_FROM_LIVE` paths (like `vendor`) from the
+   live release, so the build only updates them;
 6. runs the project's `preflight`, `backup`, `build` and `verify` steps there;
 7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD`, the web OPcache reset (see
    [OPcache](#opcache)) and `after_switch`;
@@ -536,6 +537,12 @@ SHARED=(.env storage database/database.sqlite)
 # skipped.
 COPY_FROM_LIVE=(vendor)
 
+# Optional. Paths deleted from each new release right after the clone, before anything else, so
+# releases do not carry files only CI needs. A missing path is skipped. Quote one with a space.
+# A leading /, . or .. is refused, and so are deploy.conf and .git: the engine reads both from
+# releases later (the release's commit for status, rollback and the next deploy).
+CLEAR_PATHS=(tests .github)
+
 # Optional. Stop before building, e.g. when .env points at the wrong host.
 preflight() {
     grep -q '^APP_URL=https://example.com' .env
@@ -622,7 +629,7 @@ To undo a migration, roll back and load the dump of the release that ran it:
 Names of the engine are reserved. `deploy.conf` may read engine variables, but a function with the
 name of an engine function (`fail`, `say`, `prune`, ...) or a top-level change to an engine
 variable (`KEEP_RELEASES`, `DEPLOY_BASE`, ...) stops the deploy before any step, with the names
-to change. `SHARED` and `COPY_FROM_LIVE` are the only engine variables it sets.
+to change. `SHARED`, `COPY_FROM_LIVE` and `CLEAR_PATHS` are the only engine variables it sets.
 
 The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMPOSER_BIN`,
 `DEPLOY_SLOT` and `DEPLOY_HOST`, and these details of the run (also in `NOTIFY_CMD`). They are empty

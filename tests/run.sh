@@ -249,7 +249,9 @@ serves "$first" || fail "server does not show $first"
 [ -L "$BASE/current/data" ] || fail "data/ is not linked from shared/"
 [ ! -e "$BASE/shared/data/failed" ] || fail "failed ran after a good deploy"
 [ "$(cat "$BASE/shared/data/backups")" = "$first" ] || fail "backup did not run once in $first"
-check "live: $first; backup ran before build; after_switch ran; data/ is shared; failed did not run"
+[ ! -e "$BASE/current/tests" ] && [ ! -e "$BASE/current/dev notes" ] || fail "CLEAR_PATHS are still in $first"
+[ -f "$BASE/current/deploy.conf" ] && [ -d "$BASE/current/public" ] || fail "CLEAR_PATHS deleted more than its paths"
+check "live: $first; backup ran before build; after_switch ran; data/ is shared; failed did not run; CLEAR_PATHS are gone"
 
 sleep 1
 step "Second deploy, of a new tagged commit"
@@ -2230,5 +2232,23 @@ for bad in '../outside' '/etc' 'data/../../outside'; do
     [ "$(readlink "$WORK/spaces/current")" = "$live" ] || fail "a refused SHARED path $bad changed the live release"
 done
 check "init and deploy handle a SHARED path with a space; ../outside, /etc and data/../../outside are refused"
+
+step "CLEAR_PATHS refuses deploy.conf, .git, a leading /, . and .. before deleting anything"
+for bad in 'deploy.conf' '.git' '.git/hooks' '/etc' '../outside' 'tests/../deploy.conf' '.' ''; do
+    sed -i.bak -e 's#^SHARED=.*#SHARED=(.env data "user files")#' \
+        -e "s#^CLEAR_PATHS=.*#CLEAR_PATHS=(tests '$bad')#" "$SPACES/deploy.conf"
+    rm "$SPACES/deploy.conf.bak"
+    git -C "$SPACES" -c user.name=test -c user.email=test@example.com commit --quiet -am "clear $bad"
+    git -C "$SPACES" push --quiet origin HEAD:spaces
+    live="$(readlink "$WORK/spaces/current")"
+    if deploy spaces > /dev/null 2> "$WORK/clear.err"; then
+        fail "a deploy with CLEAR_PATHS path '$bad' succeeded"
+    fi
+    grep -qF "CLEAR_PATHS path '$bad'" "$WORK/clear.err" \
+        || { cat "$WORK/clear.err"; fail "no message for CLEAR_PATHS path '$bad'"; }
+    [ "$(readlink "$WORK/spaces/current")" = "$live" ] || fail "a refused CLEAR_PATHS path '$bad' changed the live release"
+    [ -f "$WORK/spaces/current/deploy.conf" ] || fail "a refused CLEAR_PATHS path '$bad' deleted the live deploy.conf"
+done
+check "deploy.conf, .git, .git/hooks, /etc, ../outside, tests/../deploy.conf, . and an empty path are refused; the live release stays"
 
 printf '\nAll deploy tests passed.\n'

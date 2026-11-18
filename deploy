@@ -7,7 +7,7 @@
 #                     | unfreeze | status | check | log [count] | path [--base] | rollback [name] [--yes]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
 #                     | free | copy-from <project> [--yes] [path ...] | help [command]]
-#   deploy self-update | self [log [count]] | --version
+#   deploy self-update | self [--no-wait | log [count]] | --version
 #   deploy [project] <command> --help
 
 set -euo pipefail
@@ -3353,11 +3353,18 @@ EOF
 }
 
 # Shows the values in effect, so env overrides (e.g. from a shell profile) are visible.
-# Updates the engine itself: a fast-forward pull of its own checkout.
+# Updates the engine itself: a fast-forward pull of its own checkout. Then waits for the new commit's
+# release tag like a deploy, unless $1 is 1, so the version line and the notes show it.
 self_update() {
-    local before after from_version tags
+    local before after from_version tags REPO_URL
 
     git -C "$ENGINE_DIR" rev-parse --git-dir > /dev/null 2>&1 || fail "$ENGINE_DIR is not a git checkout"
+    # No project here: only the environment sets it.
+    RELEASE_WAIT="${RELEASE_WAIT:-90}"
+    case "$RELEASE_WAIT" in
+        '' | *[!0-9]*) fail "RELEASE_WAIT must be a whole number of seconds, not '$RELEASE_WAIT'" ;;
+    esac
+    RELEASE_WAIT=$((10#$RELEASE_WAIT))
     before="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
     from_version="$(engine_version)"
 
@@ -3370,6 +3377,14 @@ self_update() {
         say "Already up to date ($(engine_version))"
 
         return
+    fi
+
+    REPO_URL="$(git -C "$ENGINE_DIR" ls-remote --get-url)"
+    wait_release_tag "$ENGINE_DIR" "$1"
+
+    if [ -n "$TAG" ] && [ -z "$(git -C "$ENGINE_DIR" tag --list "$TAG")" ]; then
+        git -C "$ENGINE_DIR" fetch --quiet "$REPO_URL" "refs/tags/$TAG:refs/tags/$TAG" \
+            || warn "could not fetch the release tag $TAG"
     fi
 
     say "Updated $from_version → $(engine_version)"
@@ -3732,8 +3747,11 @@ EOF
             ;;
         self)
             cat <<EOF
-  self-update, self          Update the engine: git pull in $ENGINE_DIR, then show the new
-                             versions and their release notes
+  self-update, self [--no-wait]
+                             Update the engine: git pull in $ENGINE_DIR, then show the new
+                             versions and their release notes. A commit under 5 minutes old
+                             waits up to RELEASE_WAIT seconds (from the environment) for its
+                             release tag, unless --no-wait
   self log [count]           The engine's last commits (10 by default), and ones not pulled yet
 EOF
             ;;
@@ -4061,12 +4079,16 @@ main() {
     fi
 
     if [ "${1:-}" = self-update ] || [ "${1:-}" = self ]; then
-        case "${2:-}" in
+        case "${2:-}${3:+ $3}" in
             "" | update)
                 intro "self update"
-                self_update
+                self_update 0
                 ;;
-            log) report "self log" self_log "${3:-}" ;;
+            --no-wait | "update --no-wait")
+                intro "self update"
+                self_update 1
+                ;;
+            log | "log "*) report "self log" self_log "${3:-}" ;;
             *) fail "unknown command: deploy $1 $2 (try: deploy self, deploy self log [count])" ;;
         esac
 

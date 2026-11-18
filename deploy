@@ -202,13 +202,32 @@ ask_yes() {
     local answer
 
     printf '%s' "$(say "$1 [y/N] ")"
+    before_answer
     read -r answer || answer=""
+    after_answer
 
     case "$answer" in
         y | Y | yes | YES) return 0 ;;
     esac
 
     return 1
+}
+
+# Inside the arrow-key menu (DEPLOY_MENU_TTY holds the normal terminal settings) the terminal has
+# no echo between questions, so stray keys never show. Before an answer: drops the keys pressed since
+# the last question, so a stray Enter or arrow is not read as the answer, and turns echo back on.
+before_answer() {
+    [ -n "${DEPLOY_MENU_TTY:-}" ] && is_terminal || return 0
+    printf '\033[?25h'
+    stty -echo -icanon min 0 time 0 2>/dev/null || return 0
+    cat > /dev/null 2>&1 || true
+    stty "$DEPLOY_MENU_TTY" 2>/dev/null || true
+}
+
+# After an answer inside the arrow-key menu: echo off again.
+after_answer() {
+    [ -n "${DEPLOY_MENU_TTY:-}" ] && is_terminal || return 0
+    stty -echo -icanon min 1 time 0 2>/dev/null || true
 }
 
 # Before a risky change: on a terminal and without --yes, shows the lines after $1, asks $1 and
@@ -2522,7 +2541,7 @@ pad() {
 }
 
 # Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1. Production names are bold; slots
-# hang under their project on dim tree lines. The Quit row is dim.
+# hang under their project on dim tree lines. The Recheck and Quit rows are dim.
 menu_line() {
     local i="$1" mark="  " color="" name version pending site problems
     name="${M_NAME[$i]}"
@@ -2541,7 +2560,7 @@ menu_line() {
         color="$C_BOLD"
     fi
 
-    if [ "${M_TARGET[$i]}" = quit ]; then
+    if [ "${M_TARGET[$i]}" = quit ] || [ "${M_TARGET[$i]}" = recheck ]; then
         printf '%s%s%s  %s%s' "$mark" "$C_DIM" "$(pad "" ${#M_NUMBERED})" "$name" "$C_OFF"
 
         return
@@ -2575,7 +2594,7 @@ menu_draw() {
 # Reads one key into M_KEY: up (↑, k), down (↓, j), left (←), enter, esc, q (also Ctrl-D and the end of
 # input), or the key itself.
 menu_key() {
-    local rest wait=1
+    local rest key wait=1
     # bash 3.2 reads whole seconds only, so Esc on its own waits a second there.
     [ "${BASH_VERSINFO[0]}" -lt 4 ] || wait=0.1
 
@@ -2591,7 +2610,14 @@ menu_key() {
                 '[B' | OB) M_KEY=down ;;
                 '[D' | OD) M_KEY=left ;;
                 '') M_KEY=esc ;;
-                *) M_KEY=other ;;
+                *)
+                    # The rest of a longer sequence (like Ctrl-↓, ESC [1;5B), so it is not read as
+                    # keys.
+                    while [[ "$rest" != *[A-Za-z~] ]] && IFS= read -rsn1 -t "$wait" key; do
+                        rest+="$key"
+                    done
+                    M_KEY=other
+                    ;;
             esac
             ;;
         '') M_KEY=enter ;;
@@ -2601,15 +2627,21 @@ menu_key() {
     esac
 }
 
-# Hides the cursor and keeps the terminal settings for menu_restore.
+# Hides the cursor and turns echo and line input off until menu_restore, so keys pressed between
+# reads never show. Keeps the normal settings for menu_restore and for questions (before_answer).
 menu_raw() {
-    MENU_STTY="$(stty -g 2>/dev/null)" || MENU_STTY=""
-    [ -n "$MENU_STTY" ] || MENU_STTY="sane"
+    if [ -z "$MENU_STTY" ]; then
+        MENU_STTY="$(stty -g 2>/dev/null)" || MENU_STTY=""
+        [ -n "$MENU_STTY" ] || MENU_STTY="sane"
+        DEPLOY_MENU_TTY="$MENU_STTY"
+        export DEPLOY_MENU_TTY
+    fi
+    stty -echo -icanon min 1 time 0 2>/dev/null || true
     printf '\033[?25l'
 }
 
 # Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR. Sets
-# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc).
+# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). The terminal stays without echo after it.
 menu_keys() {
     menu_raw
     menu_draw "$M_CUR"
@@ -2639,7 +2671,7 @@ menu_keys() {
         menu_draw "$M_CUR"
     done
 
-    menu_restore
+    printf '\033[?25h'
 }
 
 # Without cursor control: a numbered list and "Pick 1–N". Sets M_CUR and M_DO like menu_keys; q, an
@@ -2648,7 +2680,10 @@ menu_numbers() {
     local i answer
 
     for ((i = 0; i < M_COUNT; i++)); do
-        [ "${M_TARGET[$i]}" = quit ] || printf '%s\n' "$(menu_line "$i")"
+        case "${M_TARGET[$i]}" in
+            quit | recheck) ;;
+            *) printf '%s\n' "$(menu_line "$i")" ;;
+        esac
     done | rail
 
     while :; do
@@ -2682,7 +2717,7 @@ menu_numbers() {
 }
 
 # Reads the menu rows: one per project, its slots in use as a tree under it, one leaf for its free
-# slots, the engine, read in parallel, and Quit.
+# slots, the engine, read in parallel, then Recheck projects and Quit.
 menu_read() {
     local targets=() groups=() subs=() frees=() pships=() gprojects=() project slot free group=-1 i row width
     local rows="" ship target name version pending site problems engine sub
@@ -2740,11 +2775,12 @@ menu_read() {
     done
 
     # Projects with something to ship first, else in their order; slots under their project in slot
-    # order, free ones last; the engine, then Quit, last.
+    # order, free ones last; the engine, Recheck projects and Quit last.
     rows="$(printf '%s' "$rows" | sort -t $'\t' -k1,1r -k2,2n -k3,3n)"
     engine="$(cat "$MENU_TMP/engine")"
     [ -n "$engine" ] || engine="$(printf '0\tself\trelease-switch\t%s\t-\t-\tcannot read' "$(engine_version)")"
     rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"$engine"
+    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\trecheck\tRecheck projects\t-\t-\t-\t-'
     rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\tquit\tQuit\t-\t-\t-\t-'
     rm -rf "$MENU_TMP"
     MENU_TMP=""
@@ -2776,12 +2812,13 @@ menu_read() {
         esac
 
         M_SEL+=("$i")
-        if [ "${M_TARGET[$i]}" = quit ]; then
-            M_NUM+=("")
-        else
-            M_NUMBERED=$((M_NUMBERED + 1))
-            M_NUM+=("$M_NUMBERED")
-        fi
+        case "${M_TARGET[$i]}" in
+            quit | recheck) M_NUM+=("") ;;
+            *)
+                M_NUMBERED=$((M_NUMBERED + 1))
+                M_NUM+=("$M_NUMBERED")
+                ;;
+        esac
     done
     M_PICKS="${#M_SEL[@]}"
 
@@ -3001,7 +3038,7 @@ menu_action_keys() {
         menu_action_draw "$A_CUR"
     done
 
-    menu_restore
+    printf '\033[?25h'
 }
 
 # The action list without cursor control: numbered, without Back. Sets A_CUR and A_DO like
@@ -3046,7 +3083,9 @@ menu_action_numbers() {
 # Asks $1 and reads one line into M_ANSWER. The end of input quits.
 menu_ask() {
     printf '%s' "$(say "$1")"
+    before_answer
     read -r M_ANSWER || exit 0
+    after_answer
 }
 
 # Runs `deploy $@` as a child process, so a failed run keeps the menu. Sets M_STATUS, and M_RAN to 1.
@@ -3075,7 +3114,9 @@ menu_done() {
         *) warn "deploy $* failed with exit code $M_STATUS" ;;
     esac
     printf '%s' "$(say "Press Enter to go back ")"
+    before_answer
     read -r answer || exit 0
+    after_answer
 }
 
 # Runs `deploy $@` and waits for Enter.
@@ -3207,6 +3248,10 @@ project_menu() {
     M_CUR=0
 
     intro ""
+    case "${TERM:-dumb}" in
+        dumb | unknown) ;;
+        *) menu_raw ;;
+    esac
 
     while :; do
         if [ "$reload" -eq 1 ]; then
@@ -3233,7 +3278,13 @@ project_menu() {
         esac
 
         last="${M_TARGET[${M_SEL[$M_CUR]}]}"
-        [ "$last" != quit ] || exit 0
+        case "$last" in
+            quit) exit 0 ;;
+            recheck)
+                reload=1
+                continue
+                ;;
+        esac
         menu_open "${M_SEL[$M_CUR]}"
         reload="$M_RAN"
     done

@@ -2115,6 +2115,50 @@ else
 fi
 
 step "A bare deploy on a terminal shows the project menu"
+# Types keys $2 into the terminal once text $1 shows in log $LOG one more time than in the pairs
+# before it, for each pair; waits 30 seconds at most for each text.
+expect_feed() {
+    local log="$1" i j seen text keys tries
+    shift
+    trap '' PIPE
+
+    for ((i = 1; i < $#; i += 2)); do
+        text="${!i}"
+        j=$((i + 1))
+        keys="${!j}"
+        seen=1
+        for ((j = 1; j < i; j += 2)); do
+            [ "${!j}" != "$text" ] || seen=$((seen + 1))
+        done
+        tries=0
+        while [ "$({ grep -oF -- "$text" "$log" || true; } | wc -l)" -lt "$seen" ] && [ "$tries" -lt 300 ]; do
+            sleep 0.1
+            tries=$((tries + 1))
+        done
+        sleep 0.3
+        printf '%s' "$keys" 2> /dev/null
+    done
+    sleep 1
+    true
+}
+# Runs the command after -- on a terminal into log $1; the pairs before -- go to expect_feed.
+on_terminal_expect() {
+    local log="$1" pairs=()
+    shift
+    while [ "$1" != -- ]; do
+        pairs+=("$1")
+        shift
+    done
+    shift
+    : > "$log"
+
+    # shellcheck disable=SC2094 # The feeder waits for what the run writes to the log.
+    if script --version > /dev/null 2>&1; then
+        expect_feed "$log" "${pairs[@]}" | script -qec "$(printf '%q ' "$@")" /dev/null >> "$log" 2>&1
+    else
+        expect_feed "$log" "${pairs[@]}" | script -q /dev/null "$@" >> "$log" 2>&1
+    fi
+}
 # The menu row of project $1, from the engine's own function.
 menu_row() {
     run bash -c '. "$1"; menu_load "$2" && menu_row' _ "$ROOT/deploy" "$1"
@@ -2157,6 +2201,18 @@ if command -v script > /dev/null; then
     ! grep -q "Enter run" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Enter on Quit opened an action list"; }
     [ "$(live_release)" = "$live" ] || fail "the Quit row deployed"
 
+    # The Recheck projects row, right above Quit, reads the rows again like r. Arrows pressed while
+    # the rows are read never show as text.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" r "Checking" $'\033[B\033[B\033[B\033[B' \
+        "Pick a project" $'jjjjjjjjk\n' "Pick a project" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on the Recheck projects row"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    [ "$(grep -cE "Checking [0-9]+ projects" "$WORK/menu.plain")" -eq 3 ] \
+        || { cat "$WORK/menu.plain"; fail "the Recheck projects row did not read the rows again"; }
+    grep -qE "❯ +Recheck projects$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the cursor did not reach Recheck projects"; }
+    ! grep -qF "[B" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "arrow keys showed as text"; }
+
     # The production list: a deploy that works, Enter goes back to the list with fresh facts, b to
     # the project list with fresh rows.
     on_terminal_hold 15 $'1\n1\ny\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb \
@@ -2194,6 +2250,15 @@ if command -v script > /dev/null; then
     [ "$(grep -cF "7  Freeze…" "$WORK/menu.log")" -eq 1 ] || { cat "$WORK/menu.log"; fail "the list after Unfreeze shows no Freeze"; }
     deploy fixture unfreeze > /dev/null 2>&1 || true
 
+    # Keys pressed between a pick and its question are dropped, so they do not answer it: Clear
+    # cache with a stray ↓↓ and Enter still asks and runs on y.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "fixture — production" $'6\n\033[B\033[B\n' \
+        "[y/N]" $'y\n' "Press Enter to go back" $'\n' "fixture — production" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on Clear cache"; }
+    grep -q "deploy fixture cache finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Clear cache did not run"; }
+    ! grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a stray key answered the cache question"; }
+
     # s1 follows feature/x; s2 and the new s3 are free.
     cp "$WORK/projects/fixture.env" "$WORK/fixture.env"
     printf 'STAGING_SERVERS=3\n' >> "$WORK/projects/fixture.env"
@@ -2201,8 +2266,10 @@ if command -v script > /dev/null; then
     [ ! -e "$SLOT2/BRANCH" ] || mv "$SLOT2/BRANCH" "$WORK/s2.branch"
     printf 'feature/x\n' > "$SLOT/BRANCH"
     # The engine list: 2 runs its log, then q quits.
-    on_terminal_hold 4 $'4\n2\n\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
-        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'4\n' "release-switch — engine" $'2\n' "Press Enter to go back" $'\n' \
+        "release-switch — engine" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
     grep -E "^ +(❯ )?[0-9 ] " "$WORK/menu.plain" > "$WORK/menu.rows"
     grep -qE "^ +❯ 1  fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
@@ -2212,7 +2279,9 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one numbered leaf"; }
     [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +4\ \ release-switch\  ]] \
         || { cat "$WORK/menu.rows"; fail "the engine is not number 4"; }
-    [[ "$(sed -n 5p "$WORK/menu.rows")" =~ ^\ +Quit$ ]] || { cat "$WORK/menu.rows"; fail "Quit is not the last row"; }
+    [[ "$(sed -n 5p "$WORK/menu.rows")" =~ ^\ +Recheck\ projects$ ]] \
+        || { cat "$WORK/menu.rows"; fail "Recheck projects is not above Quit"; }
+    [[ "$(sed -n 6p "$WORK/menu.rows")" =~ ^\ +Quit$ ]] || { cat "$WORK/menu.rows"; fail "Quit is not the last row"; }
     grep -q "release-switch — engine" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "key 4 did not open the engine list"; }
     grep -qE "1  Update engine" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has no Update engine"; }
     grep -qE "❯ 2  Log" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has no Log"; }
@@ -2247,7 +2316,7 @@ if command -v script > /dev/null; then
     [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
     [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
     mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing, Recheck projects read the rows again and arrows never showed as text; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; stray keys before the cache question were dropped; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout"
 else
     check "skipped: no script command to make a terminal"
 fi

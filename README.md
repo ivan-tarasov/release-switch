@@ -220,6 +220,7 @@ under it as a tree:
 │    5  ├ s1            feature/search             1 commit        site ok
 │    6  └ s2, s3        free
 │    7  release-switch  v2026.11.33 → v2026.11.34  run deploy self
+│       Recheck projects
 │       Quit
 │
 │  ↑↓/1-7 pick · Enter open · r refresh · q quit
@@ -247,7 +248,7 @@ none, and the deploy waits for the tag as usual. Problems (frozen, down, lock he
 a site that does not serve the live release) show in red at the end of the row. Production names are
 bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf. Projects with
 something to ship come first, each with its slots right under it; up-to-date rows are dimmed. The dim
-`Quit` row is last.
+`Recheck projects` and `Quit` rows are last.
 
 Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its own action list:
 
@@ -269,9 +270,11 @@ stops that run and comes back to the menu; Ctrl-C in a list quits. After `deploy
 opens its own menu.
 
 `b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
-action ran and puts the cursor back on the same row. `r` reads the rows again. `q`, Ctrl-D, the
+action ran and puts the cursor back on the same row. `r` or the `Recheck projects` row reads the rows again. `q`, Ctrl-D, the
 `Quit` row or Esc in the project list quit with exit code 0. With `TERM=dumb` both lists are
 numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`.
+While the arrow-key menu is on screen, keys never echo as text, and keys pressed before a question
+(the menu's own or an action's) are dropped, so a stray arrow or Enter never answers it.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or
 fails with `name a project (…)` when there are several.
 

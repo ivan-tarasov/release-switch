@@ -1105,6 +1105,37 @@ grep -q "OPCACHE_RESET_DIR must be a folder inside the release" "$WORK/opcache.o
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "a 500, a timeout and a missing folder only warned and left no file; a path out of the release is refused"
 
+step "cache runs cache() in the live release, then resets OPcache"
+live="$(live_release)"
+rm -f "$WORK/opcache.log" "$BASE/shared/data/cache_cleared"
+OPCACHE_RESET_DIR=public deploy fixture cache > "$WORK/cache.log" 2>&1 || { cat "$WORK/cache.log"; fail "cache failed"; }
+[ "$(cat "$BASE/shared/data/cache_cleared")" = "$live" ] || fail "cache did not run cache() in $live"
+[ "$(wc -l < "$WORK/opcache.log" | tr -d ' ')" = 1 ] || fail "cache did not call the OPcache reset once"
+no_opcache_files || fail "cache left the OPcache reset file behind"
+grep -q "Cleared the cache of $live" "$WORK/cache.log" || fail "cache does not say it cleared the cache"
+! grep -q "\[y/N\]" "$WORK/cache.log" || fail "cache asked in a pipe"
+[ ! -e "$BASE/.deploy.lock" ] || fail "cache left the lock"
+deploy fixture log 1 > "$WORK/cache.log"
+grep -qE "cache +$live +ok" "$WORK/cache.log" || fail "the log has no cache line"
+rm -f "$WORK/opcache.log" "$BASE/shared/data/cache_cleared"
+FIXTURE_NO_CACHE=1 OPCACHE_RESET_DIR=public deploy fixture cache > /dev/null || fail "cache with only OPCACHE_RESET_DIR failed"
+[ "$(wc -l < "$WORK/opcache.log" | tr -d ' ')" = 1 ] || fail "cache with only OPCACHE_RESET_DIR did not reset OPcache"
+[ ! -e "$BASE/shared/data/cache_cleared" ] || fail "cache ran a cache() step that FIXTURE_NO_CACHE left out"
+if FIXTURE_NO_CACHE=1 deploy fixture cache > /dev/null 2> "$WORK/cache.err"; then
+    fail "cache with no cache() and no OPCACHE_RESET_DIR succeeded"
+fi
+grep -q "nothing to clear: deploy.conf of $live has no cache() step and OPCACHE_RESET_DIR is not set" "$WORK/cache.err" \
+    || fail "no message for cache with nothing to clear"
+grep -q "^Try: define cache() in deploy.conf, or set OPCACHE_RESET_DIR in " "$WORK/cache.err" \
+    || fail "no hint for cache with nothing to clear"
+[ ! -e "$BASE/.deploy.lock" ] || fail "a refused cache left the lock"
+if STEP_TIMEOUT=1 FIXTURE_CACHE_SLEEP=5 deploy fixture cache > /dev/null 2> "$WORK/cache.err"; then
+    fail "a cache() step past STEP_TIMEOUT succeeded"
+fi
+grep -q "cache ran past STEP_TIMEOUT (1 s)" "$WORK/cache.err" || { cat "$WORK/cache.err"; fail "no timeout message for cache()"; }
+serves "$live" || fail "server does not show $live after cache"
+check "cache ran cache() and the OPcache reset, logged it, failed with a hint when neither is set, and kept STEP_TIMEOUT"
+
 step "A rollback past a new migration warns; it never blocks"
 sleep 1
 deploy fixture --force > /dev/null || fail "a deploy before the migrations test failed"
@@ -1874,6 +1905,14 @@ grep -q "fixture@s2 is free now (it followed PR #7); deploying develop" "$WORK/s
 [ ! -e "$SLOT2/BRANCH" ] || fail "staging free kept the BRANCH file"
 deploy staging fixture@s1 copy-from fixture --yes > "$WORK/staging.log"
 grep -q "Copied into fixture@s1: data" "$WORK/staging.log" || fail "staging copy-from did not copy"
+rm -f "$SLOT/shared/data/cache_cleared"
+deploy staging fixture@s1 cache > /dev/null || fail "staging fixture@s1 cache failed"
+[ "$(cat "$SLOT/shared/data/cache_cleared")" = "$(slot_live)" ] \
+    || fail "staging cache did not run cache() in the slot's live release"
+[ ! -e "$BASE/shared/data/cache_cleared" ] || fail "staging cache ran cache() in production"
+rm -f "$SLOT/shared/data/cache_cleared"
+deploy fixture@s1 cache > /dev/null || fail "fixture@s1 cache failed"
+[ -e "$SLOT/shared/data/cache_cleared" ] || fail "fixture@s1 cache did not run cache()"
 [ "$(deploy staging fixture@s1 path)" = "$(deploy path fixture@s1)" ] || fail "staging path does not print the slot's release"
 deploy fixture@s1 status | grep -v -e deployed -e "^Disk:" > "$WORK/status.log"
 deploy staging fixture@s1 | grep -v -e deployed -e "^Disk:" > "$WORK/staging.log"
@@ -1994,7 +2033,7 @@ else
     check "skipped: no script command to make a terminal"
 fi
 
-step "rollback, down and deploy --force ask on a terminal"
+step "rollback, down, cache and deploy --force ask on a terminal"
 # Like on_terminal, but holds the terminal open for $1 seconds after the answer, so a deploy can
 # build. A run that ends before the answer, as with --yes, is fine.
 on_terminal_hold() {
@@ -2049,6 +2088,18 @@ if command -v script > /dev/null; then
     [ "$(sed -n 2p "$BASE/.down")" = "" ] || fail "down --yes took --yes as the reason"
     deploy fixture up > /dev/null
 
+    rm -f "$BASE/shared/data/cache_cleared" "$SLOT/shared/data/cache_cleared"
+    ask_run n fixture cache
+    grep -q "Clearing the cache of fixture, live release $live" "$WORK/ask.log" || fail "cache does not show the release"
+    grep -q "Clear the cache? \[y/N\]" "$WORK/ask.log" || fail "cache does not ask on a terminal"
+    [ ! -e "$BASE/shared/data/cache_cleared" ] || fail "cache ran cache() after n"
+    ask_run "" fixture cache --yes
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "cache --yes asked"
+    [ -e "$BASE/shared/data/cache_cleared" ] || fail "cache --yes did not run cache()"
+    ask_run "" fixture@s1 cache
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "cache asked on a slot"
+    [ -e "$SLOT/shared/data/cache_cleared" ] || fail "cache on a slot did not run cache()"
+
     ask_run n fixture --force
     grep -qE -- "--force (rebuilds [0-9a-f]+, which $live already runs|deploys [0-9a-f]+): " "$WORK/ask.log" \
         || fail "deploy --force does not show the commit it rebuilds"
@@ -2058,7 +2109,7 @@ if command -v script > /dev/null; then
     ask_run "" fixture --force --yes
     ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "deploy --force --yes asked"
     [ "$(live_release)" != "$live" ] || fail "deploy --force --yes did not deploy"
-    check "on a terminal rollback, down and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes did not ask; a pipe was not asked"
+    check "on a terminal rollback, down, cache and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes and a slot did not ask; a pipe was not asked"
 else
     check "skipped: no script command to make a terminal"
 fi

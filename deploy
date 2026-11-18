@@ -157,9 +157,11 @@ warn() {
     fi
 }
 
+# Stops with error $1. $2, if set, is the next thing to try; it stays out of FAIL_MESSAGE (alerts).
 fail() {
-    FAIL_MESSAGE="$(redact "$*")"
+    FAIL_MESSAGE="$(redact "$1")"
     error_line "$FAIL_MESSAGE"
+    [ -z "${2:-}" ] || hint_line "$(redact "$2")"
 
     exit 1
 }
@@ -170,6 +172,25 @@ error_line() {
     else
         printf 'deploy: %s\n' "$1" >&2
     fi
+}
+
+hint_line() {
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s│%s  Try: %s\n' "$C_DIM" "$C_OFF" "$1" >&2
+    else
+        printf 'Try: %s\n' "$1" >&2
+    fi
+}
+
+# The hint after a failed site check: the URL and what it answered.
+check_hint() {
+    printf 'open %s: it answered %s with version %s, not %s' "$CHECK_URL" "${PROBE_STATUS:-nothing}" \
+        "${PROBE_VERSION:-none}" "$(release_version "$1")"
+}
+
+# The hint after a failed clone or fetch.
+clone_hint() {
+    printf 'git ls-remote %s, and check REPO_URL, the SSH key or host alias, and the network' "$REPO_URL"
 }
 
 is_terminal() {
@@ -590,7 +611,10 @@ acquire_lock() {
         if ! mkdir "$LOCK_DIR" 2>/dev/null; then
             LOCK_DIR=""
             release_lock_break
-            fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not"
+            local pid
+            read -r pid _ <<< "$(lock_owner)"
+            fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not" \
+                "deploy ${PROJECT:+$PROJECT }status${pid:+, or wait for PID $pid}"
         fi
 
         release_lock_break
@@ -919,7 +943,7 @@ find_release() {
     [ -z "$exact" ] || matches="${exact%$'\n'}"
     count="$(printf '%s' "$matches" | grep -c . || true)"
 
-    [ "$count" -gt 0 ] || fail "no release matches '$1' (see: deploy status)"
+    [ "$count" -gt 0 ] || fail "no release matches '$1'" "deploy ${PROJECT:+$PROJECT }status (it lists the releases)"
     [ "$count" -eq 1 ] || fail "'$1' matches $count releases; use more of the name"
 
     printf '%s\n' "$matches"
@@ -1239,7 +1263,7 @@ conf_clashes() (
 # Reads deploy.conf of a release: SHARED and the step functions.
 load_conf() {
     local clashes
-    [ -f "$1/deploy.conf" ] || fail "$DEPLOY_BRANCH has no deploy.conf"
+    [ -f "$1/deploy.conf" ] || fail "$DEPLOY_BRANCH has no deploy.conf" "add one to the repo, see README.md#deployconf"
 
     clashes="$(conf_clashes "$1/deploy.conf")"
     [ -z "$clashes" ] \
@@ -1671,7 +1695,7 @@ maintenance_up() {
     if [ -n "$CHECK_URL" ]; then
         say "Checking $CHECK_URL"
         STAGE=check
-        release_is_serving "$LOG_RELEASE" || fail "up ran, but the site does not serve $LOG_RELEASE"
+        release_is_serving "$LOG_RELEASE" || fail "up ran, but the site does not serve $LOG_RELEASE" "$(check_hint "$LOG_RELEASE")"
     fi
 
     log_event up "$LOG_RELEASE" ok
@@ -1682,7 +1706,7 @@ maintenance_up() {
 refuse_if_frozen() {
     local text
     text="$(frozen_text)"
-    [ -z "$text" ] || fail "deploys are frozen $text (run: deploy ${PROJECT:+$PROJECT }unfreeze)"
+    [ -z "$text" ] || fail "deploys are frozen $text" "deploy ${PROJECT:+$PROJECT }unfreeze"
 }
 
 freeze() {
@@ -1831,18 +1855,18 @@ deploy() {
             && git -C "$DEPLOY_BASE/releases/.building-$stamp" fetch --quiet origin "$(branch_ref)" \
             && git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach FETCH_HEAD; } 2>&1)"; then
             [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
-            fail "could not fetch PR #$SLOT_PR from $REPO_URL"
+            fail "could not fetch PR #$SLOT_PR from $REPO_URL" "$(clone_hint)"
         fi
     elif [ -z "$ref" ]; then
         # Git may print the URL with its token, so its errors are shown redacted.
         if ! err="$(git clone --quiet --depth 1 --branch "$DEPLOY_BRANCH" "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>&1)"; then
             [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
-            fail "could not clone $REPO_URL"
+            fail "could not clone $REPO_URL" "$(clone_hint)"
         fi
     else
         # Any tag, branch or commit: the whole history, with file contents fetched on checkout.
         git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>/dev/null \
-            || fail "could not clone $REPO_URL"
+            || fail "could not clone $REPO_URL" "$(clone_hint)"
         git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "$ref" 2>/dev/null \
             || git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "origin/$ref" 2>/dev/null \
             || fail "no tag, branch or commit $ref in the repo"
@@ -1928,7 +1952,8 @@ deploy() {
                 || warn "could not set $NEW_RELEASE aside"
         fi
 
-        fail "the check failed; ${PREVIOUS_RELEASE:-$NEW_RELEASE, the only release,} is live (data changes stay applied)"
+        fail "the check failed; ${PREVIOUS_RELEASE:-$NEW_RELEASE, the only release,} is live (data changes stay applied)" \
+            "$(check_hint "$NEW_RELEASE")"
     fi
 
     prune
@@ -2094,7 +2119,7 @@ rollback() {
         warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"
     else
         say "Checking $CHECK_URL"
-        release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet"
+        release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet" "$(check_hint "$target")"
     fi
     log_event rollback "$target" "ok, from $live"
     ACTION=""
@@ -3397,7 +3422,8 @@ init() {
         fail "unknown option $2"
     fi
 
-    [ -f "$checkout/deploy.conf" ] || fail "$checkout has no deploy.conf; update it to a commit that has one"
+    [ -f "$checkout/deploy.conf" ] || fail "$checkout has no deploy.conf; update it to a commit that has one" \
+        "add one to the repo, see README.md#deployconf"
 
     resolve_base
 

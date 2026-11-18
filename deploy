@@ -2552,30 +2552,31 @@ menu_line() {
         "$(pad "$site" "$W_SITE")" "$C_OFF" "${problems:+  $C_RED}" "$problems" "${problems:+$C_OFF}"
 }
 
-# Prints the menu rows on the rail, with ❯ at pick $1, then the key hint.
+# Prints the menu rows on the rail, with ❯ at pick $1, then the key bar.
 menu_draw() {
-    local i prefix="  "
+    local i prefix="  " last="$M_PICKS"
     [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+    [ "$last" -le 9 ] || last=9
 
     for ((i = 0; i < M_COUNT; i++)); do
         printf '\r\033[K%s%s\n' "$prefix" "$(menu_line "$i" $((i == M_SEL[$1])))"
     done
 
-    printf '\r\033[K%s\n\r\033[K%s%s↑↓ or 1–%s to pick · enter to deploy · q to quit%s\n' "${prefix%  }" \
-        "$prefix" "$C_DIM" "$M_PICKS" "$C_OFF"
+    printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter open · r refresh · q quit%s\n' "${prefix%  }" \
+        "$prefix" "$C_DIM" "$last" "$C_OFF"
 }
 
-# Lets the user pick a row with the arrow keys, j/k, a number and enter. Sets M_PICK to the line, or
-# exits on q or Esc. Free slots cannot be picked.
+# Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR. Sets
+# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). Free slots cannot be picked.
 menu_keys() {
-    local key rest wait=1 pick=0
+    local key rest wait=1
     # bash 3.2 reads whole seconds only, so Esc on its own waits a second there.
     [ "${BASH_VERSINFO[0]}" -lt 4 ] || wait=0.1
 
     MENU_STTY="$(stty -g 2>/dev/null)" || MENU_STTY=""
     [ -n "$MENU_STTY" ] || MENU_STTY="sane"
     printf '\033[?25l'
-    menu_draw "$pick"
+    menu_draw "$M_CUR"
 
     while :; do
         IFS= read -rsn1 key || key=q
@@ -2594,27 +2595,32 @@ menu_keys() {
         esac
 
         case "$key" in
-            k) [ "$pick" -eq 0 ] || pick=$((pick - 1)) ;;
-            j) [ "$pick" -eq $((M_PICKS - 1)) ] || pick=$((pick + 1)) ;;
-            [1-9]) [ "$key" -gt "$M_PICKS" ] || pick=$((key - 1)) ;;
-            '') break ;;
-            q | Q)
-                menu_restore
-                say "Nothing done"
-                exit 0
+            k) [ "$M_CUR" -eq 0 ] || M_CUR=$((M_CUR - 1)) ;;
+            j) [ "$M_CUR" -eq $((M_PICKS - 1)) ] || M_CUR=$((M_CUR + 1)) ;;
+            [1-9]) [ "$key" -gt "$M_PICKS" ] || M_CUR=$((key - 1)) ;;
+            '')
+                M_DO=open
+                break
+                ;;
+            r | R)
+                M_DO=refresh
+                break
+                ;;
+            q | Q | $'\004')
+                M_DO=quit
+                break
                 ;;
         esac
 
         printf '\033[%sA' $((M_COUNT + 2))
-        menu_draw "$pick"
+        menu_draw "$M_CUR"
     done
 
     menu_restore
-    M_PICK="${M_SEL[$pick]}"
 }
 
-# Without cursor control: a numbered list and "Pick 1–N:". Sets M_PICK to the line, or exits on q, an empty
-# answer or the end of input.
+# Without cursor control: a numbered list and "Pick 1–N". Sets M_CUR and M_DO like menu_keys; q, an
+# empty answer and the end of input quit.
 menu_numbers() {
     local i answer
 
@@ -2623,18 +2629,25 @@ menu_numbers() {
     done | rail
 
     while :; do
-        printf '%s' "$(say "Pick 1–$M_PICKS: ")"
+        printf '%s' "$(say "Pick 1–$M_PICKS, r to refresh, q to quit: ")"
         read -r answer || answer=""
 
         case "$answer" in
             "" | q | Q)
-                say "Nothing done"
-                exit 0
+                M_DO=quit
+
+                return
+                ;;
+            r | R)
+                M_DO=refresh
+
+                return
                 ;;
             *[!0-9]*) ;;
             *)
                 if [ "$answer" -ge 1 ] && [ "$answer" -le "$M_PICKS" ]; then
-                    M_PICK="${M_SEL[$((answer - 1))]}"
+                    M_DO=open
+                    M_CUR=$((answer - 1))
 
                     return
                 fi
@@ -2645,16 +2658,13 @@ menu_numbers() {
     done
 }
 
-# A bare `deploy` on a terminal: one row per project, its slots in use as a tree under it, one leaf
-# for its free slots, and the engine, read in parallel. The picked one shows its pending commits,
-# asks, then runs as `deploy <project>`, `deploy <project>@sN` or `deploy self`.
-project_menu() {
+# Reads the menu rows: one per project, its slots in use as a tree under it, one leaf for its free
+# slots, and the engine, read in parallel.
+menu_read() {
     local targets=() groups=() subs=() frees=() pships=() project slot free group=-1 i row width rows=""
     local ship target name version pending site problems engine sub
     M_NAME=() M_VERSION=() M_PENDING=() M_SITE=() M_PROBLEMS=() M_SHIP=() M_TARGET=() M_GROUP=() M_SUB=()
     M_TREE=() M_NUM=() M_SEL=()
-
-    intro ""
 
     for project in $(list_projects); do
         group=$((group + 1))
@@ -2761,26 +2771,19 @@ project_menu() {
         width="$(text_width "${M_SITE[$i]#-}")"
         [ "$width" -le "$W_SITE" ] || W_SITE="$width"
     done
+}
 
-    if [ "$RAILS" -eq 1 ]; then
-        printf '%s◆%s  Which project to deploy?\n' "$C_GREEN" "$C_OFF"
-    else
-        say "Which project to deploy?"
-    fi
-
-    case "${TERM:-dumb}" in
-        dumb | unknown) menu_numbers ;;
-        *) menu_keys ;;
-    esac
-
-    target="${M_TARGET[$M_PICK]}"
-    name="${M_NAME[$M_PICK]}"
-    version="${M_VERSION[$M_PICK]}"
+# The action for menu line $1: shows the pending commits, asks, then runs `deploy <project>`,
+# `deploy <project>@sN` or `deploy self` as a child process, so a failed run keeps the menu. Sets
+# M_RAN to 1 when it ran.
+menu_open() {
+    local target="${M_TARGET[$1]}" name="${M_NAME[$1]}" version="${M_VERSION[$1]}" tty status=0 answer
     [ "$version" != - ] || version=""
+    M_RAN=0
 
     if [ "$target" = self ]; then
         { git -C "$ENGINE_DIR" log --format='%h %s' 'HEAD..@{upstream}' 2> /dev/null || true; } | rail
-        ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; exit 0; }
+        ask_yes "Update the engine${version:+ $version}?" || { say "Nothing done"; return 0; }
     else
         (
             menu_load "$target"
@@ -2790,12 +2793,74 @@ project_menu() {
             *@*) name="${target%@*} ${target#*@} (staging)" ;;
             *) name="$name (production)" ;;
         esac
-        ask_yes "Deploy $name${version:+ $version}?" || { say "Nothing done"; exit 0; }
+        ask_yes "Deploy $name${version:+ $version}?" || { say "Nothing done"; return 0; }
     fi
 
-    menu_cleanup
+    M_RAN=1
     [ "$RAILS" -eq 0 ] || printf '%s└%s\n' "$C_DIM" "$C_OFF"
-    exec "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$target"
+    tty="$(stty -g 2>/dev/null)" || tty=""
+    # A trap that does nothing, not '', so the child still stops on Ctrl-C and the menu stays.
+    trap ':' INT
+    "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$target" || status=$?
+    trap 'exit 130' INT
+    [ -z "$tty" ] || stty "$tty" 2>/dev/null || true
+    printf '\033[?25h'
+
+    intro ""
+    case "$status" in
+        0) say "deploy $target finished" ;;
+        130) warn "deploy $target stopped" ;;
+        *) warn "deploy $target failed with exit code $status" ;;
+    esac
+    printf '%s' "$(say "Press Enter to go back ")"
+    read -r answer || exit 0
+
+    # A new engine draws its own menu.
+    if [ "$target" = self ] && [ "$status" -eq 0 ]; then
+        menu_cleanup
+        exec "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")"
+    fi
+}
+
+# A bare `deploy` on a terminal: the menu rows, a pick, its action, and back to the rows until q.
+project_menu() {
+    local i last="" reload=1
+    M_CUR=0
+
+    intro ""
+
+    while :; do
+        if [ "$reload" -eq 1 ]; then
+            menu_read
+            [ "$M_CUR" -lt "$M_PICKS" ] || M_CUR=$((M_PICKS - 1))
+            for i in "${!M_SEL[@]}"; do
+                [ "${M_TARGET[${M_SEL[$i]}]}" != "$last" ] || M_CUR="$i"
+            done
+        fi
+
+        if [ "$RAILS" -eq 1 ]; then
+            printf '%s◆%s  Which project to deploy?\n' "$C_GREEN" "$C_OFF"
+        else
+            say "Which project to deploy?"
+        fi
+
+        case "${TERM:-dumb}" in
+            dumb | unknown) menu_numbers ;;
+            *) menu_keys ;;
+        esac
+
+        case "$M_DO" in
+            quit) exit 0 ;;
+            refresh)
+                reload=1
+                continue
+                ;;
+        esac
+
+        last="${M_TARGET[${M_SEL[$M_CUR]}]}"
+        menu_open "${M_SEL[$M_CUR]}"
+        reload="$M_RAN"
+    done
 }
 
 # Moves one path into shared/ and leaves a link behind, so the old checkout keeps working.

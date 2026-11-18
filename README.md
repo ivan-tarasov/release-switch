@@ -90,7 +90,7 @@ Staging (see [Staging](#staging)):
   staging <project>@sN free         Forget the slot's branch, deploy DEPLOY_BRANCH
   staging <project>@sN copy-from <project> [--yes] [path ...]
                                     Copy production's SHARED data into the slot
-  staging <project>@sN status | log | path | rollback | down | up
+  staging <project>@sN status | log | path | rollback | down | up | cache
 
 Commands:
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
@@ -114,6 +114,10 @@ Commands:
                     the site, check accepts a 503 and skips health(), and status shows it.
                     On a terminal it asks first
   up                Run the up() step, then check that the site serves the live release again
+  cache             Run the cache() step of the live release, then reset OPcache when
+                    OPCACHE_RESET_DIR is set. Fails with a hint when neither is set. Takes the
+                    lock and writes a log line. On a terminal in production it asks first;
+                    on a staging slot it does not ask
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, the lock, the disk and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
@@ -190,9 +194,10 @@ carry the error only.
 
 ### Questions before risky commands
 
-`rollback`, `down` and `deploy --force` change the live site, so on a terminal they first show what
+`rollback`, `down`, `cache` and `deploy --force` change the live site, so on a terminal they first show what
 will happen and ask `y/N`: `rollback` shows the live release and the one it goes to, `down` the
-reason and that the site will show its maintenance page, `deploy --force` the commit it builds. Only
+reason and that the site will show its maintenance page, `cache` the live release, `deploy --force`
+the commit it builds. `cache` on a staging slot does not ask. Only
 `y` goes on; `n` or an empty answer does nothing and exits with 0. `--yes` (or `-y`) skips the
 question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
 `copy-from` asks the same way.
@@ -329,7 +334,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `COMPOSER_BIN` | `composer` | Composer command, e.g. `php ~/composer.phar` |
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/.lsphp_restart.txt` (see [OPcache](#opcache)). Stopped after 60 s with a warning |
 | `OPCACHE_RESET_DIR` | none | Web root inside a release, like `public`. Turns on the OPcache reset through the web after each switch (see [OPcache](#opcache)) |
-| `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()` and `up()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
+| `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()`, `up()` and `cache()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
 | `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On cPanel the account quota can differ from `df`, so set it yourself |
 | `MIN_FREE_MB` | `500` | Free space in MB the disk of the base folder must have. `check` fails under it, and `deploy` and `copy-from` stop before they write anything. `0` to turn it off |
 | `MIGRATIONS_DIR` | `database/migrations` | Migrations folder inside a release. Before a rollback switches, it warns when the target lacks files the live release has there, as data is not reverted. A hint only: it never stops the rollback. Empty to turn it off |
@@ -359,6 +364,7 @@ rollback, or a failed check that switches back), the engine writes a PHP file wi
 `CHECK_URL`, and deletes it whatever happens. The file runs `opcache_reset()` when PHP has it, and
 deletes itself too. A staging slot calls its own slot URL. A missing folder, an answer other than
 200, or no answer within 60 s (or `STEP_TIMEOUT`, when smaller) only warns, and the deploy goes on.
+`deploy <project> cache` runs the same reset on demand, after the project's `cache()` step.
 
 ### Alerts
 
@@ -449,7 +455,7 @@ deploy staging example update                       every slot with new commits
 deploy staging example@s1 free                      forget the branch, back on DEPLOY_BRANCH
 deploy staging example@s1 copy-from example         production data in
 deploy staging example@s1                           the slot's status
-deploy staging example@s1 log | path | rollback | down | up
+deploy staging example@s1 log | path | rollback | down | up | cache
 ```
 
 With one project with slots, the project can be left out: `deploy staging`,
@@ -626,6 +632,11 @@ down() {
 up() {
     "$PHP_BIN" artisan up
 }
+
+# Optional. Run by `cache` in the live release, then OPcache is reset when OPCACHE_RESET_DIR is set.
+cache() {
+    "$PHP_BIN" artisan cache:clear
+}
 ```
 
 `backup()` runs on every deploy that builds a release, and on staging slots too, since each slot
@@ -645,7 +656,7 @@ The steps can use `DEPLOY_BASE`, `RELEASE_DIR`, `RELEASE_NAME`, `PHP_BIN`, `COMP
 `DEPLOY_SLOT` and `DEPLOY_HOST`, and these details of the run (also in `NOTIFY_CMD`). They are empty
 when unknown:
 
-| Variable | deploy | rollback | down, up | check |
+| Variable | deploy | rollback | down, up, cache | check |
 |---|---|---|---|---|
 | `DEPLOY_SHA` | full sha of the new release | sha of the target release | sha of the live release | empty |
 | `DEPLOY_REF` | the branch, `pr/<N>`, or the `--ref` value | empty | empty | empty |
@@ -697,7 +708,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.

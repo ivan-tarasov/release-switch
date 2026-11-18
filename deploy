@@ -3,7 +3,7 @@
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
-#                     | freeze [reason] | down [reason] [--yes] | up
+#                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
 #                     | unfreeze | status | check | log [count] | path [--base]
 #                     | rollback [name] [--yes] [--dry-run]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
@@ -80,15 +80,15 @@ FAIL_MESSAGE=""
 # The engine's functions, set in main. deploy.conf may not define any of them.
 ENGINE_FUNCS=""
 
-# 1 with --yes or -y: rollback, down and deploy --force do not ask.
+# 1 with --yes or -y: rollback, down, cache and deploy --force do not ask.
 YES=0
 
 # The commands, for help and for typo hints.
-COMMANDS=(deploy freeze unfreeze down up status check log path rollback slots stage staging free copy-from init self
-    help version)
+COMMANDS=(deploy freeze unfreeze down up cache status check log path rollback slots stage staging free copy-from init
+    self help version)
 
 # The staging subcommands, for help and for typo hints.
-STAGING_COMMANDS=(checkout update free copy-from status log path rollback down up)
+STAGING_COMMANDS=(checkout update free copy-from status log path rollback down up cache)
 
 # The old form of a staging command, set by staging_args.
 STAGING_ARGS=()
@@ -1272,7 +1272,7 @@ load_conf() {
     SHARED=()
     COPY_FROM_LIVE=()
     CLEAR_PATHS=()
-    unset -f preflight backup build verify after_switch failed after_rollback
+    unset -f preflight backup build verify after_switch failed after_rollback cache
 
     # shellcheck source=/dev/null
     . "$1/deploy.conf"
@@ -1701,6 +1701,50 @@ maintenance_up() {
     log_event up "$LOG_RELEASE" ok
     ACTION=""
     say "The site is up again"
+}
+
+# Runs the cache() step of the live release, if any, then resets OPcache like a deploy. On
+# production it asks first on a terminal; a slot does not ask.
+clear_cache() {
+    local arg live
+
+    for arg in "$@"; do
+        case "$arg" in
+            --yes | -y) YES=1 ;;
+            *) fail "usage: deploy [project] cache [--yes]" ;;
+        esac
+    done
+
+    resolve_base
+    live="$(current_release)"
+    [ -n "$live" ] || fail "$DEPLOY_BASE/current is not a link; no live release"
+    load_conf "$DEPLOY_BASE/releases/$live"
+    declare -F cache > /dev/null || [ -n "$OPCACHE_RESET_DIR" ] \
+        || fail "nothing to clear: deploy.conf of $live has no cache() step and OPCACHE_RESET_DIR is not set" \
+            "define cache() in deploy.conf, or set OPCACHE_RESET_DIR in $PROJECTS_DIR/${PROJECT:-<project>}.env"
+
+    [ -n "$DEPLOY_SLOT" ] || confirm "Clear the cache?" "Clearing the cache of $PROJECT, live release $live"
+
+    acquire_lock cache
+    # A deploy may have switched while it asked.
+    live="$(current_release)"
+    RELEASE_DIR="$DEPLOY_BASE/releases/$live"
+    RELEASE_NAME="$live"
+    export RELEASE_DIR RELEASE_NAME
+    commit_details "$RELEASE_DIR"
+    load_conf "$RELEASE_DIR"
+
+    ACTION=cache
+    LOG_RELEASE="$live"
+    STAGE=cache
+    run_step cache
+    [ "$RUN_STATUS" -eq 0 ] || fail "$RUN_ERROR"
+
+    STAGE=opcache
+    reset_opcache_web
+    log_event cache "$live" ok
+    ACTION=""
+    say "Cleared the cache of $live"
 }
 
 refuse_if_frozen() {
@@ -3647,7 +3691,7 @@ staging_args() {
                 STAGING_ARGS=("$target" slots update)
             fi
             ;;
-        free | copy-from | status | log | path | rollback | down | up)
+        free | copy-from | status | log | path | rollback | down | up | cache)
             [ "$target" != "${target%@*}" ] || fail "$sub works on one slot: deploy staging $target@sN $sub"
             STAGING_ARGS=("$target" "$sub" "$@")
             ;;
@@ -3695,6 +3739,13 @@ EOF
         up)
             cat <<EOF
   up                         Run the up() step and check the site again
+EOF
+            ;;
+        cache)
+            cat <<EOF
+  cache [--yes]              Run the cache() step of the live release, then reset OPcache when
+                             OPCACHE_RESET_DIR is set. Asks first on a terminal in production;
+                             --yes skips that
 EOF
             ;;
         status)
@@ -3842,6 +3893,12 @@ EOF
   staging <project>@sN up    Run the slot's up() step and check its site again
 EOF
             ;;
+        "staging cache")
+            cat <<EOF
+  staging <project>@sN cache
+                             Run the slot's cache() step and reset its OPcache, without asking
+EOF
+            ;;
         init)
             cat <<EOF
   init <checkout> [--dry-run]
@@ -3880,6 +3937,7 @@ command_examples() {
         unfreeze) printf '%s\n' "deploy example unfreeze" ;;
         down) printf '%s\n' 'deploy example down "database upgrade"' "deploy example down --yes" ;;
         up) printf '%s\n' "deploy example up" ;;
+        cache) printf '%s\n' "deploy example cache" "deploy example cache --yes" "deploy example@s1 cache" ;;
         status) printf '%s\n' "deploy example status" "deploy status --all" ;;
         check) printf '%s\n' "deploy example check" "deploy check --all" ;;
         log) printf '%s\n' "deploy example log 50" ;;
@@ -3900,6 +3958,7 @@ command_examples() {
         "staging rollback") printf '%s\n' "deploy staging example@s1 rollback" ;;
         "staging down") printf '%s\n' 'deploy staging example@s1 down "data import"' ;;
         "staging up") printf '%s\n' "deploy staging example@s1 up" ;;
+        "staging cache") printf '%s\n' "deploy staging example@s1 cache" ;;
         init) printf '%s\n' 'deploy example init "$HOME/site" --dry-run' ;;
         self) printf '%s\n' "deploy self" "deploy self log 5" ;;
         help) printf '%s\n' "deploy help rollback" "deploy example rollback --help" ;;
@@ -4246,7 +4305,7 @@ main() {
     fi
 
     case "$command" in
-        deploy | freeze | unfreeze | down | up | rollback | init | stage | free | copy-from)
+        deploy | freeze | unfreeze | down | up | cache | rollback | init | stage | free | copy-from)
             intro "${PROJECT:+$PROJECT · }$command"
             ;;
         slots)
@@ -4275,6 +4334,10 @@ main() {
             ;;
         up)
             maintenance_up
+            ;;
+        cache)
+            shift
+            clear_cache "$@"
             ;;
         status)
             report "${PROJECT:+$PROJECT · }status" status

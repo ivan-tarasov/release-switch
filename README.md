@@ -77,6 +77,9 @@ a deploy after a `no-release` merge waits the full `RELEASE_WAIT`, as before.
 ```
 deploy [project] [command]
 
+Options:
+  --quiet, -q       Print only warnings and errors, for cron (see [Quiet runs](#quiet-runs-for-cron))
+
 Staging (see [Staging](#staging)):
   staging [project]                 List the slots. Without a project: the only one with slots
   staging <project>@sN              The slot's status
@@ -139,7 +142,7 @@ Commands:
                     links, the project's health() step, the site, the disk (size of the base
                     folder past DISK_LIMIT, or free space under MIN_FREE_MB), and a lock held
                     for 30 min or more, or with no owner for 60 s. Problems go to stderr
-                    and it exits with 1, so `deploy <project> check > /dev/null` in cron mails
+                    and it exits with 1, so `deploy <project> check --quiet` in cron mails
                     only problems
   check --all       The same for every project, production only
   log [count]       The last deploys and rollbacks, with results, times and the commits each
@@ -201,6 +204,20 @@ the commit it builds. `cache` on a staging slot does not ask. Only
 `y` goes on; `n` or an empty answer does nothing and exits with 0. `--yes` (or `-y`) skips the
 question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
 `copy-from` asks the same way.
+
+### Quiet runs for cron
+
+`--quiet` (or `-q`) prints only warnings and errors, with their `Try:` hint, so cron mails only
+problems. It works with any command, wherever it is on the line. A quiet run shows no `==>` lines,
+no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new) prints
+nothing. The output of `deploy.conf` steps shows only when a step fails. A problem the run carries
+on past (a failing `after_switch` or `PHP_RELOAD_CMD`) becomes a warning. On a terminal, questions
+still show; without one it never asks. The bare `deploy` menu ignores `--quiet`.
+
+```cron
+*/10 * * * * $HOME/release-switch/deploy example --quiet
+0 4 * * *    $HOME/release-switch/deploy self --quiet
+```
 
 ### Project menu
 
@@ -546,7 +563,7 @@ exits with 1. It ends with one line per slot: `updated`, `deployed`, `unchanged`
 `failed`. Run it from cron to keep the slots up to date:
 
 ```cron
-*/5 * * * * $HOME/release-switch/deploy staging example update > /dev/null
+*/5 * * * * $HOME/release-switch/deploy staging example update --quiet
 ```
 
 ### Copying production data
@@ -752,7 +769,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.

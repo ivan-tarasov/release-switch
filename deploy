@@ -4,7 +4,8 @@
 #
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
 #                     | freeze [reason] | down [reason] [--yes] | up
-#                     | unfreeze | status | check | log [count] | path [--base] | rollback [name] [--yes]
+#                     | unfreeze | status | check | log [count] | path [--base]
+#                     | rollback [name] [--yes] [--dry-run]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
 #                     | free | copy-from <project> [--yes] [path ...] | help [command]]
 #   deploy self-update | self [--no-wait | log [count]] | --version
@@ -1962,15 +1963,56 @@ warn_missing_migrations() {
     [ "$count" -le 10 ] || printf '  and %s more\n' "$((count - 10))" | rail >&2
 }
 
+# What a rollback from $1 to $2 would do, with no change: no switch, mark, lock or log entry.
+show_rollback_plan() {
+    local live="$1" target="$2" named="$3" clashes
+
+    say "Dry run: nothing changes"
+    say "Would roll back $PROJECT: $(release_version "$live") → $(release_version "$target")"
+    say "Live:   $live"
+    say "Target: $target"
+
+    if [ "$named" -eq 0 ]; then
+        say "Would mark $live as bad, so later rollbacks skip it"
+    else
+        say "$live would not be marked bad"
+        ! is_bad "$target" || say "Would clear the bad mark on $target"
+    fi
+
+    warn_missing_migrations "$live" "$target"
+
+    if [ ! -f "$DEPLOY_BASE/releases/$target/deploy.conf" ]; then
+        say "Would not run after_rollback: $target has no deploy.conf"
+        return 0
+    fi
+
+    clashes="$(conf_clashes "$DEPLOY_BASE/releases/$target/deploy.conf")"
+    if [ -n "$clashes" ]; then
+        say "Would not run after_rollback: deploy.conf of $target uses names of the engine"
+    elif (
+        set +eu
+        unset -f after_rollback
+        # shellcheck source=/dev/null
+        . "$DEPLOY_BASE/releases/$target/deploy.conf" > /dev/null 2>&1
+        declare -F after_rollback > /dev/null
+    ); then
+        say "Would run after_rollback of $target"
+    else
+        say "Would not run after_rollback: deploy.conf of $target has none"
+    fi
+}
+
 rollback() {
-    local name="" arg live target note
+    local name="" arg live target note dry_run=0
+    local usage="usage: deploy [project] rollback [name] [--yes] [--dry-run]"
 
     for arg in "$@"; do
         case "$arg" in
             --yes | -y) YES=1 ;;
-            -*) fail "usage: deploy [project] rollback [name] [--yes]" ;;
+            --dry-run) dry_run=1 ;;
+            -*) fail "$usage" ;;
             *)
-                [ -z "$name" ] || fail "usage: deploy [project] rollback [name] [--yes]"
+                [ -z "$name" ] || fail "$usage"
                 name="$arg"
                 ;;
         esac
@@ -1981,8 +2023,10 @@ rollback() {
     refuse_current_folder
     refuse_if_frozen
     require_check_url
-    acquire_lock rollback
-    remove_unfinished
+    if [ "$dry_run" -eq 0 ]; then
+        acquire_lock rollback
+        remove_unfinished
+    fi
 
     live="$(current_release)"
     [ -n "$live" ] || fail "$DEPLOY_BASE/current is not a link; nothing to roll back"
@@ -1995,6 +2039,11 @@ rollback() {
         target="$(rollback_target "$live")"
         [ -n "$target" ] || fail "no good release older than $live"
         note="$live gets marked bad, so later rollbacks skip it"
+    fi
+
+    if [ "$dry_run" -eq 1 ]; then
+        show_rollback_plan "$live" "$target" "$((${#1} > 0))"
+        return 0
     fi
 
     warn_missing_migrations "$live" "$target"
@@ -3651,9 +3700,12 @@ EOF
             ;;
         rollback)
             cat <<EOF
-  rollback [name] [--yes]    Point current at the previous good release and mark the live one
+  rollback [name] [--yes] [--dry-run]
+                             Point current at the previous good release and mark the live one
                              bad, or go to the named release (a full name or a unique part of
-                             it, like the sha or tag). Asks first on a terminal; --yes skips that
+                             it, like the sha or tag). Asks first on a terminal; --yes skips that.
+                             --dry-run shows the live release, the target, the bad mark, the
+                             migration warning and after_rollback, and changes nothing
 EOF
             ;;
         slots)
@@ -3749,7 +3801,7 @@ EOF
             ;;
         "staging rollback")
             cat <<EOF
-  staging <project>@sN rollback [name] [--yes]
+  staging <project>@sN rollback [name] [--yes] [--dry-run]
                              Roll the slot back to its previous good release, or to the named one
 EOF
             ;;
@@ -3806,7 +3858,7 @@ command_examples() {
         check) printf '%s\n' "deploy example check" "deploy check --all" ;;
         log) printf '%s\n' "deploy example log 50" ;;
         path) printf '%s\n' 'cd "$(deploy path example)"' ;;
-        rollback) printf '%s\n' "deploy example rollback" "deploy example rollback v2026.11.1" ;;
+        rollback) printf '%s\n' "deploy example rollback" "deploy example rollback v2026.11.1" "deploy example rollback --dry-run" ;;
         slots) printf '%s\n' "deploy example slots" "deploy example slots update" ;;
         stage) printf '%s\n' "deploy example stage feature/login" "deploy example stage --pr 42" ;;
         free) printf '%s\n' "deploy example@s1 free" ;;

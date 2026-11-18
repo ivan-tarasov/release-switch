@@ -31,7 +31,7 @@ Each project has a base folder on the server:
    that has release tags, waits up to `RELEASE_WAIT` seconds for its tag (see below);
 5. links the project's `SHARED` paths from `shared/` into the release, and copies its
    `COPY_FROM_LIVE` paths (like `vendor`) from the live release, so the build only updates them;
-6. runs the project's `preflight`, `build` and `verify` steps there;
+6. runs the project's `preflight`, `backup`, `build` and `verify` steps there;
 7. switches `current` to the new release in one rename, then runs `PHP_RELOAD_CMD`, the web OPcache reset (see
    [OPcache](#opcache)) and `after_switch`;
 8. waits until `CHECK_URL` answers 200 with the new release name in the `X-App-Version` header.
@@ -539,6 +539,23 @@ preflight() {
     grep -q '^APP_URL=https://example.com' .env
 }
 
+# Optional. Runs right before build (where migrations run), e.g. a database dump, so a bad
+# migration can be undone by hand. A failure stops the deploy before build; the old release stays
+# live. This dump reads the database from Laravel's .env (values without quotes) and keeps the
+# last 5.
+backup() {
+    local dir="$DEPLOY_BASE/shared/backups" db user host password
+    db="$(sed -n 's/^DB_DATABASE=//p' .env)"
+    user="$(sed -n 's/^DB_USERNAME=//p' .env)"
+    host="$(sed -n 's/^DB_HOST=//p' .env)"
+    password="$(sed -n 's/^DB_PASSWORD=//p' .env)"
+    mkdir -p "$dir"
+    MYSQL_PWD="$password" mysqldump --single-transaction --quick --no-tablespaces \
+        -h "$host" -u "$user" "$db" | gzip > "$dir/.$RELEASE_NAME.sql.gz"
+    mv "$dir/.$RELEASE_NAME.sql.gz" "$dir/$RELEASE_NAME.sql.gz"
+    ls -1t "$dir"/*.sql.gz | tail -n +6 | xargs rm -f
+}
+
 # Required.
 build() {
     read -ra composer <<< "$COMPOSER_BIN"
@@ -591,6 +608,14 @@ up() {
     "$PHP_BIN" artisan up
 }
 ```
+
+`backup()` runs on every deploy that builds a release, and on staging slots too, since each slot
+has its own database; skip it there with `[ -z "$DEPLOY_SLOT" ] || return 0`. It does not run when
+a deploy has nothing new or stops before the build. On shared hosting, mind the disk quota: each
+dump counts, so keep few. `--single-transaction` dumps InnoDB tables without locking them, but
+MyISAM tables stay locked for the whole dump. A big dump also needs to fit in `STEP_TIMEOUT`.
+To undo a migration, roll back and load the dump of the release that ran it:
+`gunzip < shared/backups/<release>.sql.gz | mysql <database>`.
 
 Names of the engine are reserved. `deploy.conf` may read engine variables, but a function with the
 name of an engine function (`fail`, `say`, `prune`, ...) or a top-level change to an engine
@@ -652,7 +677,7 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
-deploys, rollbacks and bad releases, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
+deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared

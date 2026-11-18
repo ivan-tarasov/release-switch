@@ -248,7 +248,8 @@ serves "$first" || fail "server does not show $first"
 [ "$(cat "$BASE/shared/data/switched")" = "$first" ] || fail "after_switch did not run"
 [ -L "$BASE/current/data" ] || fail "data/ is not linked from shared/"
 [ ! -e "$BASE/shared/data/failed" ] || fail "failed ran after a good deploy"
-check "live: $first; after_switch ran; data/ is shared; failed did not run"
+[ "$(cat "$BASE/shared/data/backups")" = "$first" ] || fail "backup did not run once in $first"
+check "live: $first; backup ran before build; after_switch ran; data/ is shared; failed did not run"
 
 sleep 1
 step "Second deploy, of a new tagged commit"
@@ -299,6 +300,19 @@ grep -q "build failed" "$WORK/failed.log" || fail "a failing failed() hid the bu
 [ "$(live_release)" = "$first" ] || fail "current moved after a failed build"
 rm -f "$BASE/shared/data/failed"
 check "the warning shows and the build error stays"
+
+sleep 1
+step "Failing deploy: a failing backup stops it before build"
+if FIXTURE_FAIL_BACKUP=1 deploy fixture > "$WORK/backup.log" 2> "$WORK/backup-err.log"; then
+    fail "deploy with a failing backup succeeded"
+fi
+grep -q "backup failed" "$WORK/backup-err.log" || fail "the failure does not show the backup error"
+! grep -q "Running build" "$WORK/backup.log" || fail "build ran after a failing backup"
+[ "$(live_release)" = "$first" ] || fail "current moved after a failed backup"
+[ "$(release_count)" = "$releases_before" ] || fail "the failed release folder was left behind"
+[ -e "$BASE/shared/data/failed" ] || fail "failed did not run after a failing backup"
+rm -f "$BASE/shared/data/failed"
+check "$first is still live; build did not run; failed ran"
 
 sleep 1
 step "Failing deploy: preflight refuses a wrong .env"
@@ -537,17 +551,19 @@ check "a break folder older than 60 s blocks with a message that names it"
 
 step "A deploy with nothing new stops; --force builds anyway"
 releases_now="$(release_count)"
+backups_now="$(sed -n '$=' "$BASE/shared/data/backups")"
 deploy fixture > "$WORK/skip.log"
 cat "$WORK/skip.log"
 grep -q "Nothing new on develop: $fresh already runs" "$WORK/skip.log" || fail "no message for a deploy with nothing new"
 [ "$(release_count)" = "$releases_now" ] || fail "a deploy with nothing new made a release"
 [ "$(live_release)" = "$fresh" ] || fail "a deploy with nothing new changed the live release"
+[ "$(sed -n '$=' "$BASE/shared/data/backups")" = "$backups_now" ] || fail "backup ran on a deploy with nothing new"
 sleep 1
 deploy fixture --force > /dev/null
 fresh="$(live_release)"
 [ "$(release_count)" = "$((releases_now + 1))" ] || fail "--force did not build a release"
 serves "$fresh" || fail "server does not show $fresh"
-check "nothing new: no release; --force: live with $fresh"
+check "nothing new: no release, no backup; --force: live with $fresh"
 
 step "Freeze stops deploys and rollbacks until unfreeze"
 deploy fixture freeze "moving hosts" > /dev/null

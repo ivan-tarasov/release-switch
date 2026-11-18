@@ -157,7 +157,9 @@ Commands:
   self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
                     the old and new versions, then each new release with its GitHub notes (or
                     its commits when `gh` cannot read them) and the commits not released yet.
-                    Stops if the folder has local changes. Short form: self
+                    Stops if the folder has local changes. Short form: self. A new commit waits
+                    for its release tag like a deploy, with `RELEASE_WAIT` from the environment
+                    (no project file here, default 90); `--no-wait` skips it
   self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
   help [command]    Commands and the settings in effect, or the help of one command
   --version         The engine's version: its newest release tag, like v2026.11.1, with "+N" when
@@ -710,4 +712,5 @@ GitHub release with generated notes. A `no-release` pull request gets no tag, on
 `refs/no-release/<merge sha>` marker (see above).
 The version is `vYEAR.MONTH.COUNT` from the merge date in UTC: the first release of November 2026
 is `v2026.11.1`, the next `v2026.11.2`. `deploy self` pulls the tags with the code, and
-`deploy --version` shows the one in use.
+`deploy --version` shows the one in use. Run right after a merge, `deploy self` waits for the
+merge's tag (or its no-release marker) the same way a deploy does, then shows the tag and its notes.

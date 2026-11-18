@@ -2102,8 +2102,11 @@ git -C "$WORK/engine-src" tag v2026.11.2
 printf '# untagged\n' >> "$WORK/engine-src/deploy"
 git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Untagged engine"
 git -C "$WORK/engine-src" push --quiet --tags "$WORK/engine.git" main
-"$WORK/engine/deploy" self > "$WORK/self.log"
+RELEASE_WAIT=60 "$WORK/engine/deploy" self --no-wait > "$WORK/self.log"
 cat "$WORK/self.log"
+if grep -q "Waiting for the release tag" "$WORK/self.log"; then
+    fail "self --no-wait waited for the release tag"
+fi
 grep -q "Updated v2026.11.1 → v2026.11.2+1$" "$WORK/self.log" || fail "self does not show both versions"
 # No gh for a file:// repo, so each tag lists its commits.
 sed -n '/^v2026.11.2$/,/^Not released yet$/p' "$WORK/self.log" | grep -E "^    [0-9a-f]+ Newer engine$" > /dev/null \
@@ -2128,7 +2131,7 @@ cat "$WORK/engine-row.log"
 grep -qE "^release-switch +v2026\.11\.2\+1 +today at .* +- +1 new, run deploy self, local changes$" "$WORK/engine-row.log" \
     || fail "status --all does not show the engine behind and changed"
 git -C "$WORK/engine" checkout --quiet -- deploy
-"$WORK/engine/deploy" self > /dev/null
+"$WORK/engine/deploy" self --no-wait > /dev/null
 PROJECTS_DIR="$WORK/projects" "$WORK/engine/deploy" status --all > "$WORK/engine-row.log"
 grep -qE "^release-switch +v2026\.11\.2\+2 +today at .* +- +up to date$" "$WORK/engine-row.log" \
     || fail "status --all does not show the engine up to date"
@@ -2150,6 +2153,42 @@ if "$WORK/engine/deploy" self nope 2> "$WORK/self-log.log"; then
 fi
 grep -q "unknown command: deploy self nope" "$WORK/self-log.log" || fail "no message for an unknown self command"
 check "self log lists installed and unpulled commits; an unknown self command fails"
+
+step "self waits for the release tag of a new engine commit"
+waiting="$(git -C "$WORK/engine.git" rev-parse --short main)"
+: > "$WORK/wait.log"
+when_waiting "$waiting" git -C "$WORK/engine.git" tag v2026.11.3 main &
+RELEASE_WAIT=60 RELEASE_POLL=1 "$WORK/engine/deploy" self > "$WORK/wait.log" 2>&1
+wait $!
+cat "$WORK/wait.log"
+grep -q "Waiting for the release tag on $waiting" "$WORK/wait.log" || fail "self did not wait for the release tag"
+grep -q "Updated v2026.11.2+2 → v2026.11.3$" "$WORK/wait.log" || fail "self does not show the tag that came during the wait"
+sed -n '/^v2026.11.3$/,$p' "$WORK/wait.log" | grep -E "^    [0-9a-f]+ Unpulled engine$" > /dev/null \
+    || fail "self does not list the notes of the tag that came during the wait"
+if grep -q "Not released yet" "$WORK/wait.log"; then
+    fail "self lists the tagged commit as not released"
+fi
+printf '# no release\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "No-release engine"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
+git -C "$WORK/engine.git" update-ref "refs/no-release/$(git -C "$WORK/engine.git" rev-parse main)" main
+RELEASE_WAIT=60 RELEASE_POLL=1 "$WORK/engine/deploy" self > "$WORK/wait.log" 2>&1
+if grep -q "Waiting for the release tag" "$WORK/wait.log"; then
+    fail "self waited for a commit with a no-release marker"
+fi
+grep -q "no-release merge" "$WORK/wait.log" || fail "self does not name the no-release merge"
+git init --quiet --bare "$WORK/engine-notags.git"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine-notags.git" main
+git clone --quiet --no-tags --branch main "file://$WORK/engine-notags.git" "$WORK/engine-notags"
+printf '# no tags\n' >> "$WORK/engine-src/deploy"
+git -C "$WORK/engine-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "Engine without tags"
+git -C "$WORK/engine-src" push --quiet "$WORK/engine-notags.git" main
+RELEASE_WAIT=60 RELEASE_POLL=1 "$WORK/engine-notags/deploy" self > "$WORK/wait.log" 2>&1
+if grep -q "Waiting for the release tag" "$WORK/wait.log"; then
+    fail "self waited in an engine repo without tags"
+fi
+grep -qE "^.*[0-9a-f]+ Engine without tags$" "$WORK/wait.log" || fail "self without tags did not update"
+check "self waits for the tag and shows it with its notes; a no-release marker and a repo without tags do not wait"
 
 step "SHARED paths with spaces work; a leading / or .. is refused"
 SPACES="$WORK/spaces-old"

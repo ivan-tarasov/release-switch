@@ -2137,18 +2137,40 @@ grep -q "name a project (fixture other)" "$WORK/menu.log" || fail "a bare deploy
 rm "$WORK/projects/other.env"
 if command -v script > /dev/null; then
     live="$(live_release)"
-    on_terminal_hold 2 q env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+    # j moves to the second row, r reads the rows again, q quits.
+    on_terminal_hold 2 jrq env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
         || { cat "$WORK/menu.log"; fail "the menu failed on q"; }
     grep -q "Which project to deploy?" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
-    grep -q "Nothing done" "$WORK/menu.log" || fail "q in the menu does not stop"
+    grep -qE "↑↓/1-[0-9] pick · Enter open · r refresh · q quit" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the menu shows no key bar"; }
+    [ "$(grep -cE "Checking [0-9]+ projects" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "r did not read the rows again"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "❯ " > "$WORK/menu.rows" || true
+    [[ "$(sed -n '$p' "$WORK/menu.rows")" =~ ❯\ 2\  ]] \
+        || { cat "$WORK/menu.rows"; fail "the cursor left the second row after r"; }
     [ "$(live_release)" = "$live" ] || fail "q in the menu deployed"
-    on_terminal_hold 10 $'1\ny' env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 \
+
+    # A deploy that works, then Enter goes back to a list with fresh rows.
+    on_terminal_hold 15 $'1\ny\n\nq' env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 \
         "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
     grep -q "Pick 1–" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
     grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
     grep -q "Deploy fixture (production) .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" \
         || fail "the menu does not ask before the deploy"
     [[ "$(live_release)" == *-v2026.11.20000-* ]] || { cat "$WORK/menu.log"; fail "the menu did not deploy on y"; }
+    grep -q "deploy fixture finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu does not show the deploy ended"; }
+    grep -q "Press Enter to go back" "$WORK/menu.log" || fail "the menu does not wait for Enter after the deploy"
+    [ "$(grep -c "Pick 1–" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "the list did not come back after the deploy"; }
+    grep -qE "1  fixture +v2026\.11\.20000 +up to date" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the list after the deploy has old rows"; }
+
+    # A failed deploy keeps the menu.
+    deploy fixture freeze "menu fail" > /dev/null
+    on_terminal_hold 10 $'1\ny\n\nq' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
+    deploy fixture unfreeze > /dev/null
+    grep -q "deploy fixture failed with exit code 1" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed"; }
+    [ "$(grep -c "Pick 1–" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "the list did not come back after a failed deploy"; }
 
     # s1 follows feature/x; s2 and the new s3 are free.
     cp "$WORK/projects/fixture.env" "$WORK/fixture.env"
@@ -2156,7 +2178,7 @@ if command -v script > /dev/null; then
     [ ! -e "$SLOT/BRANCH" ] || mv "$SLOT/BRANCH" "$WORK/s1.branch"
     [ ! -e "$SLOT2/BRANCH" ] || mv "$SLOT2/BRANCH" "$WORK/s2.branch"
     printf 'feature/x\n' > "$SLOT/BRANCH"
-    on_terminal_hold 2 $'3\nn' env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
+    on_terminal_hold 2 $'3\nn\nq' env PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
         > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "^ +(❯ )?[0-9 ] " > "$WORK/menu.rows"
     grep -qE "^ +❯ 1  fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
@@ -2169,7 +2191,7 @@ if command -v script > /dev/null; then
     # Works with or without an upstream branch for the engine.
     grep -q "Update the engine" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "key 3 skipped the free leaf wrongly"; }
     grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "n on the engine row did not stop"; }
-    on_terminal_hold 2 $'2\nn' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+    on_terminal_hold 2 $'2\nn\nq' env PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
         || { cat "$WORK/menu.log"; fail "the numbered tree menu failed"; }
     grep -q "Deploy fixture s1 (staging) feature/x? \[y/N\]" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu does not name the slot in its question"; }
@@ -2177,7 +2199,7 @@ if command -v script > /dev/null; then
     [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
     [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
     mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; q did nothing; the numbered list picked and deployed fixture; slots hang under fixture with free ones in one leaf that numbers skip; the question names production or the slot"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q did nothing; the numbered list deployed fixture and came back with fresh rows, also after a failed deploy; slots hang under fixture with free ones in one leaf that numbers skip; the question names production or the slot"
 else
     check "skipped: no script command to make a terminal"
 fi

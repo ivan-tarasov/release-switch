@@ -221,7 +221,7 @@ under it as a tree:
 │       └ s2, s3        free
 │    6  release-switch  v2026.11.33 → v2026.11.34  run deploy self
 │
-│  ↑↓ or 1–6 to pick · enter to deploy · q to quit
+│  ↑↓/1-6 pick · Enter open · r refresh · q quit
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
@@ -234,7 +234,12 @@ rows are dimmed.
 Pick with the arrow keys, `j`/`k` or a number, then Enter: the menu shows the pending commits and
 asks `Deploy <project> (production) <live> → <new>? [y/N]`, or `Deploy <project> sN (staging)
 <branch>? [y/N]` for a slot. `y` runs exactly `deploy <project>`, `deploy <project>@sN` or
-`deploy self` for the engine. `q` or Esc quits. With `TERM=dumb` the menu is a numbered list with `Pick 1–N:`.
+`deploy self` for the engine, as a child process. When it ends, the menu shows whether it worked or
+failed and waits for Enter, then reads the rows again and puts the cursor back on the same row. A
+failed run keeps the menu open. Ctrl-C during a run stops that run and comes back to the menu; Ctrl-C
+in the list quits. After `deploy self` the new engine opens its own menu. `r` reads the rows again;
+`q` or Esc quits with exit code 0. With `TERM=dumb` the menu is a numbered list with `Pick 1–N, r to
+refresh, q to quit:` that loops the same way.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or
 fails with `name a project (…)` when there are several.
 

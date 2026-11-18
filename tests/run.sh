@@ -579,6 +579,41 @@ fresh="$(live_release)"
 serves "$fresh" || fail "server does not show $fresh"
 check "nothing new: no release, no backup; --force: live with $fresh"
 
+sleep 1
+step "--quiet prints nothing on success and the same errors on failure"
+commit "fixture quiet"
+git -C "$REPO" tag v2026.10.5 develop
+deploy fixture --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" || fail "a quiet deploy failed"
+[ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet deploy printed something"
+[ "$(live_release)" != "$fresh" ] || fail "a quiet deploy did not switch"
+fresh="$(live_release)"
+serves "$fresh" || fail "server does not show $fresh after a quiet deploy"
+deploy fixture -q > "$WORK/quiet.out" 2> "$WORK/quiet.err" || fail "a quiet deploy with nothing new failed"
+[ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet deploy with nothing new printed something"
+[ "$(live_release)" = "$fresh" ] || fail "a quiet deploy with nothing new changed the live release"
+sleep 1
+if FIXTURE_FAIL_BUILD=1 deploy fixture --force > "$WORK/loud.out" 2> "$WORK/loud.err"; then
+    fail "deploy with a failing build succeeded"
+fi
+sleep 1
+if FIXTURE_FAIL_BUILD=1 deploy fixture --force --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err"; then
+    fail "a quiet deploy with a failing build succeeded"
+fi
+[ ! -s "$WORK/quiet.out" ] || fail "a quiet failed deploy wrote to stdout"
+cmp -s "$WORK/loud.err" "$WORK/quiet.err" || fail "a quiet failed deploy shows other errors than a plain one"
+grep -q "^build: npm run prod exited with 1$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the step output"
+grep -q "^deploy: build failed$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the error"
+deploy fixture freeze "quiet test" > /dev/null
+if deploy fixture --force -q > "$WORK/quiet.out" 2> "$WORK/quiet.err"; then
+    fail "a quiet deploy ran while frozen"
+fi
+deploy fixture unfreeze > /dev/null
+[ ! -s "$WORK/quiet.out" ] || fail "a quiet frozen deploy wrote to stdout"
+grep -q "^deploy: deploys are frozen since today at .*: quiet test$" "$WORK/quiet.err" || fail "a quiet frozen deploy hides the error"
+grep -q "^Try: deploy fixture unfreeze$" "$WORK/quiet.err" || fail "a quiet frozen deploy hides the hint"
+[ "$(live_release)" = "$fresh" ] || fail "a failed quiet deploy changed the live release"
+check "quiet: silent deploy and skip; a failure shows the step output, error and hint"
+
 step "Freeze stops deploys and rollbacks until unfreeze"
 deploy fixture freeze "moving hosts" > /dev/null
 if deploy fixture --force 2> "$WORK/freeze.log"; then
@@ -730,6 +765,16 @@ if FIXTURE_HEALTH_SLEEP=x deploy check --all > /dev/null 2> "$WORK/check-all-err
 fi
 grep -q "^FAIL  fixture: health: " "$WORK/check-all-err.log" || fail "check --all does not report the health() problem"
 check "check --all stops health() at its first failing command, like check"
+deploy fixture check --quiet > "$WORK/check-ok.log" 2> "$WORK/check-err.log" || fail "a quiet check failed on a healthy site"
+[ ! -s "$WORK/check-ok.log" ] && [ ! -s "$WORK/check-err.log" ] || fail "a quiet check printed something on a healthy site"
+deploy check --all -q > "$WORK/check-ok.log" 2> "$WORK/check-err.log" || fail "a quiet check --all failed"
+[ ! -s "$WORK/check-ok.log" ] && [ ! -s "$WORK/check-err.log" ] || fail "a quiet check --all printed something"
+if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture check -q > "$WORK/check-ok.log" 2> "$WORK/check-err.log"; then
+    fail "a quiet check passed with a 404"
+fi
+[ ! -s "$WORK/check-ok.log" ] || fail "a quiet check printed ok lines"
+grep -q "^FAIL  fixture: site: .* answered 404" "$WORK/check-err.log" || fail "a quiet check hides the 404"
+check "a quiet check prints only problems"
 
 step "Alerts"
 export ALERTS="$WORK/alerts.log"

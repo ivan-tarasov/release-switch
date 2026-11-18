@@ -732,15 +732,19 @@ In a terminal, each command runs on rails, like this:
 ```
 ┌  release-switch v2026.11.1 · tarasov · deploy
 │
-◇  Cloning develop
-◇  Running build
+◆  Cloning develop
+◇  Cloning develop (2s)
+◆  Running build
 │  (the step's own output)
+◇  Running build (38s)
+◇  Checking https://example.com/ (1s)
 ◇  Deployed v2026.11.3 → v2026.11.4
 │
 └  Done in 42s
 ```
 
-A failure is marked with `■` on stderr and ends with `└  Failed after Ns`. In a pipe or cron, the
+Each step and stage shows its time when it ends (`1m 12s` from a minute on). On a terminal, the wait
+for `CHECK_URL` shows a spinner with the time waited out of `CHECK_WAIT` on one line. A failure is marked with `■` on stderr and ends with `└  Failed after Ns`. In a pipe or cron, the
 output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and mail stay clean.
 `DEPLOY_RAILS=1` forces the rails, `DEPLOY_RAILS=0` turns them off. `NO_COLOR` turns off colors.
 

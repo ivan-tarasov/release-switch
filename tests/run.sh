@@ -636,7 +636,11 @@ DEPLOY_RAILS=1 deploy fixture > "$WORK/rails.log"
 cat "$WORK/rails.log"
 fresh="$(live_release)"
 grep -qE "^┌  release-switch [0-9a-fv.+]+ · fixture · deploy$" "$WORK/rails.log" || fail "no opening line with the version"
-grep -q "^◇  Running build$" "$WORK/rails.log" || fail "steps are not on the rails"
+grep -q "^◆  Running build$" "$WORK/rails.log" || fail "steps are not on the rails"
+grep -qE "^◇  Running build \([0-9]+s\)$" "$WORK/rails.log" || fail "the build step does not show its time"
+grep -qE "^◇  Cloning .* \([0-9]+s\)$" "$WORK/rails.log" || fail "the clone does not show its time"
+grep -qE "^◇  Checking http://127.0.0.1:$PORT/ \([0-9]+s\)$" "$WORK/rails.log" || fail "the site check does not show its time"
+! grep -q $'\r' "$WORK/rails.log" || fail "the rails off a terminal have a spinner"
 grep -qE "^│    [0-9a-f]+ fixture rails$" "$WORK/rails.log" || fail "the shipped commits are not on the rail"
 grep -qE "^└  Done in [0-9]+s$" "$WORK/rails.log" || fail "no closing line"
 if FIXTURE_FAIL_BUILD=1 DEPLOY_RAILS=1 deploy fixture --force > "$WORK/rails.log" 2> "$WORK/rails-err.log"; then
@@ -648,7 +652,13 @@ DEPLOY_RAILS=1 deploy fixture status > "$WORK/rails.log"
 grep -q "^│  Live: *$fresh$" "$WORK/rails.log" || fail "status is not on the rail"
 deploy fixture status > "$WORK/rails.log"
 grep -q "^Live: *$fresh$" "$WORK/rails.log" || fail "status has rails in a pipe"
-check "a deploy, a failed deploy and status on the rails; plain lines in a pipe"
+deploy fixture --force > "$WORK/plain.log"
+grep -q "^==> Running build$" "$WORK/plain.log" || fail "a plain deploy does not show the build step"
+grep -q "^==> Checking http://127.0.0.1:$PORT/$" "$WORK/plain.log" || fail "a plain deploy does not show the site check"
+! grep -qE $'[0-9]s\\)$|◆|\r' "$WORK/plain.log" || fail "a plain deploy shows times or a spinner"
+[ "$(bash -c "$(sed -n '/^duration() {/,/^}/p' "$ROOT/deploy"); duration 38; echo; duration 72")" = $'38s\n1m 12s' ] \
+    || fail "times do not read 38s and 1m 12s"
+check "a deploy, a failed deploy and status on the rails with step times; plain lines in a pipe"
 
 step "Down and up for maintenance"
 deploy fixture down "database upgrade" > /dev/null
@@ -2109,6 +2119,18 @@ if command -v script > /dev/null; then
     ask_run "" fixture --force --yes
     ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "deploy --force --yes asked"
     [ "$(live_release)" != "$live" ] || fail "deploy --force --yes did not deploy"
+
+    # On the rails, a failing site check draws the spinner, then its time.
+    live="$(live_release)"
+    on_terminal_hold 10 "" env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=3 RELEASE_WAIT=0 NO_COLOR=1 \
+        CHECK_URL="http://127.0.0.1:$PORT/missing" "$ROOT/deploy" fixture --force --yes > "$WORK/spin.log" 2>&1 || true
+    grep -qE "◒  Checking http://127.0.0.1:$PORT/missing · [0-9]+s of 3s" "$WORK/spin.log" \
+        || { cat "$WORK/spin.log"; fail "the site check shows no spinner on a terminal"; }
+    grep -qE "◇  Checking http://127.0.0.1:$PORT/missing \([0-9]+s\)" "$WORK/spin.log" \
+        || { cat "$WORK/spin.log"; fail "the site check does not end with its time"; }
+    [ "$(live_release)" = "$live" ] || fail "the failed check on a terminal left a new release live"
+    # Later tests expect no failed release.
+    rm -rf "$BASE"/releases/.failed-*
     check "on a terminal rollback, down, cache and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes and a slot did not ask; a pipe was not asked"
 else
     check "skipped: no script command to make a terminal"

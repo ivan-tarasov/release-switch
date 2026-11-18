@@ -123,8 +123,13 @@ fi
 # 1 once intro has opened the rails, so on_exit closes them.
 INTRO=0
 
-# 1 while the release tag wait line is open on a terminal, so later output starts on a new line.
+# 1 while the release tag wait line or the site check spinner is open on a terminal, so later
+# output starts on a new line.
 WAIT_LINE=0
+
+# The text and start time of the stage that stage_done ends.
+STAGE_TEXT=""
+STAGE_STARTED=0
 
 # Hides the user and password in URLs: https://user:token@host becomes https://***@host.
 # ssh://git@host stays, as git@ holds no secret.
@@ -144,6 +149,33 @@ say() {
     else
         printf '==> %s\n' "$text"
     fi
+}
+
+# Seconds $1 as "38s", or "1m 12s" from a minute on.
+duration() {
+    if [ "$1" -lt 60 ]; then
+        printf '%ss' "$1"
+    else
+        printf '%sm %ss' $(($1 / 60)) $(($1 % 60))
+    fi
+}
+
+# Starts a timed stage: "◆  $1" on the rails, the say line elsewhere. stage_done ends it.
+stage_start() {
+    STAGE_TEXT="$1"
+    STAGE_STARTED="$(date +%s)"
+
+    if [ "$RAILS" -eq 1 ]; then
+        printf '%s◆%s  %s\n' "$C_GREEN" "$C_OFF" "$(redact "$1")"
+    else
+        say "$1"
+    fi
+}
+
+# Ends the stage on the rails: "◇  Running build (38s)". Prints nothing elsewhere.
+stage_done() {
+    [ "$RAILS" -eq 1 ] || return 0
+    say "$STAGE_TEXT ($(duration $(($(date +%s) - STAGE_STARTED))))"
 }
 
 warn() {
@@ -1394,7 +1426,7 @@ run_step() {
     RUN_STATUS=0
     RUN_ERROR=""
     declare -F "$1" > /dev/null || return 0
-    say "Running $1"
+    stage_start "Running $1"
 
     # Off here, so `set -e` inside the subshell stops the step at its first failing command.
     set +e
@@ -1409,6 +1441,8 @@ run_step() {
         RUN_ERROR="$1 ran past STEP_TIMEOUT ($STEP_TIMEOUT s)"
     elif [ "$status" -ne 0 ]; then
         RUN_ERROR="$1 failed"
+    else
+        stage_done
     fi
 }
 
@@ -1525,26 +1559,65 @@ probe() {
 }
 
 # Polls CHECK_URL until it answers 200 (with the new version, unless CHECK_VERSION=0),
-# or CHECK_WAIT runs out.
+# or CHECK_WAIT runs out. On the rails on a terminal, a spinner shows the time waited.
 release_is_serving() {
-    local expected="$1" deadline
-    deadline=$(($(date +%s) + CHECK_WAIT))
+    local expected="$1" deadline spin=0 frame
+
+    if [ "$RAILS" -eq 1 ] && [ -t 1 ]; then
+        spin=1
+        STAGE_TEXT="Checking $CHECK_URL"
+        STAGE_STARTED="$(date +%s)"
+    else
+        stage_start "Checking $CHECK_URL"
+    fi
+    deadline=$((STAGE_STARTED + CHECK_WAIT))
 
     while :; do
+        [ "$spin" -eq 0 ] || spin_line 0
         probe "$expected"
 
         if [ "$PROBE_STATUS" = 200 ] && { [ "$CHECK_VERSION" = 0 ] || [ "$PROBE_VERSION" = "$expected" ]; }; then
+            end_spin_line
+            stage_done
+
             return 0
         fi
 
         if [ "$(date +%s)" -ge "$deadline" ]; then
+            end_spin_line
+            stage_done
             warn "$CHECK_URL answered ${PROBE_STATUS:-nothing (no answer)} with version ${PROBE_VERSION:-none}"
 
             return 1
         fi
 
-        sleep 2
+        if [ "$spin" -eq 0 ]; then
+            sleep 2
+        else
+            for frame in 1 2 3 4; do
+                spin_line "$frame"
+                sleep 0.5
+            done
+        fi
     done
+}
+
+# Draws the check spinner, frame $1, over its own line: "◒  Checking <url> · 4s of 150s".
+# It never reads the keyboard or changes the terminal settings.
+spin_line() {
+    local frames=(◒ ◐ ◓ ◑)
+
+    printf '\r\033[K%s%s%s  %s %s· %s of %s%s' "$C_GREEN" "${frames[$(($1 % 4))]}" "$C_OFF" "$(redact "$STAGE_TEXT")" \
+        "$C_DIM" "$(duration $(($(date +%s) - STAGE_STARTED)))" "$(duration "$CHECK_WAIT")" "$C_OFF"
+    WAIT_LINE=1
+}
+
+# Clears the spinner line, so stage_done writes over it.
+end_spin_line() {
+    if [ "$WAIT_LINE" -eq 1 ]; then
+        printf '\r\033[K'
+        WAIT_LINE=0
+    fi
 }
 
 prune() {
@@ -1712,7 +1785,6 @@ maintenance_up() {
     rm -f "$DEPLOY_BASE/$DOWN_FILE"
 
     if [ -n "$CHECK_URL" ]; then
-        say "Checking $CHECK_URL"
         STAGE=check
         release_is_serving "$LOG_RELEASE" || fail "up ran, but the site does not serve $LOG_RELEASE" "$(check_hint "$LOG_RELEASE")"
     fi
@@ -1907,7 +1979,7 @@ deploy() {
         esac
     fi
 
-    say "Cloning ${ref:-$(branch_label)}"
+    stage_start "Cloning ${ref:-$(branch_label)}"
     # Under the lock, so any .building-* folder or BUILDING_FILE left is from a killed run.
     remove_unfinished
     NEW_RELEASE=".building-$stamp"
@@ -1944,6 +2016,7 @@ deploy() {
             return
         fi
     fi
+    stage_done
     sha="$(git -C "$DEPLOY_BASE/releases/.building-$stamp" rev-parse --short HEAD)"
     commit_details "$DEPLOY_BASE/releases/.building-$stamp"
 
@@ -2005,7 +2078,7 @@ deploy() {
     if is_down; then
         # The maintenance page has no version to check.
         warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"
-    elif say "Checking $CHECK_URL" && ! release_is_serving "$NEW_RELEASE"; then
+    elif ! release_is_serving "$NEW_RELEASE"; then
         if [ -n "$PREVIOUS_RELEASE" ]; then
             STAGE="check, switched back to $PREVIOUS_RELEASE"
             say "Rolling back to $PREVIOUS_RELEASE"
@@ -2181,7 +2254,6 @@ rollback() {
     if is_down; then
         warn "not checking $CHECK_URL: the site is down for maintenance; check it with: deploy ${PROJECT:+$PROJECT }up"
     else
-        say "Checking $CHECK_URL"
         release_is_serving "$target" || fail "$target is linked, but the site does not serve it yet" "$(check_hint "$target")"
     fi
     log_event rollback "$target" "ok, from $live"

@@ -4,7 +4,7 @@
 #
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
 #                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
-#                     | unfreeze | status | check | log [count] | path [--base]
+#                     | unfreeze | status | diff [--ref <ref>] | check | log [count] | path [--base]
 #                     | rollback [name] [--yes] [--dry-run]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
 #                     | free | copy-from <project> [--yes] [path ...] | help [command]]
@@ -91,11 +91,11 @@ QUIET=0
 STEP_LOG=""
 
 # The commands, for help and for typo hints.
-COMMANDS=(deploy freeze unfreeze down up cache status check log path rollback slots stage staging free copy-from init
+COMMANDS=(deploy freeze unfreeze down up cache status diff check log path rollback slots stage staging free copy-from init
     self help version)
 
 # The staging subcommands, for help and for typo hints.
-STAGING_COMMANDS=(checkout update free copy-from status log path rollback down up cache)
+STAGING_COMMANDS=(checkout update free copy-from status diff log path rollback down up cache)
 
 # The old form of a staging command, set by staging_args.
 STAGING_ARGS=()
@@ -2311,6 +2311,98 @@ show_pending() {
     fi
 }
 
+# The files the next deploy would change: the live commit against the tip of DEPLOY_BRANCH, or
+# against --ref. Only reads: no lock and no log line.
+show_diff() {
+    local usage="usage: deploy [project] diff [--ref <tag, branch or sha>]"
+    local ref="" live repo live_sha tip target="" label tmp files
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --ref=?*) ref="${1#--ref=}" ;;
+            --ref)
+                [ -n "${2:-}" ] || fail "$usage"
+                ref="$2"
+                shift
+                ;;
+            *) fail "$usage" ;;
+        esac
+        shift
+    done
+
+    [ "$ref" = "${ref#-}" ] || fail "$usage"
+    resolve_base
+    live="$(current_release)"
+    [ -n "$live" ] || fail "no live release to compare with" "deploy ${PROJECT:+$PROJECT }status"
+
+    label="${ref:-$(branch_label)}"
+    repo="${REPO_URL:-$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null || true)}"
+    live_sha="$(git -C "$DEPLOY_BASE/releases/$live" rev-parse HEAD 2>/dev/null || true)"
+
+    if [ -z "$repo" ] || [ -z "$live_sha" ]; then
+        fail "no repo to compare $live with" "deploy ${PROJECT:+$PROJECT }status"
+    fi
+
+    if [ -z "$ref" ]; then
+        tip="$(git ls-remote "$repo" "$(branch_ref)" 2>/dev/null | cut -f1)" || true
+        [ -n "$tip" ] || fail "cannot read $label from the repo" "git ls-remote $repo"
+
+        if [ "$tip" = "$live_sha" ]; then
+            printf 'Nothing pending: %s is the tip of %s\n' "$live" "$label"
+
+            return
+        fi
+    fi
+
+    tmp="$(mktemp -d)"
+
+    if ! history_clone "$repo" "$tmp/repo"; then
+        rm -rf "$tmp"
+        fail "cannot clone the repo" "git ls-remote $repo"
+    fi
+
+    # A ref that is not in the history of DEPLOY_BRANCH is fetched on its own.
+    target="$(git -C "$tmp/repo" rev-parse --verify --quiet "${ref:-HEAD}^{commit}" 2>/dev/null)" \
+        || target="$(git -C "$tmp/repo" fetch --quiet origin "$ref" 2>/dev/null \
+            && git -C "$tmp/repo" rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null)" \
+        || target=""
+
+    if [ -z "$target" ]; then
+        rm -rf "$tmp"
+        fail "no tag, branch or commit $label in the repo"
+    fi
+
+    if [ "$target" = "$live_sha" ]; then
+        rm -rf "$tmp"
+        printf 'Nothing pending: %s already runs %s\n' "$live" "$label"
+
+        return
+    fi
+
+    # The clone holds commits only. Names need the folder listings of both commits, fetched here;
+    # renames and line counts would need the file contents too.
+    if ! files="$(git -C "$tmp/repo" diff --name-status --no-renames "$live_sha" "$target" 2>/dev/null)"; then
+        rm -rf "$tmp"
+        fail "cannot compare ${live_sha:0:7} with ${target:0:7}" "git ls-remote $repo"
+    fi
+
+    rm -rf "$tmp"
+
+    if [ -z "$files" ]; then
+        printf 'Nothing pending: no file differs between %s and %s\n' "$live" "$label"
+
+        return
+    fi
+
+    printf 'Changes:   %s (%s) to %s (%s)\n' "$live" "${live_sha:0:7}" "$label" "${target:0:7}"
+    printf '%s\n' "$files" | awk -F'\t' '
+        { printf "  %s  %s\n", $1, $2; count[$1]++ }
+        END {
+            printf "%d file%s changed: %d added, %d changed, %d deleted\n", NR, (NR == 1 ? "" : "s"),
+                count["A"], count["M"] + count["T"], count["D"]
+        }'
+}
+
 status() {
     resolve_base
 
@@ -3018,6 +3110,8 @@ menu_actions() {
                     ;;
             esac
 
+            [ "$pending" = "up to date" ] || menu_add diff "Changed files"
+
             menu_add log "Log"
             menu_add rollback "Rollback…"
 
@@ -3277,7 +3371,7 @@ menu_act() {
             ;;
         redeploy) menu_run "$target" --force ;;
         selflog) menu_run self log ;;
-        status | check | log | cache | unfreeze | up) menu_run "$target" "$1" ;;
+        status | diff | check | log | cache | unfreeze | up) menu_run "$target" "$1" ;;
         rollback)
             menu_child "$target" rollback --dry-run
 
@@ -4310,7 +4404,7 @@ staging_args() {
                 STAGING_ARGS=("$target" slots update)
             fi
             ;;
-        free | copy-from | status | log | path | rollback | down | up | cache)
+        free | copy-from | status | diff | log | path | rollback | down | up | cache)
             [ "$target" != "${target%@*}" ] || fail "$sub works on one slot: deploy staging $target@sN $sub"
             STAGING_ARGS=("$target" "$sub" "$@")
             ;;
@@ -4374,6 +4468,13 @@ EOF
                              releases, the disk and the site
   status --all               One line per project, and one for the engine; fails if any site does
                              not serve its live release. Production only, no slots
+EOF
+            ;;
+        diff)
+            cat <<EOF
+  diff [--ref <ref>]         List the files the next deploy would change: the live release
+                             against the newest commit, or against a tag, branch or commit.
+                             Changes nothing
 EOF
             ;;
         check)
@@ -4486,6 +4587,12 @@ EOF
                              Show the slot's status
 EOF
             ;;
+        "staging diff")
+            cat <<EOF
+  staging <project>@sN diff [--ref <ref>]
+                             List the files the slot's next deploy would change
+EOF
+            ;;
         "staging log")
             cat <<EOF
   staging <project>@sN log [count]
@@ -4562,6 +4669,7 @@ command_examples() {
         up) printf '%s\n' "deploy example up" ;;
         cache) printf '%s\n' "deploy example cache" "deploy example cache --yes" "deploy example@s1 cache" ;;
         status) printf '%s\n' "deploy example status" "deploy status --all" ;;
+        diff) printf '%s\n' "deploy example diff" "deploy example diff --ref v2026.11.1" "deploy example@s1 diff" ;;
         check) printf '%s\n' "deploy example check" "deploy check --all" ;;
         log) printf '%s\n' "deploy example log 50" ;;
         path) printf '%s\n' 'cd "$(deploy path example)"' ;;
@@ -4576,6 +4684,7 @@ command_examples() {
         "staging free") printf '%s\n' "deploy staging example@s1 free" ;;
         "staging copy-from") printf '%s\n' "deploy staging example@s1 copy-from example --yes" ;;
         "staging status") printf '%s\n' "deploy staging example@s1 status" "deploy staging example@s1" ;;
+        "staging diff") printf '%s\n' "deploy staging example@s1 diff" ;;
         "staging log") printf '%s\n' "deploy staging example@s1 log 5" ;;
         "staging path") printf '%s\n' 'cd "$(deploy staging example@s1 path)"' ;;
         "staging rollback") printf '%s\n' "deploy staging example@s1 rollback" ;;
@@ -4983,6 +5092,10 @@ main() {
             ;;
         status)
             report "${PROJECT:+$PROJECT · }status" status
+            ;;
+        diff)
+            shift
+            report "${PROJECT:+$PROJECT · }diff" show_diff "$@"
             ;;
         check)
             report "${PROJECT:+$PROJECT · }check" check

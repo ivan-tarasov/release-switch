@@ -825,6 +825,10 @@ If a run died while it removed a stale lock, you get
 `a stale lock removal stopped half way; remove <base>/.deploy.lock.break and <base>/.deploy.lock if no deploy is running`.
 Do what it says once no deploy runs.
 
+Two runs that start at the same moment can race for the lock. The one that loses says
+`lost the lock to another deploy while taking it` with `Try: deploy example status`. Check
+what the other run does, then run again.
+
 ### Deploys are frozen
 
 ```
@@ -921,19 +925,26 @@ no longer keeps can come back with `deploy example --ref <tag or sha>`. Other ro
 ### deploy self cannot update
 
 ```
-deploy: could not update <engine folder>; it may have local changes or a branch that moved apart
+deploy: could not update <engine folder>; it has local changes
+Try: git -C <engine folder> status
+```
+
+```
+deploy: could not update <engine folder>; it has local commits the remote lacks
+Try: git -C <engine folder> log @{u}..
 ```
 
 `deploy self` only does a fast-forward `git pull`. It stops when the engine folder has local
-changes or its branch has commits the remote lacks. Run `git -C ~/release-switch status` and
-`git -C ~/release-switch log @{u}..`, then undo or move the changes and run `deploy self`
-again. Project files in `projects/` are not tracked, so they never block it. The last line of
-`deploy status --all` also says when the engine has local changes.
+changes or its branch has commits the remote lacks, and says which. Run the command from the
+hint, undo or move the changes or commits, and run `deploy self` again. Project files in
+`projects/` are not tracked, so they never block it. The last line of `deploy status --all`
+also says when the engine has local changes.
 
 ### No release tag
 
 ```
 deploy: no release tag on abc1234 after 90 s; deploying without one
+Try: deploy example --no-wait, or RELEASE_WAIT=0 if the repo does not tag every merge
 ```
 
 A warning: the deploy goes on, and the release name has no tag. The release workflow did not tag

@@ -1513,6 +1513,8 @@ RELEASE_WAIT=2 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
 grep -q "Waiting for the release tag on $waiting (0 s of 2)" "$WORK/wait.log" || fail "deploy did not wait for the release tag"
 grep -q "Waiting for the release tag on $waiting (2 s of 2)" "$WORK/wait.log" || fail "the wait line shows no elapsed seconds"
 grep -q "no release tag on $waiting after 2 s; deploying without one" "$WORK/wait.log" || fail "no warning after the wait"
+grep -q "^Try: deploy fixture --no-wait, or RELEASE_WAIT=0 if the repo does not tag every merge$" "$WORK/wait.log" \
+    || fail "no hint after the wait"
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the deploy after the wait deployed $(live_release)"
 check "the wait ran out after 2 s; $waiting deployed without a tag"
 
@@ -2428,7 +2430,9 @@ git -C "$WORK/engine-src" push --quiet "$WORK/engine.git" main
 if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
     fail "self-update ran over a local change"
 fi
-grep -q "could not update" "$WORK/self.log" || fail "no message when self-update cannot pull"
+grep -q "could not update $WORK/engine; it has local changes$" "$WORK/self.log" \
+    || fail "no local changes cause when self-update cannot pull"
+grep -q "^Try: git -C $WORK/engine status$" "$WORK/self.log" || fail "no hint for local changes in the engine"
 check "self-update shows both versions, lists new tags and commits, says when it is up to date, and stops on local changes; --version follows the tags"
 
 step "status --all shows the engine"
@@ -2458,7 +2462,18 @@ if "$WORK/engine/deploy" self nope 2> "$WORK/self-log.log"; then
     fail "an unknown self command succeeded"
 fi
 grep -q "unknown command: deploy self nope" "$WORK/self-log.log" || fail "no message for an unknown self command"
-check "self log lists installed and unpulled commits; an unknown self command fails"
+git -C "$WORK/engine" -c user.name=test -c user.email=test@example.com commit --quiet --allow-empty -m "Local engine"
+if "$WORK/engine/deploy" self-update > /dev/null 2> "$WORK/self.log"; then
+    fail "self-update ran over a local commit"
+fi
+grep -q "could not update $WORK/engine; it has local commits the remote lacks$" "$WORK/self.log" \
+    || fail "no local commits cause when self-update cannot pull"
+grep -q "^Try: git -C $WORK/engine log @{u}..$" "$WORK/self.log" || fail "no hint for local commits in the engine"
+if grep -q "local changes" "$WORK/self.log"; then
+    fail "self-update names local changes for a local commit"
+fi
+git -C "$WORK/engine" reset --quiet --hard HEAD~1
+check "self log lists installed and unpulled commits; an unknown self command fails; a local commit stops self"
 
 step "self waits for the release tag of a new engine commit"
 waiting="$(git -C "$WORK/engine.git" rev-parse --short main)"

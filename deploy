@@ -692,7 +692,7 @@ acquire_lock() {
     if ! printf '%s %s %s\n' "$$" "$(date +%s)" "$1" 2>/dev/null > "$LOCK_DIR/owner.$$" \
         || ! mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner" 2>/dev/null; then
         LOCK_DIR=""
-        fail "lost the lock to another deploy while taking it"
+        fail "lost the lock to another deploy while taking it" "deploy ${PROJECT:+$PROJECT }status"
     fi
 }
 
@@ -1142,6 +1142,7 @@ wait_release_tag() {
             say "no-release merge; deploying without a tag"
         else
             warn "no release tag on $short after $RELEASE_WAIT s; deploying without one"
+            hint_line "deploy ${PROJECT:-self} --no-wait, or RELEASE_WAIT=0 if the repo does not tag every merge"
         fi
 
         return
@@ -4113,8 +4114,7 @@ self_update() {
     from_version="$(engine_version)"
 
     say "Updating the engine in $ENGINE_DIR"
-    git -C "$ENGINE_DIR" pull --quiet --ff-only \
-        || fail "could not update $ENGINE_DIR; it may have local changes or a branch that moved apart"
+    git -C "$ENGINE_DIR" pull --quiet --ff-only || self_update_failed
     after="$(git -C "$ENGINE_DIR" rev-parse HEAD)"
 
     if [ "$before" = "$after" ]; then
@@ -4142,6 +4142,24 @@ self_update() {
     fi
 
     self_update_notes "$before" "$after" "$tags" | rail
+}
+
+# Stops after a failed pull of the engine, with the cause that applies.
+self_update_failed() {
+    local ahead
+
+    # A branch that moved apart always stops a fast-forward; local changes only when they clash.
+    ahead="$(git -C "$ENGINE_DIR" rev-list --count '@{u}..' 2> /dev/null)" || ahead=0
+
+    if [ "$ahead" -gt 0 ]; then
+        fail "could not update $ENGINE_DIR; it has local commits the remote lacks" "git -C $ENGINE_DIR log @{u}.."
+    fi
+
+    if [ -n "$(git -C "$ENGINE_DIR" status --porcelain)" ]; then
+        fail "could not update $ENGINE_DIR; it has local changes" "git -C $ENGINE_DIR status"
+    fi
+
+    fail "could not update $ENGINE_DIR" "git -C $ENGINE_DIR pull --ff-only"
 }
 
 # What changed: each new tag with its GitHub release notes (or its commits when gh cannot read

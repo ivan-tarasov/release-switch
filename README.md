@@ -131,7 +131,7 @@ Staging (see [Staging](#staging)):
   staging <project>@sN free         Forget the slot's branch, deploy DEPLOY_BRANCH
   staging <project>@sN copy-from <project> [--yes] [path ...]
                                     Copy production's SHARED data into the slot
-  staging <project>@sN status | log | path | rollback | down | up | cache
+  staging <project>@sN status | diff | log | path | rollback | down | up | cache
 
 Commands:
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
@@ -168,6 +168,13 @@ Commands:
                     cron as a simple monitor. Pending commits come from
                     the repo: a quick check, plus a commits-only clone when there are any.
                     Production only: staging slots are not listed
+  diff [--ref <ref>]
+                    The files the next deploy would change: the live release against the newest
+                    commit of DEPLOY_BRANCH, or against a tag, branch or commit. One line per
+                    file (A added, M changed, D deleted), then a count. Says so when nothing is
+                    pending. Changes nothing: no lock, no log line. A renamed file shows as a
+                    D and an A, and there are no line counts: both would need the file contents,
+                    and diff fetches only the file names
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
@@ -550,7 +557,7 @@ deploy staging example update                       every slot with new commits
 deploy staging example@s1 free                      forget the branch, back on DEPLOY_BRANCH
 deploy staging example@s1 copy-from example         production data in
 deploy staging example@s1                           the slot's status
-deploy staging example@s1 log | path | rollback | down | up | cache
+deploy staging example@s1 diff | log | path | rollback | down | up | cache
 ```
 
 With one project with slots, the project can be left out: `deploy staging`,

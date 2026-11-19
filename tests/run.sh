@@ -370,6 +370,12 @@ grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fai
 grep -q "^Pending: *none (live is the tip of develop)" "$WORK/status.log" || fail "status shows pending commits when live is the tip"
 check "status shows the live release, the rollback target and the site"
 
+step "Diff says so when nothing is pending"
+deploy fixture diff > "$WORK/diff.log" || fail "diff failed with nothing pending"
+cat "$WORK/diff.log"
+[ "$(cat "$WORK/diff.log")" = "Nothing pending: $latest is the tip of develop" ] || fail "diff does not say that nothing is pending"
+check "diff prints one line and exits with 0"
+
 step "Status lists commits not deployed yet"
 commit "fixture pending one"
 commit "fixture pending two"
@@ -379,6 +385,51 @@ grep -q "^Pending: *2 commit(s) on develop, not deployed yet" "$WORK/pending.log
 grep -qE "^ +[0-9a-f]+ fixture pending two$" "$WORK/pending.log" || fail "status does not list the pending commits"
 deploy status --all | grep -qE "^fixture +.*2 pending" || fail "status --all does not note the pending commits"
 check "status lists 2 pending commits; status --all notes them"
+
+step "Diff lists the files the next deploy would change"
+log_lines="$(wc -l < "$BASE/deploy.log")"
+deploy fixture diff > "$WORK/diff.log" || fail "diff failed with pending commits"
+cat "$WORK/diff.log"
+grep -qE "^Changes: +$latest \([0-9a-f]{7}\) to develop \([0-9a-f]{7}\)$" "$WORK/diff.log" || fail "diff does not name the two ends"
+grep -q "^  M  VERSION$" "$WORK/diff.log" || fail "diff does not list the changed file"
+grep -q "^1 file changed: 0 added, 1 changed, 0 deleted$" "$WORK/diff.log" || fail "diff shows no count line"
+[ "$(deploy fixture diff --quiet)" = "$(cat "$WORK/diff.log")" ] || fail "diff --quiet does not print the file list"
+[ "$(live_release)" = "$latest" ] || fail "diff changed the live release"
+[ "$(wc -l < "$BASE/deploy.log")" = "$log_lines" ] || fail "diff wrote a log line"
+[ ! -e "$BASE/.deploy.lock" ] || fail "diff left a lock"
+# --ref: a branch, the live commit, and an older commit with other files.
+live_sha="$(git -C "$BASE/current" rev-parse HEAD)"
+deploy fixture diff --ref develop | grep "^  M  VERSION$" > /dev/null || fail "diff --ref develop does not list the changed file"
+[ "$(deploy fixture diff --ref "$live_sha")" = "Nothing pending: $latest already runs $live_sha" ] \
+    || fail "diff --ref of the live commit does not say that nothing is pending"
+git -C "$WORK/commit" rm --quiet tests/smoke.txt
+printf 'new\n' > "$WORK/commit/added.txt"
+git -C "$WORK/commit" add added.txt
+git -C "$WORK/commit" -c user.name=test -c user.email=test@example.com commit --quiet -m "diff branch"
+git -C "$WORK/commit" push --quiet origin HEAD:refs/heads/diff-test
+deploy fixture diff --ref=diff-test > "$WORK/diff.log" || fail "diff --ref of another branch failed"
+cat "$WORK/diff.log"
+grep -q "^  A  added.txt$" "$WORK/diff.log" || fail "diff --ref does not list an added file"
+grep -q "^  D  tests/smoke.txt$" "$WORK/diff.log" || fail "diff --ref does not list a deleted file"
+grep -q "^3 files changed: 1 added, 1 changed, 1 deleted$" "$WORK/diff.log" || fail "diff --ref counts the files wrong"
+git -C "$REPO" update-ref -d refs/heads/diff-test
+if deploy fixture diff --ref no-such-ref > /dev/null 2> "$WORK/diff.err"; then
+    fail "diff --ref of an unknown ref succeeded"
+fi
+grep -q "no tag, branch or commit no-such-ref in the repo" "$WORK/diff.err" || fail "no message for an unknown --ref"
+if deploy fixture diff --ref > /dev/null 2> "$WORK/diff.err"; then
+    fail "diff --ref without a value succeeded"
+fi
+grep -q "usage: deploy \[project\] diff \[--ref <tag, branch or sha>\]" "$WORK/diff.err" || fail "no usage for diff --ref without a value"
+# No live release yet: an error and a hint.
+printf 'DEPLOY_BASE="%s"\nREPO_URL="file://%s"\n' "$WORK/nolive" "$REPO" > "$WORK/projects/nolive.env"
+if deploy nolive diff > /dev/null 2> "$WORK/diff.err"; then
+    fail "diff without a live release succeeded"
+fi
+grep -q "no live release to compare with" "$WORK/diff.err" || fail "no message for diff without a live release"
+grep -q "^Try: deploy nolive status$" "$WORK/diff.err" || fail "no hint for diff without a live release"
+rm -rf "$WORK/projects/nolive.env" "$WORK/nolive"
+check "diff lists files with A, M and D, counts them, takes --ref, and fails with a hint when nothing is live"
 
 step "Status of all projects"
 deploy status --all > "$WORK/all.log"
@@ -1976,6 +2027,9 @@ deploy staging fixture@s1 | grep -v -e deployed -e "^Disk:" > "$WORK/staging.log
 diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 does not show the slot's status"
 deploy staging fixture@s1 status | grep -v -e deployed -e "^Disk:" > "$WORK/staging.log"
 diff "$WORK/status.log" "$WORK/staging.log" || fail "staging fixture@s1 status does not show the slot's status"
+deploy fixture@s1 diff > "$WORK/status.log" || fail "fixture@s1 diff failed"
+grep -q "^Nothing pending: $(slot_live) is the tip of " "$WORK/status.log" || fail "fixture@s1 diff does not compare the slot"
+[ "$(deploy staging fixture@s1 diff)" = "$(cat "$WORK/status.log")" ] || fail "staging fixture@s1 diff does not match fixture@s1 diff"
 if deploy staging fixture free > /dev/null 2> "$WORK/staging.err"; then
     fail "staging free without a slot was not refused"
 fi

@@ -1146,6 +1146,113 @@ STEP_TIMEOUT="$watchdog" deploy fixture --force > /dev/null || fail "a deploy wi
 pgrep -f "^sleep $watchdog\$" > /dev/null && fail "a good deploy left a watchdog running"
 check "TERM stopped the step and its watchdog and freed the lock; a good deploy leaves no watchdog"
 
+step "A deploy whose output pipe closes during the build still finishes and cleans up"
+sleep 1
+: > "$ALERTS"
+log_lines="$(wc -l < "$BASE/deploy.log")"
+before="$(live_release)"
+code=0
+# The reader leaves as the build starts, so every later write of the deploy finds a closed pipe.
+FIXTURE_BUILD_SLEEP=2 NOTIFY_ON=all NOTIFY_CMD="$alert_cmd" deploy fixture --force 2> "$WORK/pipe.err" \
+    | sed '/Running build/q' > /dev/null || code=$?
+cat "$WORK/pipe.err"
+[ "$code" = 0 ] || fail "the deploy with a closed output pipe exited with $code"
+[ ! -e "$BASE/.deploy.lock" ] || fail "the deploy with a closed output pipe left the lock behind"
+[ "$(live_release)" != "$before" ] || fail "the deploy with a closed output pipe did not switch"
+[ "$(wc -l < "$BASE/deploy.log")" -eq $((log_lines + 1)) ] || fail "the deploy with a closed output pipe wrote no log line"
+[ "$(tail -n1 "$BASE/deploy.log" | cut -f2-4)" = "deploy	$(live_release)	ok" ] \
+    || fail "the log line of the deploy with a closed output pipe is not ok: $(tail -n1 "$BASE/deploy.log")"
+grep -qE "^deploy\|fixture: deploy $(live_release): ok \([0-9]+s\)$" "$ALERTS" || fail "the deploy with a closed output pipe sent no alert"
+! grep -q "Broken pipe" "$WORK/pipe.err" || fail "the deploy with a closed output pipe printed a write error"
+check "the lock is free, the log says ok and the alert went out"
+
+step "A failing build with a closed output pipe still runs the failed step, logs and alerts"
+sleep 1
+: > "$ALERTS"
+rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep" "$WORK/pipe.code" "$BASE/shared/data/failed"
+log_lines="$(wc -l < "$BASE/deploy.log")"
+before="$(live_release)"
+{
+    code=0
+    FIXTURE_SLOW_BUILD="$WORK/slow.pid" NOTIFY_CMD="$alert_cmd" deploy fixture --force || code=$?
+    printf '%s\n' "$code" > "$WORK/pipe.code"
+} 2>&1 | sed '/Running build/q' > /dev/null &
+reader=$!
+tries=40
+until [ -s "$WORK/slow.pid.sleep" ]; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "the slow build did not start"
+    sleep 0.5
+done
+# The reader is gone before the build fails: stopping its sleep fails the build.
+tries=40
+while kill -0 "$reader" 2>/dev/null; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "the reader of the deploy output did not leave"
+    sleep 0.5
+done
+kill "$(cat "$WORK/slow.pid.sleep")"
+tries=40
+until [ -s "$WORK/pipe.code" ]; do
+    tries=$((tries - 1))
+    [ "$tries" -gt 0 ] || fail "the deploy with a failing build and a closed output pipe did not end"
+    sleep 0.5
+done
+[ "$(cat "$WORK/pipe.code")" = 1 ] || fail "the failing build with a closed output pipe exited with $(cat "$WORK/pipe.code"), not 1"
+[ ! -e "$BASE/.deploy.lock" ] || fail "the failing build with a closed output pipe left the lock behind"
+[ "$(live_release)" = "$before" ] || fail "the failing build with a closed output pipe changed the live release"
+[ -s "$BASE/shared/data/failed" ] || fail "the failed step did not run with a closed output pipe"
+[ "$(wc -l < "$BASE/deploy.log")" -eq $((log_lines + 1)) ] || fail "the failing build with a closed output pipe wrote no log line"
+[ "$(tail -n1 "$BASE/deploy.log" | cut -f2,4)" = "deploy	failed: build" ] \
+    || fail "the log does not say failed: build: $(tail -n1 "$BASE/deploy.log")"
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" \
+    || fail "the failing build with a closed output pipe sent no alert"
+check "the failed step ran, the log says failed: build, the alert went out and the lock is free"
+
+step "A status or diff stopped during the history clone leaves no temp folder"
+commit "fixture stopped clone"
+mkdir "$WORK/slowgit" "$WORK/tmp"
+# A git whose clone stays until the test lets it go, so the TERM arrives during the clone.
+cat > "$WORK/slowgit/git" <<EOF
+#!/bin/sh
+[ "\$1" = clone ] || exec "$(command -v git)" "\$@"
+"$(command -v git)" "\$@"
+status=\$?
+touch "$WORK/slowgit/cloned"
+tries=100
+until [ -e "$WORK/slowgit/go" ] || [ "\$tries" -eq 0 ]; do
+    tries=\$((tries - 1))
+    sleep 0.1
+done
+exit "\$status"
+EOF
+chmod +x "$WORK/slowgit/git"
+for command in status diff; do
+    rm -f "$WORK/slowgit/cloned" "$WORK/slowgit/go"
+    env PATH="$WORK/slowgit:$PATH" TMPDIR="$WORK/tmp" PROJECTS_DIR="$WORK/projects" "$ROOT/deploy" fixture "$command" \
+        > /dev/null 2>&1 &
+    pid=$!
+    tries=40
+    until [ -e "$WORK/slowgit/cloned" ]; do
+        tries=$((tries - 1))
+        [ "$tries" -gt 0 ] || fail "$command did not start its history clone"
+        sleep 0.5
+    done
+    [ -n "$(find "$WORK/tmp" -name repo)" ] || fail "the history clone of $command is not in TMPDIR, so the test proves nothing"
+    kill -TERM "$pid"
+    touch "$WORK/slowgit/go"
+    code=0
+    wait "$pid" || code=$?
+    [ "$code" = 143 ] || fail "TERM during the history clone of $command exited with $code, not 143"
+    [ -z "$(ls -A "$WORK/tmp")" ] || fail "a stopped $command left a temp folder: $(ls -A "$WORK/tmp")"
+done
+TMPDIR="$WORK/tmp" deploy fixture diff > /dev/null || fail "diff failed with its own TMPDIR"
+TMPDIR="$WORK/tmp" deploy fixture check > /dev/null || fail "check failed with its own TMPDIR"
+[ -z "$(ls -A "$WORK/tmp")" ] || fail "diff or check left a temp folder: $(ls -A "$WORK/tmp")"
+sleep 1
+deploy fixture > /dev/null || fail "the deploy after the stopped status failed"
+check "a TERM during the clone of status and diff, and a full diff and check, leave TMPDIR empty"
+
 step "A slow PHP_RELOAD_CMD only warns"
 sleep 1
 started="$(date +%s)"

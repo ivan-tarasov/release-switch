@@ -83,7 +83,9 @@ If a step before the switch fails, the new folder is deleted and the old release
 When a deploy fails after `deploy.conf` was loaded, its `failed()` step runs once (see
 [deploy.conf](#deployconf)).
 A deploy stopped by Ctrl-C, `kill` or a dropped SSH session (INT, TERM, HUP) cleans up the same
-way and exits with 130, 143 or 129. A build killed hard (SIGKILL, OOM) keeps its `.building` mark:
+way and exits with 130, 143 or 129. A deploy whose output goes away (`deploy | head`, an SSH
+connection with no terminal that drops) keeps going without it: it finishes, or fails with the same
+cleanup, log line and alert. A build killed hard (SIGKILL, OOM) keeps its `.building` mark:
 it is never listed or rolled back to, and the next deploy or rollback removes it. Once `current` points at the new release, it is never deleted:
 it stays live, and the log says at which stage the deploy stopped.
 Migrations and other data changes are not undone by a switch back or a rollback. A rollback warns
@@ -988,7 +990,7 @@ both, as `disk: ...; over DISK_LIMIT (2G)` or `disk: ...; under MIN_FREE_MB (500
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
-`PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a rollback with the live folder missing, prune and
+`PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a closed output pipe, a rollback with the live folder missing, prune and
 `KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and

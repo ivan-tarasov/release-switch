@@ -1932,29 +1932,46 @@ unfreeze() {
 # On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
 # does the same for the head of that pull request. A free slot deploys DEPLOY_BRANCH and stays free.
 # --ref and --pr never wait for a release tag.
+# Fails with usage $1 when option value $2 is empty or starts with a dash: a forgotten value
+# must not take the next option as the value.
+option_value() {
+    [ -n "$2" ] && [ "$2" = "${2#-}" ] || fail "$1"
+}
+
 deploy() {
     local force=0 ref="" no_wait=0 branch="" pr=""
+    local ref_usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"
+    local branch_usage="usage: deploy <project>@sN --branch <name>" pr_usage="usage: deploy <project>@sN --pr <number>"
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --force) force=1 ;;
             --no-wait) no_wait=1 ;;
             --yes | -y) YES=1 ;;
-            --ref=*) ref="${1#--ref=}" ;;
+            --ref=*)
+                ref="${1#--ref=}"
+                option_value "$ref_usage" "$ref"
+                ;;
             --ref)
-                [ -n "${2:-}" ] || fail "usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"
+                option_value "$ref_usage" "${2:-}"
                 ref="$2"
                 shift
                 ;;
-            --branch=*) branch="${1#--branch=}" ;;
+            --branch=*)
+                branch="${1#--branch=}"
+                option_value "$branch_usage" "$branch"
+                ;;
             --branch)
-                [ -n "${2:-}" ] || fail "usage: deploy <project>@sN --branch <name>"
+                option_value "$branch_usage" "${2:-}"
                 branch="$2"
                 shift
                 ;;
-            --pr=*) pr="${1#--pr=}" ;;
+            --pr=*)
+                pr="${1#--pr=}"
+                option_value "$pr_usage" "$pr"
+                ;;
             --pr)
-                [ -n "${2:-}" ] || fail "usage: deploy <project>@sN --pr <number>"
+                option_value "$pr_usage" "${2:-}"
                 pr="$2"
                 shift
                 ;;
@@ -2066,8 +2083,10 @@ deploy() {
         fi
     else
         # Any tag, branch or commit: the whole history, with file contents fetched on checkout.
-        git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>/dev/null \
-            || fail "could not clone $REPO_URL" "$(clone_hint)"
+        if ! err="$(git clone --quiet --no-checkout --filter=blob:none "$REPO_URL" "$DEPLOY_BASE/releases/.building-$stamp" 2>&1)"; then
+            [ -z "$err" ] || redact "$err" | sed 's/^/    /' >&2
+            fail "could not clone $REPO_URL" "$(clone_hint)"
+        fi
         git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "$ref" 2>/dev/null \
             || git -C "$DEPLOY_BASE/releases/.building-$stamp" checkout --quiet --detach "origin/$ref" 2>/dev/null \
             || fail "no tag, branch or commit $ref in the repo"
@@ -2352,9 +2371,12 @@ show_diff() {
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --ref=?*) ref="${1#--ref=}" ;;
+            --ref=*)
+                ref="${1#--ref=}"
+                option_value "$usage" "$ref"
+                ;;
             --ref)
-                [ -n "${2:-}" ] || fail "$usage"
+                option_value "$usage" "${2:-}"
                 ref="$2"
                 shift
                 ;;
@@ -2363,7 +2385,6 @@ show_diff() {
         shift
     done
 
-    [ "$ref" = "${ref#-}" ] || fail "$usage"
     resolve_base
     live="$(current_release)"
     [ -n "$live" ] || fail "no live release to compare with" "deploy ${PROJECT:+$PROJECT }status"
@@ -3811,8 +3832,15 @@ stage() {
     require_slots stage
 
     case "${1:-}" in
-        --pr) pr="${2:-}" && shift ;;
-        --pr=*) pr="${1#--pr=}" ;;
+        --pr)
+            option_value "$usage" "${2:-}"
+            pr="$2"
+            shift
+            ;;
+        --pr=*)
+            pr="${1#--pr=}"
+            option_value "$usage" "$pr"
+            ;;
         -*) fail "$usage" ;;
         *) branch="${1:-}" ;;
     esac
@@ -4406,11 +4434,14 @@ staging_args() {
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --pr)
-                        [ $# -gt 1 ] || fail "$usage"
+                        option_value "$usage" "${2:-}"
                         pr="$2"
                         shift
                         ;;
-                    --pr=*) pr="${1#--pr=}" ;;
+                    --pr=*)
+                        pr="${1#--pr=}"
+                        option_value "$usage" "$pr"
+                        ;;
                     -*) flags+=("$1") ;;
                     *)
                         [ -z "$branch" ] || fail "$usage"

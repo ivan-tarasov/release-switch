@@ -711,6 +711,46 @@ grep -q "^1 commit(s):$" "$WORK/ref.log" || fail "--ref=develop does not list th
 serves "$fresh" || fail "server does not show $fresh"
 check "--ref deployed a tag, a commit and a branch; the live commit and a missing ref stopped"
 
+step "Option values cannot be empty or start with a dash"
+live="$(live_release)"
+log_lines="$(wc -l < "$BASE/deploy.log")"
+# Each line: the usage to expect, then the arguments after the project.
+while read -r kind args; do
+    case "$kind" in
+        ref) usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]" ;;
+        branch) usage="usage: deploy <project>@sN --branch <name>" ;;
+        pr) usage="usage: deploy <project>@sN --pr <number>" ;;
+        diff) usage="usage: deploy [project] diff [--ref <tag, branch or sha>]" ;;
+    esac
+    # shellcheck disable=SC2086 # The arguments are split on purpose.
+    if deploy fixture $args > /dev/null 2> "$WORK/option.err"; then
+        fail "deploy fixture $args succeeded"
+    fi
+    grep -qF "$usage" "$WORK/option.err" || fail "no usage for deploy fixture $args"
+done <<'CASES'
+ref --ref
+ref --ref --force
+ref --ref -x
+ref --ref=
+ref --ref=--force
+ref --force --ref= --yes
+branch --branch
+branch --branch --force
+branch --branch=
+branch --branch=-x
+pr --pr
+pr --pr --force
+pr --pr=
+pr --pr=-7
+diff diff --ref=
+diff diff --ref=--quiet
+diff diff --ref --quiet
+CASES
+[ "$(live_release)" = "$live" ] || fail "an option with no value changed the live release"
+[ "$(wc -l < "$BASE/deploy.log")" = "$log_lines" ] || fail "an option with no value wrote a log line"
+[ ! -e "$BASE/.deploy.lock" ] || fail "an option with no value left a lock"
+check "--ref, --branch and --pr refused an empty value and a dash value in both forms, and changed nothing"
+
 step "Shared files survive deploys"
 [ "$(curl --silent "http://127.0.0.1:$PORT/")" = "kept across releases" ] || fail "the shared note is gone"
 check "the note from before init is still served"
@@ -1956,6 +1996,14 @@ if STAGING_SERVERS=0 deploy fixture stage feature/y > /dev/null 2> "$WORK/stage.
     fail "stage without slots was not refused"
 fi
 grep -q "fixture has no staging slots" "$WORK/stage.err" || fail "no message for stage without slots"
+for args in "fixture stage --pr" "fixture stage --pr --force" "fixture stage --pr=" "fixture stage --pr=-7" \
+    "staging fixture@s2 checkout --pr --force" "staging fixture@s2 checkout --pr="; do
+    # shellcheck disable=SC2086 # The arguments are split on purpose.
+    if deploy $args > /dev/null 2> "$WORK/stage.err"; then
+        fail "deploy $args succeeded"
+    fi
+    grep -q " | --pr <number>" "$WORK/stage.err" || fail "no usage for deploy $args"
+done
 
 develop_sha="$(git -C "$REPO" rev-parse develop)"
 deploy fixture@s2 free > "$WORK/stage.log"

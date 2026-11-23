@@ -284,11 +284,26 @@ serves "$first" || fail "server does not show $first after rollback"
 [ "$(cat "$BASE/shared/data/rolled_back")" = "$first" ] || fail "after_rollback did not run in $first"
 check "rolled back to $first; $second is marked bad; after_rollback ran"
 
+step "A plain deploy skips the rolled-back commit; it logs nothing and changes nothing"
+second_sha="$(git -C "$BASE/releases/$second" rev-parse HEAD)"
+[ "$(cat "$BASE/.skip-commits")" = "$second_sha"$'\t'"was rolled back"$'\t'"$second" ] \
+    || fail "rollback did not remember the commit of $second"
+grep -q "^==> Plain deploys skip ${second_sha:0:7} " "$WORK/rollback.log" || fail "rollback does not say plain deploys skip the commit"
+releases_now="$(release_count)"
+log_now="$(sed -n '$=' "$BASE/deploy.log")"
+deploy fixture > "$WORK/skip-bad.log" 2>&1 || fail "a plain deploy of a rolled-back commit failed"
+[ "$(cat "$WORK/skip-bad.log")" = "==> ${second_sha:0:7} was rolled back; push a fix, or deploy fixture --force" ] \
+    || fail "a plain deploy of a rolled-back commit does not print the one line: $(cat "$WORK/skip-bad.log")"
+[ "$(live_release)" = "$first" ] || fail "a plain deploy of a rolled-back commit changed the live release"
+[ "$(release_count)" = "$releases_now" ] || fail "a plain deploy of a rolled-back commit made a release"
+[ "$(sed -n '$=' "$BASE/deploy.log")" = "$log_now" ] || fail "a plain deploy of a rolled-back commit wrote to deploy.log"
+check "the rolled-back commit is remembered; a plain deploy prints one line, exits 0 and builds nothing"
+
 releases_before="$(release_count)"
 
 sleep 1
 step "Failing deploy: the build stops at its first error"
-if FIXTURE_FAIL_BUILD=1 deploy fixture; then
+if FIXTURE_FAIL_BUILD=1 deploy fixture --force; then
     fail "deploy with a failing build succeeded"
 fi
 [ "$(live_release)" = "$first" ] || fail "current moved after a failed build"
@@ -296,12 +311,14 @@ fi
 [ "$(sed -n '$=' "$BASE/shared/data/failed")" = 1 ] || fail "failed did not run once"
 built_release="$(cat "$BASE/shared/data/failed")"
 [ "$built_release" != "$first" ] && [ -n "$built_release" ] || fail "failed did not run in the new release"
-check "$first is still live and the broken release is gone; failed ran in it"
+[ "$(cat "$BASE/.skip-commits")" = "$second_sha"$'\t'"was rolled back"$'\t'"$second" ] \
+    || fail "a failed build changed the remembered commits"
+check "$first is still live and the broken release is gone; failed ran in it; no commit remembered"
 
 sleep 1
 step "A failing failed() only warns; the deploy still fails"
 rm -f "$BASE/shared/data/failed"
-if FIXTURE_FAIL_BUILD=1 FIXTURE_FAIL_FAILED=1 deploy fixture 2> "$WORK/failed.log"; then
+if FIXTURE_FAIL_BUILD=1 FIXTURE_FAIL_FAILED=1 deploy fixture --force 2> "$WORK/failed.log"; then
     fail "deploy with a failing build and failed() succeeded"
 fi
 grep -q "failed failed; the deploy failed anyway" "$WORK/failed.log" || fail "no warning for a failing failed()"
@@ -313,7 +330,7 @@ check "the warning shows and the build error stays"
 
 sleep 1
 step "Failing deploy: a failing backup stops it before build"
-if FIXTURE_FAIL_BACKUP=1 deploy fixture > "$WORK/backup.log" 2> "$WORK/backup-err.log"; then
+if FIXTURE_FAIL_BACKUP=1 deploy fixture --force > "$WORK/backup.log" 2> "$WORK/backup-err.log"; then
     fail "deploy with a failing backup succeeded"
 fi
 grep -q "backup failed" "$WORK/backup-err.log" || fail "the failure does not show the backup error"
@@ -327,7 +344,7 @@ check "$first is still live; build did not run; failed ran"
 sleep 1
 step "Failing deploy: preflight refuses a wrong .env"
 sed -i.bak 's/production/staging/' "$BASE/shared/.env"
-if deploy fixture 2> /dev/null; then
+if deploy fixture --force 2> /dev/null; then
     fail "deploy with a wrong .env succeeded"
 fi
 mv "$BASE/shared/.env.bak" "$BASE/shared/.env"
@@ -336,7 +353,7 @@ check "preflight stopped it"
 
 sleep 1
 step "Failing deploy: the check fails after the switch"
-if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture 2> "$WORK/check.log"; then
+if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture --force 2> "$WORK/check.log"; then
     fail "deploy with a failing check succeeded"
 fi
 cat "$WORK/check.log" >&2
@@ -348,14 +365,36 @@ serves "$first" || fail "server does not show $first after the rollback"
 [ "$(release_count)" = "$((releases_before + 1))" ] || fail "the failed release was not set aside"
 check "rolled back to $first automatically; the failed release waits in .failed-*"
 
+step "A plain deploy skips a commit that failed its check; --quiet prints nothing; status shows it"
+failed_release="$(find "$BASE/releases" -mindepth 1 -maxdepth 1 -name '.failed-*' | sed 's#.*/\.failed-##')"
+[ "$(sed -n 1p "$BASE/.skip-commits")" = "$second_sha"$'\t'"failed its check"$'\t'"$failed_release" ] \
+    || fail "the failed check did not remember the commit of $failed_release"
+[ "$(sed -n '$=' "$BASE/.skip-commits")" = 1 ] || fail "the commit is remembered twice"
+releases_now="$(release_count)"
+log_now="$(sed -n '$=' "$BASE/deploy.log")"
+deploy fixture > "$WORK/skip-check.log" 2>&1 || fail "a plain deploy of a commit that failed its check failed"
+[ "$(cat "$WORK/skip-check.log")" = "==> ${second_sha:0:7} failed its check; push a fix, or deploy fixture --force" ] \
+    || fail "a plain deploy of a commit that failed its check does not print the one line: $(cat "$WORK/skip-check.log")"
+deploy fixture --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" || fail "a quiet deploy of a commit that failed its check failed"
+[ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet deploy of a commit that failed its check printed something"
+[ "$(live_release)" = "$first" ] || fail "a skipped deploy changed the live release"
+[ "$(release_count)" = "$releases_now" ] || fail "a skipped deploy made a release"
+[ "$(sed -n '$=' "$BASE/deploy.log")" = "$log_now" ] || fail "a skipped deploy wrote to deploy.log"
+deploy fixture status > "$WORK/skip-status.log"
+grep -qxF "Skips:     ${second_sha:0:7} failed its check ($failed_release); push a fix, or deploy fixture --force" \
+    "$WORK/skip-status.log" || fail "status does not show the skipped commit"
+deploy status --all | grep -qE "^fixture .*tip ${second_sha:0:7} failed its check" || fail "status --all does not note the skipped tip"
+check "the failed commit is skipped with one line, silently with --quiet; status and status --all show it"
+
 sleep 1
 step "A failing after_switch only warns; the deploy deletes the failed release"
-FIXTURE_FAIL_AFTER=1 deploy fixture > "$WORK/after.log"
+FIXTURE_FAIL_AFTER=1 deploy fixture --force > "$WORK/after.log"
 grep -q "after_switch failed; carrying on" "$WORK/after.log" || fail "no warning for after_switch"
 latest="$(live_release)"
 serves "$latest" || fail "server does not show $latest"
 [ "$(release_count)" = "$((releases_before + 1))" ] || fail "the failed release is still there"
-check "live: $latest, failed release gone"
+[ ! -e "$BASE/.skip-commits" ] || fail "a good --force deploy of the skipped commit did not clear it"
+check "live: $latest, failed release gone; the good --force deploy cleared the skipped commit"
 
 step "Status"
 DISPLAY_TZ=America/Toronto deploy fixture status > "$WORK/status.log"
@@ -368,6 +407,7 @@ grep -qF "* $latest  (live)" "$WORK/status.log" || fail "status does not mark th
 grep -q "Lock: *free" "$WORK/status.log" || fail "status does not show a free lock"
 grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fail "status does not check the site"
 grep -q "^Pending: *none (live is the tip of develop)" "$WORK/status.log" || fail "status shows pending commits when live is the tip"
+! grep -q "^Skips:" "$WORK/status.log" || fail "status shows a skipped commit after a good deploy"
 check "status shows the live release, the rollback target and the site"
 
 step "Diff says so when nothing is pending"
@@ -503,6 +543,15 @@ serves "$second" || fail "server does not show $second after a rollback by time"
 [ ! -e "$BASE/releases/$second/.bad" ] || fail "going to $second by name did not clear its bad mark"
 [ ! -d "$BASE/.deploy.lock" ] || fail "rollback left the lock behind"
 check "rollback skipped the bad $second; naming it went there and cleared the mark; a failing after_rollback only warned; unclear and missing names refused"
+
+step "A new commit deploys as before and clears the skipped commit"
+grep -q "^$second_sha"$'\t'"was rolled back"$'\t'"$latest$" "$BASE/.skip-commits" || fail "the plain rollback did not remember the commit"
+commit "fixture after rollback"
+deploy fixture > "$WORK/new-commit.log" || fail "a new commit after a rollback did not deploy"
+grep -q "^==> Deployed " "$WORK/new-commit.log" || fail "a new commit after a rollback did not deploy"
+[ "$(cat "$BASE/current/VERSION")" = "fixture after rollback" ] || fail "the new commit is not live"
+[ ! -e "$BASE/.skip-commits" ] || fail "a good deploy of a new commit did not clear the skipped commit"
+check "the new commit is live and nothing is skipped any more"
 
 step "A second deploy waits for the lock"
 mkdir "$BASE/.deploy.lock"
@@ -650,6 +699,7 @@ sleep 1
 if FIXTURE_FAIL_BUILD=1 deploy fixture --force --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err"; then
     fail "a quiet deploy with a failing build succeeded"
 fi
+[ ! -e "$BASE/.skip-commits" ] || fail "a failed build remembered its commit"
 [ ! -s "$WORK/quiet.out" ] || fail "a quiet failed deploy wrote to stdout"
 cmp -s "$WORK/loud.err" "$WORK/quiet.err" || fail "a quiet failed deploy shows other errors than a plain one"
 grep -q "^build: npm run prod exited with 1$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the step output"
@@ -1946,6 +1996,31 @@ deploy fixture@s1 rollback --dry-run > "$WORK/slot.log" || fail "a slot rollback
 grep -q "^==> Target: *$first_slot$" "$WORK/slot.log" || fail "a slot rollback --dry-run shows the wrong target"
 [ "$(slot_live)" != "$first_slot" ] || fail "a slot rollback --dry-run switched"
 check "a plain deploy of fixture@s1 deployed the newest feature/x, then stopped with nothing new; rollback --dry-run changed nothing"
+
+step "A slot remembers its own rolled-back commit"
+slot_two="$(slot_live)"
+slot_sha="$(git -C "$SLOT/releases/$slot_two" rev-parse HEAD)"
+prod_skip="$(cat "$BASE/.skip-commits" 2>/dev/null || true)"
+deploy fixture@s1 rollback > /dev/null
+[ "$(slot_live)" = "$first_slot" ] || fail "the slot rollback did not go back to $first_slot"
+grep -q "^$slot_sha"$'\t'"was rolled back"$'\t'"$slot_two$" "$SLOT/.skip-commits" || fail "the slot rollback did not remember its commit"
+[ "$(cat "$BASE/.skip-commits" 2>/dev/null || true)" = "$prod_skip" ] || fail "the slot rollback changed the production skipped commits"
+deploy fixture@s1 > "$WORK/slot.log"
+grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
+    || fail "a plain slot deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
+[ "$(slot_live)" = "$first_slot" ] || fail "a skipped slot deploy switched"
+slot_skip="$(cat "$SLOT/.skip-commits")"
+deploy fixture@s1 --ref "$(git -C "$SLOT/releases/$first_slot" rev-parse HEAD)" --force > /dev/null
+[ "$(slot_live)" != "$first_slot" ] && [ "$(cat "$SLOT/current/VERSION")" = "feature one" ] \
+    || fail "a --ref --force slot deploy did not build the older commit"
+[ "$(cat "$SLOT/.skip-commits")" = "$slot_skip" ] || fail "a good --ref deploy changed the skipped commits"
+deploy fixture@s1 > "$WORK/slot.log"
+grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
+    || fail "a plain slot deploy after a --ref deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
+deploy fixture@s1 --force > /dev/null
+[ "$(cat "$SLOT/current/VERSION")" = "feature two" ] || fail "--force did not build the slot's skipped commit"
+[ ! -e "$SLOT/.skip-commits" ] || fail "a good slot deploy did not clear its skipped commit"
+check "the slot keeps its own skipped commit in its own folder; a good --ref deploy keeps it; --force builds it and clears it"
 
 step "Slots are listed, refused when wrong, and leave production alone"
 deploy fixture slots > "$WORK/slots.log"

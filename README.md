@@ -52,6 +52,7 @@ Each project has a base folder on the server:
   shared/                                         files that live across releases (.env, uploads, a database file)
   current -> releases/<name>                      the live release; the web server serves current/public
   deploy.log                                      one line per deploy and rollback, with the result
+  .skip-commits                                   commits a plain deploy skips (see step 3 below)
 ```
 
 `deploy <project>`:
@@ -61,7 +62,11 @@ Each project has a base folder on the server:
    died (its process is gone) is removed, and so is a lock with no owner that is older than
    60 seconds (a deploy died while taking it). The removal is safe when two deploys race for it;
 3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
-   out (`--force` builds it anyway);
+   out (`--force` builds it anyway). It also stops, with exit 0, if that commit failed its site
+   check (the deploy switched back) or was rolled back by a plain `rollback`, so cron does not
+   break the site again every run. `--force` and `--ref` build it anyway; a good deploy of the
+   branch tip (plain or `--force`, not `--ref`) clears the list in `.skip-commits`. A failure before the switch (a build or `verify`
+   step) adds nothing: the site never went down, and a retry may pass;
 4. clones the newest commit of the branch into `releases/.building-<stamp>`, renames it to its
    final name with a `.building` file in it, and writes its name to `RELEASE` in the release root.
    The build runs under the final name, as Laravel caches keep absolute paths; the `.building`
@@ -137,7 +142,8 @@ Staging (see [Staging](#staging)):
 
 Commands:
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
-                    is already live, unless --force. On a terminal --force asks first
+                    is already live, failed its site check or was rolled back, unless --force.
+                    On a terminal --force asks first
   deploy --no-wait  Do not wait for the release tag of a new commit
   deploy --ref <ref>
                     Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
@@ -162,9 +168,10 @@ Commands:
                     lock and writes a log line. On a terminal in production it asks first;
                     on a staging slot it does not ask
   status            The live release, the rollback target, the commits not deployed yet, all
-                    releases, the lock, the disk and the site
+                    releases, a commit plain deploys skip, the lock, the disk and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
-                    commits and failed releases. A last line shows the engine: its version, and
+                    commits, a branch tip that plain deploys skip, and failed releases. The
+                    menu shows the same note. A last line shows the engine: its version, and
                     whether the repo has newer ones (run `deploy self`) or it has local changes.
                     Exits with 1 if any site does not serve its live release, so it can run from
                     cron as a simple monitor. Pending commits come from
@@ -178,7 +185,8 @@ Commands:
                     D and an A, and there are no line counts: both would need the file contents,
                     and diff fetches only the file names
   rollback [name]   Go to the previous good release, and mark the live one bad, so the next
-                    rollback skips it. With a name, go to that release instead (a full name, or
+                    rollback skips it, and so a plain deploy skips its commit until a new
+                    commit or --force. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
                     and clears the mark if that release had one. On a terminal it asks first.
                     `--dry-run` (before or after the name) shows the live release, the target,
@@ -256,8 +264,8 @@ question. Without a terminal (cron, pipes, `slots update`, `stage`) they never a
 
 `--quiet` (or `-q`) prints only warnings and errors, with their `Try:` hint, so cron mails only
 problems. It works with any command, wherever it is on the line. A quiet run shows no `==>` lines,
-no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new) prints
-nothing. The output of `deploy.conf` steps shows only when a step fails. A problem the run carries
+no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new, or a commit
+that failed its check or was rolled back) prints nothing. The output of `deploy.conf` steps shows only when a step fails. A problem the run carries
 on past (a failing `after_switch` or `PHP_RELOAD_CMD`) becomes a warning. On a terminal, questions
 still show; without one it never asks. The bare `deploy` menu ignores `--quiet`.
 
@@ -265,6 +273,12 @@ still show; without one it never asks. The bare `deploy` menu ignores `--quiet`.
 */10 * * * * $HOME/release-switch/deploy example --quiet
 0 4 * * *    $HOME/release-switch/deploy self --quiet
 ```
+
+A commit whose site check failed, or that a plain `rollback` left, is not built again by the next
+cron run: the deploy that failed already sent its alert, and building it again would only break the
+site again. Cron deploys again once a new commit lands on the branch (see
+[A deploy says a commit failed its check](#a-deploy-says-a-commit-failed-its-check)). A build or
+`verify` failure does not count: the site never went down, so the next run tries again.
 
 ### Project menu
 
@@ -903,6 +917,26 @@ aside as `releases/.failed-<name>`. Migrations that ran stay applied. Open the U
 
 A rollback that cannot see its target says `<release> is linked, but the site does not serve it yet`
 with the same hint. The rollback stands; check the site.
+
+### A deploy says a commit failed its check
+
+```
+==> abc1234 failed its check; push a fix, or deploy example --force
+==> abc1234 was rolled back; push a fix, or deploy example --force
+```
+
+A plain `deploy` (no `--force`, no `--ref`) found that the newest commit of the branch broke the
+site before: its site check failed and the deploy switched back, or a plain `rollback` left it.
+It builds nothing and exits with 0, like "Nothing new", so cron does not break the site every run;
+with `--quiet` it prints nothing. `status` shows it on a `Skips:` line, and `status --all` and the
+menu note `tip abc1234 failed its check`. Push a fix: a new commit deploys as usual. To build the
+same commit again (say the cause was outside the code and is fixed), run
+`deploy example --force`, or `--ref <sha>`. A good deploy of the branch tip (plain or `--force`)
+clears the list. A good `--ref` deploy, say back to an older tag, leaves it, as the tip may still be
+broken. Failures
+before the switch (`build`, `verify`) are not remembered, so a flaky network only costs a retry.
+The list lives in `<base>/.skip-commits`, one line per commit (full sha, reason, release), newest
+first, up to 10; a staging slot has its own in its own base folder.
 
 ### Cannot clone or fetch the repo
 

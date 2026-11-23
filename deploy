@@ -583,15 +583,19 @@ branch_label() {
 }
 
 # A commits-only clone of DEPLOY_BRANCH from repo $1 into $2, with HEAD at its tip. A clone never
-# fetches refs/pull/*, so a pull request head is fetched on its own.
+# fetches refs/pull/*, so a pull request head is fetched on its own. No background maintenance:
+# a fetch, even one git makes on its own for a missing commit, would start it, and it would still
+# write in the folder when the folder is removed.
 history_clone() {
     if [ -z "$SLOT_PR" ]; then
-        git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$1" "$2" 2>/dev/null
+        git clone --quiet --bare --filter=tree:0 --single-branch --config maintenance.auto=false --config gc.auto=0 \
+            --branch "$DEPLOY_BRANCH" "$1" "$2" 2>/dev/null
 
         return
     fi
 
-    git clone --quiet --bare --filter=tree:0 --single-branch "$1" "$2" 2>/dev/null \
+    git clone --quiet --bare --filter=tree:0 --single-branch --config maintenance.auto=false --config gc.auto=0 \
+        "$1" "$2" 2>/dev/null \
         && git -C "$2" fetch --quiet origin "+$(branch_ref):refs/heads/deploy-pr" 2>/dev/null \
         && git -C "$2" symbolic-ref HEAD refs/heads/deploy-pr
 }
@@ -665,7 +669,7 @@ lock_text() {
 
 # Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
-    local state
+    local state error
 
     # A run that changes things ends on its own terms, even when the reader of its output goes
     # away (a closed pipe, a dropped SSH connection): it finishes, or fails with a full cleanup.
@@ -698,9 +702,16 @@ acquire_lock() {
             fail "a stale lock removal stopped half way; remove $DEPLOY_BASE/.deploy.lock.break and $DEPLOY_BASE/.deploy.lock if no deploy is running"
         fi
 
-        if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        if ! error="$(LC_ALL=C mkdir "$LOCK_DIR" 2>&1)"; then
             LOCK_DIR=""
             release_lock_break
+
+            # Not a lock in the way: the folder itself cannot be written.
+            if [ ! -e "$DEPLOY_BASE/.deploy.lock" ] && [[ "$error" != *"File exists"* ]]; then
+                fail "cannot write to $DEPLOY_BASE (disk full, quota or permissions)" \
+                    "df -h $DEPLOY_BASE; ls -ld $DEPLOY_BASE"
+            fi
+
             local pid
             read -r pid _ <<< "$(lock_owner)"
             fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not" \
@@ -828,8 +839,10 @@ log_event() {
 # Slack-style webhooks show, and the deploy details. NOTIFY_CMD runs with them in NOTIFY_* and
 # DEPLOY_* variables. Never fails: an alert that cannot be sent only warns.
 notify() {
-    local text body duration
+    local text body duration shipped
     text="$(redact "${PROJECT:+$PROJECT: }$2")"
+    # Only the lines the alert shows: one argument is capped (128 KB on Linux).
+    shipped="$(printf '%s\n' "$SHIPPED" | sed -n '1,20p')"
     duration="$(($(date +%s) - STARTED))"
 
     if [ -n "$NOTIFY_URL" ]; then
@@ -845,7 +858,7 @@ notify() {
                 "ref" => $argv[8], "duration" => (int) $argv[10], "commits" => $commits],
                 JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);' \
             "$text" "$PROJECT" "$1" "$3" "$(redact "$4")" "$(redact "$DEPLOY_PREVIOUS_RELEASE")" "$DEPLOY_SHA" \
-            "$(redact "$DEPLOY_REF")" "$(redact "$SHIPPED")" "$duration" 2>/dev/null)" || body=""
+            "$(redact "$DEPLOY_REF")" "$(redact "$shipped")" "$duration" 2>/dev/null)" || body=""
 
         if [ -z "$body" ] || ! curl --silent --fail --max-time 10 --output /dev/null \
             --header 'Content-Type: application/json' --data "$body" "$NOTIFY_URL"; then
@@ -1691,7 +1704,11 @@ prune() {
     live="$(current_release)"
     count="$(list_releases | wc -l)"
 
-    rm -rf "${DEPLOY_BASE:?}"/releases/.failed-*
+    # The release is live and checked by now, so a folder that cannot be removed only warns.
+    for release in "${DEPLOY_BASE:?}"/releases/.failed-*; do
+        [ -e "$release" ] || continue
+        rm -rf "$release" 2>/dev/null || warn "could not remove $release; some files in it cannot be deleted, remove it by hand"
+    done
 
     # BSD head rejects -n 0.
     if [ "$count" -le "$KEEP_RELEASES" ]; then
@@ -1703,7 +1720,8 @@ prune() {
     for release in $(list_releases | head -n "$((count - KEEP_RELEASES))"); do
         if [ "$release" != "$live" ] && [ "$release" != "$PREVIOUS_RELEASE" ]; then
             say "Removing old release $release"
-            rm -rf "${DEPLOY_BASE:?}/releases/$release"
+            rm -rf "${DEPLOY_BASE:?}/releases/$release" 2>/dev/null \
+                || warn "could not remove $DEPLOY_BASE/releases/$release; some files in it cannot be deleted, remove it by hand"
         fi
     done
 }
@@ -1997,10 +2015,13 @@ deploy() {
     refuse_current_folder
     refuse_if_frozen
     require_check_url
-    acquire_lock deploy
+    # Before the lock, so a full disk is named as such. Logged, as it stops a deploy.
     ACTION=deploy
     STAGE=clone
     require_free_space deploying
+    ACTION=""
+    acquire_lock deploy
+    ACTION=deploy
 
     mkdir -p "$DEPLOY_BASE/releases"
     PREVIOUS_RELEASE="$(current_release)"
@@ -4049,11 +4070,15 @@ copy_from() {
         fi
     fi
 
-    acquire_lock copy-from
+    # Before the lock, as in deploy.
     ACTION=copy-from
     LOG_RELEASE="$(current_release)"
     STAGE=copy
     require_free_space copying
+    ACTION=""
+    acquire_lock copy-from
+    ACTION=copy-from
+    LOG_RELEASE="$(current_release)"
     mkdir -p "$DEPLOY_BASE/shared"
 
     local copied=()

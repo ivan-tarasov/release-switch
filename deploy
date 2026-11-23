@@ -4,6 +4,7 @@
 #
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
 #                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
+#                     | prune [--keep <n>] [--dry-run] [--yes]
 #                     | unfreeze | status | diff [--ref <ref>] | check | log [count] | path [--base]
 #                     | rollback [name] [--yes] [--dry-run]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
@@ -83,7 +84,7 @@ FAIL_MESSAGE=""
 # The engine's functions, set in main. deploy.conf may not define any of them.
 ENGINE_FUNCS=""
 
-# 1 with --yes or -y: rollback, down, cache and deploy --force do not ask.
+# 1 with --yes or -y: rollback, down, cache, prune and deploy --force do not ask.
 YES=0
 
 # 1 with --quiet or -q: only warnings and errors, so cron mail means a problem. Questions on a
@@ -94,11 +95,11 @@ QUIET=0
 STEP_LOG=""
 
 # The commands, for help and for typo hints.
-COMMANDS=(deploy freeze unfreeze down up cache status diff check log path rollback slots stage staging free copy-from init
+COMMANDS=(deploy freeze unfreeze down up cache prune status diff check log path rollback slots stage staging free copy-from init
     self help version)
 
 # The staging subcommands, for help and for typo hints.
-STAGING_COMMANDS=(checkout update free copy-from status diff log path rollback down up cache)
+STAGING_COMMANDS=(checkout update free copy-from status diff log path rollback down up cache prune)
 
 # The old form of a staging command, set by staging_args.
 STAGING_ARGS=()
@@ -1024,6 +1025,16 @@ BUILDING_FILE=".building"
 # Removes builds that a killed deploy left: .building-<stamp> clones and releases that still
 # hold BUILDING_FILE. Only under the lock, so no running deploy owns them.
 remove_unfinished() {
+    local name
+
+    for name in $(unfinished_builds); do
+        say "Removing unfinished build $name"
+        rm -rf "${DEPLOY_BASE:?}/releases/$name"
+    done
+}
+
+# The names of those builds, never the live release.
+unfinished_builds() {
     local dir live
     live="$(current_release)"
 
@@ -1031,8 +1042,7 @@ remove_unfinished() {
         [ -e "$dir" ] || continue
         [ "${dir##*/}" != "$BUILDING_FILE" ] || dir="${dir%/*}"
         [ "${dir##*/}" != "$live" ] || continue
-        say "Removing unfinished build ${dir##*/}"
-        rm -rf "$dir"
+        printf '%s\n' "${dir##*/}"
     done
 }
 
@@ -1755,31 +1765,156 @@ end_spin_line() {
     fi
 }
 
-prune() {
-    local live release count
-    live="$(current_release)"
-    count="$(list_releases | wc -l)"
+# Folders in releases/ that prune removes: .failed-* folders, then releases past the newest $1.
+# Never the live release, the rollback target or PREVIOUS_RELEASE.
+prune_list() {
+    local keep="$1" live target release count
 
-    # The release is live and checked by now, so a folder that cannot be removed only warns.
     for release in "${DEPLOY_BASE:?}"/releases/.failed-*; do
         [ -e "$release" ] || continue
-        rm -rf "$release" 2>/dev/null || warn "could not remove $release; some files in it cannot be deleted, remove it by hand"
+        printf '%s\n' "${release##*/}"
     done
 
-    # BSD head rejects -n 0.
-    if [ "$count" -le "$KEEP_RELEASES" ]; then
-        return
-    fi
+    live="$(current_release)"
+    target="$(rollback_target "$live")"
+    count="$(list_releases | wc -l)"
 
     # Requests and the PHP realpath cache may still run in the release that was live before
     # this deploy, so it goes on the next one.
-    for release in $(list_releases | head -n "$((count - KEEP_RELEASES))"); do
-        if [ "$release" != "$live" ] && [ "$release" != "$PREVIOUS_RELEASE" ]; then
-            say "Removing old release $release"
-            rm -rf "${DEPLOY_BASE:?}/releases/$release" 2>/dev/null \
-                || warn "could not remove $DEPLOY_BASE/releases/$release; some files in it cannot be deleted, remove it by hand"
+    for release in $(list_releases); do
+        [ "$count" -gt "$keep" ] || break
+        count=$((count - 1))
+
+        if [ "$release" != "$live" ] && [ "$release" != "$target" ] && [ "$release" != "$PREVIOUS_RELEASE" ]; then
+            printf '%s\n' "$release"
         fi
     done
+}
+
+# Removes release folder $1. The live release is never in the list, so a folder that cannot be
+# removed only warns.
+remove_release_folder() {
+    rm -rf "${DEPLOY_BASE:?}/releases/$1" 2>/dev/null \
+        || warn "could not remove $DEPLOY_BASE/releases/$1; some files in it cannot be deleted, remove it by hand"
+}
+
+prune() {
+    local release
+
+    for release in $(prune_list "$KEEP_RELEASES"); do
+        case "$release" in
+            .failed-*) ;;
+            *) say "Removing old release $release" ;;
+        esac
+
+        remove_release_folder "$release"
+    done
+}
+
+# The size of release folder $1 in KB, 0 when du fails.
+release_kb() {
+    local kb
+    kb="$(du -sk "$DEPLOY_BASE/releases/$1" 2>/dev/null | awk '{ print $1 }')" || true
+    printf '%s\n' "${kb:-0}"
+}
+
+# "1.2M, failed" for release folder $1.
+prune_label() {
+    local kind=old
+
+    case "$1" in
+        .failed-*) kind=failed ;;
+        .building-*) kind=unfinished ;;
+        *) [ ! -e "$DEPLOY_BASE/releases/$1/$BUILDING_FILE" ] || kind=unfinished ;;
+    esac
+
+    printf '%s, %s' "$(human_kb "$(release_kb "$1")")" "$kind"
+}
+
+# The prune command: what prune does after a good deploy, plus unfinished builds, without a deploy.
+# --keep <n> keeps n releases instead of KEEP_RELEASES. A dry run takes no lock.
+prune_releases() {
+    local keep="$KEEP_RELEASES" dry_run=0 names name live kb total=0 count=0 lines=()
+    local usage="usage: deploy [project] prune [--keep <n>] [--dry-run] [--yes]"
+    local keep_hint="--keep takes a whole number, 2 or more: the live release and one to roll back to"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes | -y) YES=1 ;;
+            --dry-run) dry_run=1 ;;
+            --keep=*)
+                keep="${1#--keep=}"
+                option_value "$usage" "$keep"
+                ;;
+            --keep)
+                option_value "$usage" "${2:-}"
+                keep="$2"
+                shift
+                ;;
+            *) fail "$usage" ;;
+        esac
+        shift
+    done
+
+    case "$keep" in
+        '' | *[!0-9]*) fail "$usage" "$keep_hint" ;;
+    esac
+    keep=$((10#$keep))
+    [ "$keep" -ge 2 ] || fail "$usage" "$keep_hint"
+
+    resolve_base
+    names="$(unfinished_builds; prune_list "$keep")"
+
+    if [ -z "$names" ]; then
+        say "Nothing to prune in $DEPLOY_BASE/releases (keeping $keep)"
+
+        return 0
+    fi
+
+    if [ "$dry_run" -eq 1 ]; then
+        for name in $names; do
+            kb="$(release_kb "$name")"
+            total=$((total + kb))
+            count=$((count + 1))
+            say "Would remove $name ($(prune_label "$name"))"
+        done
+
+        say "Would free $(human_kb "$total") in $count folder$([ "$count" -eq 1 ] || printf s); nothing changed"
+
+        return 0
+    fi
+
+    if [ -z "$DEPLOY_SLOT" ]; then
+        lines=("Pruning $PROJECT, live release $(current_release), keeping $keep:")
+
+        for name in $names; do
+            lines+=("  $name ($(prune_label "$name"))")
+        done
+
+        confirm "Remove these folders?" "${lines[@]}"
+    fi
+
+    acquire_lock prune
+    ACTION=prune
+    STAGE=prune
+    # A deploy may have run while it asked.
+    live="$(current_release)"
+    LOG_RELEASE="$live"
+
+    for name in $(unfinished_builds; prune_list "$keep"); do
+        kb="$(release_kb "$name")"
+        say "Removing $name ($(prune_label "$name"))"
+        remove_release_folder "$name"
+
+        if [ ! -e "$DEPLOY_BASE/releases/$name" ]; then
+            total=$((total + kb))
+            count=$((count + 1))
+        fi
+    done
+
+    log_event prune "${live:--}" ok
+    ACTION=""
+    say "Freed $(human_kb "$total") in $count folder$([ "$count" -eq 1 ] || printf s)"
 }
 
 # DISK_LIMIT in KB, rounded up; empty when there is no limit.
@@ -1845,7 +1980,8 @@ require_free_space() {
     free="$(disk_free_kb)" || true
     [ -n "$free" ] || return 0
     [ "$free" -ge $((MIN_FREE_MB * 1024)) ] \
-        || fail "only $(human_kb "$free") free on the disk of $DEPLOY_BASE, under MIN_FREE_MB (${MIN_FREE_MB}M); free some space before $1"
+        || fail "only $(human_kb "$free") free on the disk of $DEPLOY_BASE, under MIN_FREE_MB (${MIN_FREE_MB}M); free some space before $1" \
+            "deploy ${PROJECT:+$PROJECT }prune (removes failed and old releases)"
 }
 
 # Set by freeze: "<UTC stamp>" on the first line, the reason on the second.
@@ -3266,6 +3402,7 @@ menu_actions() {
                 *@*)
                     menu_add checkout "Checkout branch or PR…"
                     menu_add cache "Clear cache"
+                    menu_add prune "Prune releases"
                     menu_add copy "Copy data from production…"
                     menu_add status "Status"
                     ;;
@@ -3284,6 +3421,7 @@ menu_actions() {
                 *@*) ;;
                 *)
                     menu_add cache "Clear cache"
+                    menu_add prune "Prune releases"
                     if menu_has "$i" frozen; then
                         menu_add unfreeze "Unfreeze"
                     else
@@ -3342,7 +3480,7 @@ menu_title() {
 
 # Line $1 of the action list, with ❯ in front when $2 is 1. Back has no number and is dim.
 menu_action_line() {
-    local mark="  " color="" num="$(($1 + 1))"
+    local mark="  " color="" num="$(($1 + 1))" last="$((${#A_KEY[@]} - 1))"
 
     if [ "${2:-0}" -eq 1 ]; then
         mark="$C_GREEN❯$C_OFF "
@@ -3353,7 +3491,8 @@ menu_action_line() {
         color="$C_DIM"
     fi
 
-    printf '%s%s%s  %s%s' "$mark" "$color" "$(pad "$num" 1)" "${A_LABEL[$1]}" "$C_OFF"
+    # Numbers line up on the right once there are 10 or more.
+    printf '%s%s%*s  %s%s' "$mark" "$color" "${#last}" "$num" "${A_LABEL[$1]}" "$C_OFF"
 }
 
 # Prints the action list on the rail, with ❯ at $1, then the key bar.
@@ -3536,7 +3675,7 @@ menu_act() {
             ;;
         redeploy) menu_run "$target" --force ;;
         selflog) menu_run self log ;;
-        status | diff | check | log | cache | unfreeze | up) menu_run "$target" "$1" ;;
+        status | diff | check | log | cache | prune | unfreeze | up) menu_run "$target" "$1" ;;
         rollback)
             menu_child "$target" rollback --dry-run
 
@@ -4604,7 +4743,7 @@ staging_args() {
                 STAGING_ARGS=("$target" slots update)
             fi
             ;;
-        free | copy-from | status | diff | log | path | rollback | down | up | cache)
+        free | copy-from | status | diff | log | path | rollback | down | up | cache | prune)
             [ "$target" != "${target%@*}" ] || fail "$sub works on one slot: deploy staging $target@sN $sub"
             STAGING_ARGS=("$target" "$sub" "$@")
             ;;
@@ -4660,6 +4799,16 @@ EOF
   cache [--yes]              Run the cache() step of the live release, then reset OPcache when
                              OPCACHE_RESET_DIR is set. Asks first on a terminal in production;
                              --yes skips that
+EOF
+            ;;
+        prune)
+            cat <<EOF
+  prune [--keep <n>] [--dry-run] [--yes]
+                             Remove failed releases, unfinished builds and releases past
+                             KEEP_RELEASES (or the newest n, 2 or more), without a deploy. Never
+                             the live release or the rollback target. Asks first on a terminal
+                             in production; --yes skips that. --dry-run lists the folders and
+                             their sizes, and changes nothing
 EOF
             ;;
         status)
@@ -4828,6 +4977,12 @@ EOF
                              Run the slot's cache() step and reset its OPcache, without asking
 EOF
             ;;
+        "staging prune")
+            cat <<EOF
+  staging <project>@sN prune [--keep <n>] [--dry-run]
+                             Remove the slot's failed and old releases, without asking
+EOF
+            ;;
         init)
             cat <<EOF
   init <checkout> [--dry-run]
@@ -4868,6 +5023,7 @@ command_examples() {
         down) printf '%s\n' 'deploy example down "database upgrade"' "deploy example down --yes" ;;
         up) printf '%s\n' "deploy example up" ;;
         cache) printf '%s\n' "deploy example cache" "deploy example cache --yes" "deploy example@s1 cache" ;;
+        prune) printf '%s\n' "deploy example prune --dry-run" "deploy example prune --keep 2 --yes" "deploy example@s1 prune" ;;
         status) printf '%s\n' "deploy example status" "deploy status --all" ;;
         diff) printf '%s\n' "deploy example diff" "deploy example diff --ref v2026.11.1" "deploy example@s1 diff" ;;
         check) printf '%s\n' "deploy example check" "deploy check --all" ;;
@@ -4891,6 +5047,7 @@ command_examples() {
         "staging down") printf '%s\n' 'deploy staging example@s1 down "data import"' ;;
         "staging up") printf '%s\n' "deploy staging example@s1 up" ;;
         "staging cache") printf '%s\n' "deploy staging example@s1 cache" ;;
+        "staging prune") printf '%s\n' "deploy staging example@s1 prune --dry-run" ;;
         init) printf '%s\n' 'deploy example init "$HOME/site" --dry-run' ;;
         self) printf '%s\n' "deploy self" "deploy self log 5" ;;
         help) printf '%s\n' "deploy help rollback" "deploy example rollback --help" ;;
@@ -5257,7 +5414,7 @@ main() {
     fi
 
     case "$command" in
-        deploy | freeze | unfreeze | down | up | cache | rollback | init | stage | free | copy-from)
+        deploy | freeze | unfreeze | down | up | cache | prune | rollback | init | stage | free | copy-from)
             intro "${PROJECT:+$PROJECT · }$command"
             ;;
         slots)
@@ -5290,6 +5447,10 @@ main() {
         cache)
             shift
             clear_cache "$@"
+            ;;
+        prune)
+            shift
+            prune_releases "$@"
             ;;
         status)
             report "${PROJECT:+$PROJECT · }status" status

@@ -669,7 +669,7 @@ lock_text() {
 
 # Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
-    local state
+    local state error
 
     # A run that changes things ends on its own terms, even when the reader of its output goes
     # away (a closed pipe, a dropped SSH connection): it finishes, or fails with a full cleanup.
@@ -702,9 +702,16 @@ acquire_lock() {
             fail "a stale lock removal stopped half way; remove $DEPLOY_BASE/.deploy.lock.break and $DEPLOY_BASE/.deploy.lock if no deploy is running"
         fi
 
-        if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        if ! error="$(LC_ALL=C mkdir "$LOCK_DIR" 2>&1)"; then
             LOCK_DIR=""
             release_lock_break
+
+            # Not a lock in the way: the folder itself cannot be written.
+            if [ ! -e "$DEPLOY_BASE/.deploy.lock" ] && [[ "$error" != *"File exists"* ]]; then
+                fail "cannot write to $DEPLOY_BASE (disk full, quota or permissions)" \
+                    "df -h $DEPLOY_BASE; ls -ld $DEPLOY_BASE"
+            fi
+
             local pid
             read -r pid _ <<< "$(lock_owner)"
             fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not" \
@@ -2006,10 +2013,13 @@ deploy() {
     refuse_current_folder
     refuse_if_frozen
     require_check_url
-    acquire_lock deploy
+    # Before the lock, so a full disk is named as such. Logged, as it stops a deploy.
     ACTION=deploy
     STAGE=clone
     require_free_space deploying
+    ACTION=""
+    acquire_lock deploy
+    ACTION=deploy
 
     mkdir -p "$DEPLOY_BASE/releases"
     PREVIOUS_RELEASE="$(current_release)"
@@ -4058,11 +4068,15 @@ copy_from() {
         fi
     fi
 
-    acquire_lock copy-from
+    # Before the lock, as in deploy.
     ACTION=copy-from
     LOG_RELEASE="$(current_release)"
     STAGE=copy
     require_free_space copying
+    ACTION=""
+    acquire_lock copy-from
+    ACTION=copy-from
+    LOG_RELEASE="$(current_release)"
     mkdir -p "$DEPLOY_BASE/shared"
 
     local copied=()

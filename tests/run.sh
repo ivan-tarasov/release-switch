@@ -1095,6 +1095,20 @@ tail -n1 "$BASE/deploy.log" | grep -qE "	deploy	[^	]+	ok	" || fail "the deploy i
 rm -rf "$BASE/releases/$oldest" "$BASE/releases/.failed-stuck"
 check "an old or failed release that cannot be removed gives a warning; the deploy is logged ok, exits 0, no alert"
 
+step "A base folder that cannot be written gives its own error"
+chmod 555 "$BASE"
+status=0
+deploy fixture --force > /dev/null 2> "$WORK/readonly.log" || status=$?
+chmod 755 "$BASE"
+cat "$WORK/readonly.log"
+[ "$status" -ne 0 ] || fail "a deploy into a read-only base folder passed"
+grep -q "cannot write to $BASE (disk full, quota or permissions)" "$WORK/readonly.log" \
+    || fail "no clear message for a base folder that cannot be written"
+grep -q "Try: df -h $BASE; ls -ld $BASE" "$WORK/readonly.log" || fail "no hint for a base folder that cannot be written"
+grep -q "another deploy" "$WORK/readonly.log" && fail "a read-only base folder is reported as another deploy"
+[ ! -e "$BASE/.deploy.lock" ] || fail "a lock was left behind"
+check "a read-only base folder says it cannot be written, with a hint, and not that another deploy runs"
+
 step "Deploy history"
 DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"
 cat "$WORK/history.log"

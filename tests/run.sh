@@ -329,6 +329,28 @@ rm -f "$BASE/shared/data/failed"
 check "the warning shows and the build error stays"
 
 sleep 1
+step "A failed step keeps its output, redacted, in <base>/deploy-failed.log; the error and status name it"
+kept="$BASE/deploy-failed.log"
+if FIXTURE_FAIL_BUILD=1 FIXTURE_BUILD_SAY="fetching https://user:s3cret@example.com/app.git" \
+    deploy fixture --force > "$WORK/kept.out" 2> "$WORK/kept.err"; then
+    fail "deploy with a failing build succeeded"
+fi
+cat "$kept"
+[ "$(sed -n 1p "$kept")" = "Step: build" ] || fail "the kept output does not name the step"
+sed -n 2p "$kept" | grep -qE "^Release: [0-9]{8}-" || fail "the kept output does not name the release"
+sed -n 3p "$kept" | grep -qE "^Time: [0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z$" || fail "the kept output has no time"
+grep -qxF "build: npm run prod exited with 1" "$kept" || fail "the kept output misses the step's stderr"
+grep -qxF "fetching https://***@example.com/app.git" "$kept" || fail "the kept output misses the step's stdout, redacted"
+! grep -q "s3cret" "$kept" || fail "the kept output shows the password"
+grep -q "^fetching https://" "$WORK/kept.out" || fail "the step's stdout did not stay on stdout"
+grep -qxF "build: npm run prod exited with 1" "$WORK/kept.err" || fail "the step's stderr did not stay on stderr"
+grep -qxF "deploy: build failed; its output is in $kept" "$WORK/kept.err" || fail "the error does not name the kept output"
+deploy fixture status > "$WORK/kept-status.log"
+grep -E "^Failed: +build at [0-9T:-]+Z; its output is in " "$WORK/kept-status.log" | grep -qF "$kept" \
+    || fail "status does not point to the kept output: $(cat "$WORK/kept-status.log")"
+check "the build output is kept with its step, release and time, the password hidden; the error and status name the file"
+
+sleep 1
 step "Failing deploy: a failing backup stops it before build"
 if FIXTURE_FAIL_BACKUP=1 deploy fixture --force > "$WORK/backup.log" 2> "$WORK/backup-err.log"; then
     fail "deploy with a failing backup succeeded"
@@ -389,7 +411,8 @@ check "the failed commit is skipped with one line, silently with --quiet; status
 sleep 1
 step "A failing after_switch only warns; the deploy deletes the failed release"
 FIXTURE_FAIL_AFTER=1 deploy fixture --force > "$WORK/after.log"
-grep -q "after_switch failed; carrying on" "$WORK/after.log" || fail "no warning for after_switch"
+grep -qF "after_switch failed; its output is in $BASE/deploy-failed.log; carrying on" "$WORK/after.log" \
+    || fail "no warning for after_switch"
 latest="$(live_release)"
 serves "$latest" || fail "server does not show $latest"
 [ "$(release_count)" = "$((releases_before + 1))" ] || fail "the failed release is still there"
@@ -408,6 +431,8 @@ grep -q "Lock: *free" "$WORK/status.log" || fail "status does not show a free lo
 grep -q "answered 200, version $latest (matches live)" "$WORK/status.log" || fail "status does not check the site"
 grep -q "^Pending: *none (live is the tip of develop)" "$WORK/status.log" || fail "status shows pending commits when live is the tip"
 ! grep -q "^Skips:" "$WORK/status.log" || fail "status shows a skipped commit after a good deploy"
+! grep -q "^Failed:" "$WORK/status.log" || fail "status points to the kept step output after a good deploy"
+[ "$(sed -n 1p "$BASE/deploy-failed.log")" = "Step: after_switch" ] || fail "the good deploy did not keep the after_switch output"
 check "status shows the live release, the rollback target and the site"
 
 step "Diff says so when nothing is pending"
@@ -536,7 +561,8 @@ deploy fixture rollback
 serves "$first" || fail "server does not show $first"
 FIXTURE_FAIL_ROLLBACK=1 deploy fixture rollback "${second:0:15}" 2> "$WORK/after-rollback.log" \
     || fail "a failing after_rollback failed the rollback"
-grep -q "after_rollback failed; the rollback stands" "$WORK/after-rollback.log" || fail "no warning for after_rollback"
+grep -qF "after_rollback failed; its output is in $BASE/deploy-failed.log; the rollback stands" \
+    "$WORK/after-rollback.log" || fail "no warning for after_rollback"
 [ "$(cat "$BASE/shared/data/rolled_back")" = "$second" ] || fail "after_rollback did not run in $second"
 [ "$(live_release)" = "$second" ] || fail "rollback by time did not go to $second"
 serves "$second" || fail "server does not show $second after a rollback by time"
@@ -726,7 +752,8 @@ fi
 [ ! -s "$WORK/quiet.out" ] || fail "a quiet failed deploy wrote to stdout"
 cmp -s "$WORK/loud.err" "$WORK/quiet.err" || fail "a quiet failed deploy shows other errors than a plain one"
 grep -q "^build: npm run prod exited with 1$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the step output"
-grep -q "^deploy: build failed$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the error"
+grep -qxF "deploy: build failed; its output is in $BASE/deploy-failed.log" "$WORK/quiet.err" \
+    || fail "a quiet failed deploy hides the error"
 deploy fixture freeze "quiet test" > /dev/null
 code=0
 deploy fixture --force > /dev/null 2>&1 || code=$?
@@ -849,7 +876,8 @@ grep -qE "^└  Done in [0-9]+s$" "$WORK/rails.log" || fail "no closing line"
 if FIXTURE_FAIL_BUILD=1 DEPLOY_RAILS=1 deploy fixture --force > "$WORK/rails.log" 2> "$WORK/rails-err.log"; then
     fail "a deploy with a failing build succeeded"
 fi
-grep -q "^■  build failed$" "$WORK/rails-err.log" || fail "the failure is not marked"
+grep -qxF "■  build failed; its output is in $BASE/deploy-failed.log" "$WORK/rails-err.log" || fail "the failure is not marked"
+grep -qxF "build: npm run prod exited with 1" "$BASE/deploy-failed.log" || fail "the rails did not keep the step output"
 grep -qE "^└  Failed after [0-9]+s$" "$WORK/rails.log" || fail "no closing line for the failure"
 DEPLOY_RAILS=1 deploy fixture status > "$WORK/rails.log"
 grep -q "^│  Live: *$fresh$" "$WORK/rails.log" || fail "status is not on the rail"
@@ -953,7 +981,7 @@ if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$al
     fail "a deploy with a failing build succeeded"
 fi
 cat "$ALERTS"
-grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" || fail "no alert for the failed build"
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed; its output is in [^)]*/deploy-failed\.log\)$" "$ALERTS" || fail "no alert for the failed build"
 grep -qF '"text":"fixture: deploy ' "$WORK/hook.log" || fail "NOTIFY_URL got no JSON alert"
 grep -qF '"event":"deploy"' "$WORK/hook.log" || fail "the JSON alert has no event"
 FIXTURE_DETAILS="$WORK/details" NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/null
@@ -1148,7 +1176,7 @@ if FIXTURE_FAIL_BUILD=1 NOTIFY_CMD="$alert_cmd" deploy fixture --force > /dev/nu
     fail "a deploy with a failing build succeeded"
 fi
 cat "$WORK/nolog.log"
-grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" \
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed; its output is in [^)]*/deploy-failed\.log\)$" "$ALERTS" \
     || fail "no alert for the failed build with an unwritable deploy.log"
 [ ! -e "$BASE/.deploy.lock" ] || fail "the lock stayed after a failed deploy with an unwritable deploy.log"
 [ "$(grep -c "could not write to $BASE/deploy.log" "$WORK/nolog.log")" = 1 ] \
@@ -1349,7 +1377,8 @@ fi
 if STEP_TIMEOUT=1 FIXTURE_SLOW_BUILD="$WORK/slow.pid" DEPLOY_RAILS=1 deploy fixture --force > /dev/null 2> "$WORK/timeout.log"; then
     fail "a build past STEP_TIMEOUT succeeded on the rails"
 fi
-grep -q "^■  build ran past STEP_TIMEOUT (1 s)$" "$WORK/timeout.log" || fail "the timeout is not marked on the rails"
+grep -qxF "■  build ran past STEP_TIMEOUT (1 s); its output is in $BASE/deploy-failed.log" "$WORK/timeout.log" \
+    || fail "the timeout is not marked on the rails"
 kill -0 "$(cat "$WORK/slow.pid.sleep")" 2>/dev/null && fail "the timed out build on the rails left its sleep"
 STEP_TIMEOUT=0 FIXTURE_BUILD_SLEEP=2 deploy fixture --force > /dev/null || fail "STEP_TIMEOUT=0 stopped a build"
 [ "$(live_release)" != "$before" ] || fail "the deploy with STEP_TIMEOUT=0 did not switch"
@@ -1447,7 +1476,7 @@ done
 [ "$(wc -l < "$BASE/deploy.log")" -eq $((log_lines + 1)) ] || fail "the failing build with a closed output pipe wrote no log line"
 [ "$(tail -n1 "$BASE/deploy.log" | cut -f2,4)" = "deploy	failed: build" ] \
     || fail "the log does not say failed: build: $(tail -n1 "$BASE/deploy.log")"
-grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed\)$" "$ALERTS" \
+grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed; its output is in [^)]*/deploy-failed\.log\)$" "$ALERTS" \
     || fail "the failing build with a closed output pipe sent no alert"
 check "the failed step ran, the log says failed: build, the alert went out and the lock is free"
 
@@ -2154,8 +2183,19 @@ deploy fixture@s1 --ref "$(git -C "$SLOT/releases/$first_slot" rev-parse HEAD)" 
 deploy fixture@s1 > "$WORK/slot.log"
 grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
     || fail "a plain slot deploy after a --ref deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
+sleep 1
+prod_kept="$(cat "$BASE/deploy-failed.log" 2>/dev/null || true)"
+if FIXTURE_FAIL_BUILD=1 deploy fixture@s1 --force > /dev/null 2> "$WORK/slot.err"; then
+    fail "a slot deploy with a failing build succeeded"
+fi
+grep -qxF "deploy: build failed; its output is in $SLOT/deploy-failed.log" "$WORK/slot.err" \
+    || fail "the slot error does not name its kept output"
+grep -qxF "build: npm run prod exited with 1" "$SLOT/deploy-failed.log" || fail "the slot did not keep the step output"
+[ "$(cat "$BASE/deploy-failed.log" 2>/dev/null || true)" = "$prod_kept" ] || fail "a slot failure changed the production kept output"
+deploy fixture@s1 status | grep "^Failed: .*$SLOT/deploy-failed.log$" > /dev/null || fail "the slot status does not point to its kept output"
 deploy fixture@s1 --force > /dev/null
 [ "$(cat "$SLOT/current/VERSION")" = "feature two" ] || fail "--force did not build the slot's skipped commit"
+! deploy fixture@s1 status | grep "^Failed:" > /dev/null || fail "the slot status points to the kept output after a good deploy"
 [ ! -e "$SLOT/.skip-commits" ] || fail "a good slot deploy did not clear its skipped commit"
 check "the slot keeps its own skipped commit in its own folder; a good --ref deploy keeps it; --force builds it and clears it"
 

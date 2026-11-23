@@ -94,6 +94,9 @@ QUIET=0
 # The output of the running deploy.conf step with --quiet, shown only when the step fails.
 STEP_LOG=""
 
+# A copy of the running step's output, kept in FAILED_OUTPUT_FILE when the step fails.
+STEP_OUTPUT=""
+
 # The commands, for help and for typo hints.
 COMMANDS=(deploy freeze unfreeze down up cache prune status diff check log path rollback slots stage staging free copy-from init
     self help version)
@@ -1559,6 +1562,8 @@ run_step() {
     stage_start "Running $1"
 
     [ "$QUIET" -eq 0 ] || STEP_LOG="$(mktemp)"
+    # In the run folder, which on_exit removes. A full disk only loses the copy.
+    STEP_OUTPUT="$(run_tmp 2>/dev/null)/output" || STEP_OUTPUT=/dev/null
 
     # Off here, so `set -e` inside the subshell stops the step at its first failing command.
     set +e
@@ -1586,6 +1591,38 @@ run_step() {
     else
         stage_done
     fi
+
+    # The failed step runs after another step failed: that output matters more.
+    if [ "$status" -ne 0 ] && [ "$1" != failed ] && keep_failed_output "$1"; then
+        RUN_ERROR="$RUN_ERROR; its output is in $DEPLOY_BASE/$FAILED_OUTPUT_FILE"
+    fi
+}
+
+FAILED_OUTPUT_FILE="deploy-failed.log"
+
+# Keeps the output of failed step $1 in <base>/deploy-failed.log, redacted, so a cron failure can
+# be read later. Overwritten each time; only the last 100 KB stay. Warns if it cannot be written.
+keep_failed_output() {
+    local file="$DEPLOY_BASE/$FAILED_OUTPUT_FILE" output size
+
+    size="$(wc -c < "$STEP_OUTPUT" 2>/dev/null | tr -d ' ')" || size=0
+
+    if [ "${size:-0}" -gt 102400 ]; then
+        # The first line is cut, so it goes.
+        output="(only the last 100 KB)
+$(tail -c 102400 "$STEP_OUTPUT" | sed 1d)"
+    else
+        output="$(cat "$STEP_OUTPUT" 2>/dev/null)" || output=""
+    fi
+
+    if ! printf 'Step: %s\nRelease: %s\nTime: %s\n\n%s\n' "$1" "${RELEASE_NAME:--}" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(redact "$output")" 2>/dev/null > "$file.tmp" \
+        || ! mv "$file.tmp" "$file" 2>/dev/null; then
+        rm -f "$file.tmp" 2>/dev/null || true
+        warn "could not write $file"
+
+        return 1
+    fi
 }
 
 # The body of run_step, in its own process group. On the rails, the step's exit code comes back
@@ -1597,17 +1634,22 @@ step_body() {
             trap - PIPE
             cd "$RELEASE_DIR"
             "$1"
-        ) 2>&1 | rail
+        ) 2>&1 | tee -a "$STEP_OUTPUT" 2>/dev/null | rail
         return "${PIPESTATUS[0]}"
     fi
 
-    # The step keeps the usual SIGPIPE, so its own pipes work as in any script.
-    (
-        set -e
-        trap - PIPE
-        cd "$RELEASE_DIR"
-        "$1"
-    )
+    # The step keeps the usual SIGPIPE, so its own pipes work as in any script. Its stdout and
+    # stderr stay apart; both are also copied to STEP_OUTPUT. tee keeps quiet when a reader is gone.
+    {
+        (
+            set -e
+            trap - PIPE
+            cd "$RELEASE_DIR"
+            "$1"
+        ) 2>&1 1>&3 3>&- | tee -a "$STEP_OUTPUT" >&2 2>/dev/null 3>&-
+        exit "${PIPESTATUS[0]}"
+    } 3>&1 | tee -a "$STEP_OUTPUT" 2>/dev/null
+    return "${PIPESTATUS[0]}"
 }
 
 # Fails unless SHARED path $1 stays inside the release folder.
@@ -2714,6 +2756,7 @@ status() {
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || printf '\nFrozen:    %s\n' "$(frozen_text)"
     show_skip
+    show_failed_output
     ! is_down || printf '\nDown:      %s\n' "$(marker_text "$DOWN_FILE")"
 
     case "$(lock_state)" in
@@ -2753,6 +2796,19 @@ show_skip() {
     more="$(($(wc -l < "$file") - 1))"
     printf '\nSkips:     %s %s (%s); push a fix, or deploy %s--force%s\n' "${sha:0:7}" "$reason" "$release" \
         "${PROJECT:+$PROJECT }" "$([ "$more" -le 0 ] || printf '; %s older' "$more")"
+}
+
+# The Failed line of status, while the kept step output is newer than the last good deploy.
+show_failed_output() {
+    local file="$DEPLOY_BASE/$FAILED_OUTPUT_FILE" step failed_at good_at
+
+    [ -f "$file" ] || return 0
+    step="$(sed -n '1s/^Step: //p' "$file")"
+    failed_at="$(sed -n '3s/^Time: //p' "$file")"
+    good_at="$(awk -F '\t' '$2 ~ /^deploy(@|$)/ && $4 == "ok" { time = $1 } END { print time }' \
+        "$DEPLOY_BASE/deploy.log" 2>/dev/null)" || good_at=""
+    [[ "$failed_at" > "$good_at" ]] || return 0
+    printf '\nFailed:    %s at %s; its output is in %s\n' "${step:-a step}" "$failed_at" "$file"
 }
 
 # What status_row and the menu read for the loaded project: ROW_LIVE, ROW_SITE, ROW_SITE_BAD (1 when
@@ -4814,7 +4870,8 @@ EOF
         status)
             cat <<EOF
   status                     Show the live release, the rollback target, pending commits, all
-                             releases, the disk and the site
+                             releases, the last failed step since the last good deploy, the
+                             disk and the site
   status --all               One line per project, and one for the engine; fails if any site does
                              not serve its live release. Production only, no slots
 EOF

@@ -52,6 +52,7 @@ Each project has a base folder on the server:
   shared/                                         files that live across releases (.env, uploads, a database file)
   current -> releases/<name>                      the live release; the web server serves current/public
   deploy.log                                      one line per deploy and rollback, with the result
+  deploy-failed.log                               the output of the last step that failed
   .skip-commits                                   commits a plain deploy skips (see step 3 below)
 ```
 
@@ -178,7 +179,8 @@ Commands:
                     total and changes nothing: no lock, no log line. Prints one line when
                     there is nothing to remove
   status            The live release, the rollback target, the commits not deployed yet, all
-                    releases, a commit plain deploys skip, the lock, the disk and the site
+                    releases, a commit plain deploys skip, the last failed step since the
+                    last good deploy, the lock, the disk and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
                     commits, a branch tip that plain deploys skip, and failed releases. The
                     menu shows the same note. A last line shows the engine: its version, and
@@ -276,7 +278,8 @@ question. Without a terminal (cron, pipes, `slots update`, `stage`) they never a
 `--quiet` (or `-q`) prints only warnings and errors, with their `Try:` hint, so cron mails only
 problems. It works with any command, wherever it is on the line. A quiet run shows no `==>` lines,
 no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new, or a commit
-that failed its check or was rolled back) prints nothing. The output of `deploy.conf` steps shows only when a step fails. A problem the run carries
+that failed its check or was rolled back) prints nothing. The output of `deploy.conf` steps shows only when a step fails, and is kept in
+`<base>/deploy-failed.log` (see [A step failed or ran too long](#a-step-failed-or-ran-too-long)). A problem the run carries
 on past (a failing `after_switch` or `PHP_RELOAD_CMD`), and the removal of a stale lock, become
 warnings. On a terminal, questions still show; without one it never asks. The bare `deploy` menu
 ignores `--quiet`.
@@ -916,13 +919,18 @@ The deployed branch has no `deploy.conf` in the repo root. Add one with at least
 ### A step failed or ran too long
 
 ```
-deploy: build failed
-deploy: build ran past STEP_TIMEOUT (600 s)
+deploy: build failed; its output is in <base>/deploy-failed.log
+deploy: build ran past STEP_TIMEOUT (600 s); its output is in <base>/deploy-failed.log
 ```
 
 A `deploy.conf` step (`preflight`, `backup`, `build`, `verify`) exited with an error, or ran
 longer than `STEP_TIMEOUT` and was stopped with all it started. The step's own output is above the
-error. Nothing was switched: the new folder is deleted and the old release stays live. Fix the step,
+error, and is also kept in `<base>/deploy-failed.log`, so the error of a cron run (a composer or
+migration error) can be read later. The file starts with the step, the release and the time (UTC).
+Each failed step overwrites it; it keeps the last 100 KB, and URLs in it hide their user and
+password. `status` shows `Failed: build at <time>; its output is in <base>/deploy-failed.log` until
+the next good deploy. A slot keeps its own file in its folder. The `failed` step never overwrites
+it. Nothing was switched: the new folder is deleted and the old release stays live. Fix the step,
 or raise `STEP_TIMEOUT` in `projects/example.env` if the step is slow but fine (`0` turns the limit
 off). `check` reports a slow `health()` step as `health: ran past STEP_TIMEOUT (600 s)`.
 

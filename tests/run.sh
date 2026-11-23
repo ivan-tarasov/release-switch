@@ -958,6 +958,51 @@ php -r '
 ' "$WORK/hook.log" "$(live_release)" "$before" "$sha" || fail "the JSON alert lacks the deploy details"
 check "steps, NOTIFY_CMD and the JSON alert get the deploy details and commits"
 
+step "An alert for 2000 shipped commits arrives, and PHP gets only the lines it shows"
+many="$WORK/many"
+rm -rf "$many"
+git clone --quiet --branch develop "$REPO" "$many"
+# fast-import, as 2000 git commit runs take long.
+awk -v parent="$(git -C "$many" rev-parse HEAD)" -v now="$(date +%s)" 'BEGIN {
+    for (i = 1; i <= 2000; i++) {
+        msg = "fixture many " i
+        printf "commit refs/heads/develop\ncommitter test <test@example.com> %d +0000\ndata %d\n%s\n", now, length(msg) + 1, msg
+        if (i == 1) printf "from %s\n", parent
+        printf "\n"
+    }
+}' | git -C "$many" fast-import --quiet
+git -C "$many" push --quiet origin develop
+rm -rf "$many"
+# Keeps the longest argument of each PHP run, then runs PHP.
+cat > "$WORK/php-args" <<'SH'
+#!/usr/bin/env bash
+longest=0
+for arg in "$@"; do
+    [ "${#arg}" -le "$longest" ] || longest="${#arg}"
+done
+printf '%s\n' "$longest" >> "$PHP_ARGS_LOG"
+exec php "$@"
+SH
+chmod +x "$WORK/php-args"
+: > "$WORK/php-args.log"
+: > "$WORK/hook.log"
+: > "$ALERTS"
+NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" PHP_BIN="$WORK/php-args" \
+    PHP_ARGS_LOG="$WORK/php-args.log" deploy fixture > /dev/null || fail "a deploy of 2000 commits failed"
+cat "$ALERTS"
+grep -q "^2000 commit(s):$" "$ALERTS" || fail "the alert text does not count the 2000 commits"
+grep -q "^  \.\.\. and 1990 more$" "$ALERTS" || fail "the alert text does not say how many more"
+grep -qE "^  [0-9a-f]{7} fixture many 2000$" "$ALERTS" || fail "the alert does not list the newest commit"
+longest="$(sort -n "$WORK/php-args.log" | tail -n1)"
+[ "${longest:-0}" -gt 0 ] && [ "$longest" -lt 8000 ] || fail "PHP got an argument of $longest characters"
+# shellcheck disable=SC2016 # PHP code, not shell.
+php -r '
+    $a = json_decode(trim(file_get_contents($argv[1])), true);
+    exit(count($a["commits"]) === 20 && $a["commits"][0]["subject"] === "fixture many 2000"
+        && $a["commits"][19]["subject"] === "fixture many 1981" ? 0 : 1);
+' "$WORK/hook.log" || fail "the JSON alert does not have the first 20 commits"
+check "the alert for 2000 commits arrives with the same first lines; PHP gets $longest characters at most"
+
 step "Check alerts only when the result changes"
 : > "$ALERTS"
 : > "$WORK/hook.log"

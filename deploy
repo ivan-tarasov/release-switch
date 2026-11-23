@@ -232,6 +232,17 @@ fail() {
     exit 1
 }
 
+# Like fail, but prints nothing with --quiet: an expected state (a freeze, a lock held by a live
+# run) that cron would mail on every run. The exit code stays.
+quiet_fail() {
+    if [ "$QUIET" -eq 1 ]; then
+        FAIL_MESSAGE="$(redact "$1")"
+        exit 1
+    fi
+
+    fail "$@"
+}
+
 error_line() {
     if [ "$RAILS" -eq 1 ]; then
         printf '%s■%s  %s\n' "$C_RED" "$C_OFF" "$1" >&2 2> /dev/null || output_gone 2
@@ -691,7 +702,7 @@ acquire_lock() {
             # Checked again: another run may have replaced the lock since. While this run holds
             # the break folder, nobody else removes a lock, so a stale one stays the same.
             if [ "$(lock_state)" = stale ]; then
-                say "Removing a stale lock: $(lock_text | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
+                carry_on "Removing a stale lock: $(lock_text | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
                 # Moved aside first, so the path frees at once and other runs never see half of it.
                 rm -rf "$LOCK_DIR.stale.$$"
                 mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null || true
@@ -712,9 +723,11 @@ acquire_lock() {
                     "df -h $DEPLOY_BASE; ls -ld $DEPLOY_BASE"
             fi
 
-            local pid
+            local pid fail_with=fail
             read -r pid _ <<< "$(lock_owner)"
-            fail "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not" \
+            # A live owner: quiet with --quiet. No owner or a stale one needs a person.
+            [ -z "$pid" ] || [ "$(lock_state)" != held ] || fail_with=quiet_fail
+            "$fail_with" "another deploy is running ($(lock_text)); remove $DEPLOY_BASE/.deploy.lock if it is not" \
                 "deploy ${PROJECT:+$PROJECT }status${pid:+, or wait for PID $pid}"
         fi
 
@@ -1968,7 +1981,7 @@ clear_cache() {
 refuse_if_frozen() {
     local text
     text="$(frozen_text)"
-    [ -z "$text" ] || fail "deploys are frozen $text" "deploy ${PROJECT:+$PROJECT }unfreeze"
+    [ -z "$text" ] || quiet_fail "deploys are frozen $text" "deploy ${PROJECT:+$PROJECT }unfreeze"
 }
 
 freeze() {
@@ -2620,6 +2633,8 @@ project_facts() {
 
     if [ -z "$CHECK_URL" ]; then
         ROW_SITE="not checked (no CHECK_URL)"
+    elif switch_running; then
+        ROW_SITE="not checked, a deploy is running"
     else
         probe
 
@@ -3722,10 +3737,23 @@ health_body() {
     )
 }
 
+# True while a live deploy or rollback holds the lock, for under 30 min: the site and health()
+# may lag `current` then. Past 30 min, check calls the deploy stuck.
+switch_running() {
+    local pid started action
+    read -r pid started action <<< "$(lock_owner)"
+    [ -n "${pid:-}" ] && [ "$(lock_state)" = held ] || return 1
+
+    case "${action:-}" in
+        deploy | rollback | stage) [ $((($(date +%s) - ${started:-0}) / 60)) -lt 30 ] ;;
+        *) return 1 ;;
+    esac
+}
+
 # A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
 # anything is wrong.
 check() {
-    local live dir broken minutes
+    local live dir broken minutes running=0
     CHECK_FAILED=0
     CHECK_PROBLEMS=""
     CHECK_KEYS=""
@@ -3740,6 +3768,11 @@ check() {
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
     live="$(current_release)"
     dir="$DEPLOY_BASE/releases/$live"
+
+    if switch_running; then
+        running=1
+        check_ok "site and health: not checked, a deploy is running ($(lock_text))"
+    fi
 
     if [ -z "$live" ]; then
         check_bad "no live release ($DEPLOY_BASE/current is not a link)"
@@ -3764,7 +3797,7 @@ check() {
             # The app may stop its scheduler while down, so health() would fail for no real reason.
             if is_down; then
                 check_ok "health: not checked, down for maintenance"
-            else
+            elif [ "$running" -eq 0 ]; then
                 check_health "$dir"
             fi
         fi
@@ -3772,7 +3805,7 @@ check() {
 
     if [ -z "$CHECK_URL" ]; then
         check_ok "site: not checked (no CHECK_URL)"
-    else
+    elif [ "$running" -eq 0 ]; then
         probe
 
         if [ -n "$live" ] && [ "$PROBE_STATUS" = 200 ] && [ "$PROBE_VERSION" = "$live" ]; then
@@ -3820,7 +3853,8 @@ check() {
             ;;
     esac
 
-    check_notify
+    # Mid-deploy, "ok again" waits for a full check.
+    [ "$running" -eq 1 ] && [ "$CHECK_FAILED" -eq 0 ] || check_notify
 
     return "$CHECK_FAILED"
 }

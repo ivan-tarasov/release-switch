@@ -568,7 +568,24 @@ grep -q "another deploy is running (PID $$, deploy, 0 min)" "$WORK/lock.log" || 
 grep -q "^Try: deploy fixture status, or wait for PID $$$" "$WORK/lock.log" || fail "no hint for a held lock"
 deploy fixture status > "$WORK/lock-status.log"
 grep -q "^Lock: *held (PID $$, deploy, 0 min)" "$WORK/lock-status.log" || fail "status does not show the lock owner"
-check "locked deploy refused; the message and status name the owner"
+code=0
+deploy fixture > /dev/null 2>&1 || code=$?
+for args in "" rollback down up cache; do
+    quiet_code=0
+    # cache needs a cache() step or OPCACHE_RESET_DIR to reach the lock.
+    # shellcheck disable=SC2086 # Word splitting wanted: no args for a plain deploy.
+    OPCACHE_RESET_DIR=public deploy fixture $args --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" || quiet_code=$?
+    [ "$quiet_code" = "$code" ] || fail "a quiet ${args:-deploy} on a held lock exited with $quiet_code, not $code"
+    [ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet ${args:-deploy} on a held lock printed something"
+done
+[ -d "$BASE/.deploy.lock" ] || fail "a refused run removed the held lock"
+rm -rf "$BASE/.deploy.lock"
+mkdir "$BASE/.deploy.lock"
+if deploy fixture --quiet 2> "$WORK/lock.log"; then
+    fail "a quiet deploy ran while a young lock with no owner was there"
+fi
+grep -q "another deploy is running (no owner, [0-9]* s old)" "$WORK/lock.log" || fail "a quiet deploy hides a lock with no owner"
+check "locked deploy refused; the message and status name the owner; --quiet hides a live owner, not a missing one"
 
 step "A lock whose process is gone is removed"
 sh -c 'exit 0' &
@@ -582,7 +599,13 @@ grep -q "Removing a stale lock: PID $dead is gone" "$WORK/stale.log" || fail "de
 [ ! -d "$BASE/.deploy.lock" ] || fail "deploy left the lock behind"
 fresh="$(live_release)"
 serves "$fresh" || fail "server does not show $fresh"
-check "deploy removed the stale lock and went live with $fresh"
+mkdir "$BASE/.deploy.lock"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+deploy fixture --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" || fail "a quiet deploy past a stale lock failed"
+[ ! -s "$WORK/quiet.out" ] || fail "a quiet deploy past a stale lock wrote to stdout"
+grep -q "^deploy: Removing a stale lock: PID $dead is gone$" "$WORK/quiet.err" || fail "a quiet deploy hides the stale lock"
+[ ! -d "$BASE/.deploy.lock" ] || fail "a quiet deploy left the stale lock behind"
+check "deploy removed the stale lock and went live with $fresh; --quiet still names the stale lock"
 
 step "A lock with no owner blocks for 60 s, then is removed"
 mkdir "$BASE/.deploy.lock"
@@ -656,7 +679,7 @@ step "A stale lock removal that stopped half way is reported"
 mkdir "$BASE/.deploy.lock" "$BASE/.deploy.lock.break"
 printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$BASE/.deploy.lock/owner"
 TZ=UTC touch -t "$(php -r 'echo gmdate("YmdHi.s", time() - 120);')" "$BASE/.deploy.lock.break"
-if deploy fixture > "$WORK/break.log" 2>&1; then
+if deploy fixture --quiet > "$WORK/break.log" 2>&1; then
     fail "deploy ran past a stuck stale lock removal"
 fi
 grep -q "a stale lock removal stopped half way; remove .*\.deploy\.lock\.break" "$WORK/break.log" || fail "deploy does not name the stuck break folder"
@@ -705,15 +728,19 @@ cmp -s "$WORK/loud.err" "$WORK/quiet.err" || fail "a quiet failed deploy shows o
 grep -q "^build: npm run prod exited with 1$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the step output"
 grep -q "^deploy: build failed$" "$WORK/quiet.err" || fail "a quiet failed deploy hides the error"
 deploy fixture freeze "quiet test" > /dev/null
-if deploy fixture --force -q > "$WORK/quiet.out" 2> "$WORK/quiet.err"; then
-    fail "a quiet deploy ran while frozen"
-fi
+code=0
+deploy fixture --force > /dev/null 2>&1 || code=$?
+[ "$code" -ne 0 ] || fail "a deploy ran while frozen"
+for args in "--force" "rollback"; do
+    quiet_code=0
+    # shellcheck disable=SC2086 # Word splitting wanted.
+    deploy fixture $args -q > "$WORK/quiet.out" 2> "$WORK/quiet.err" || quiet_code=$?
+    [ "$quiet_code" = "$code" ] || fail "a quiet frozen $args exited with $quiet_code, not $code"
+    [ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet frozen $args printed something"
+done
 deploy fixture unfreeze > /dev/null
-[ ! -s "$WORK/quiet.out" ] || fail "a quiet frozen deploy wrote to stdout"
-grep -q "^deploy: deploys are frozen since today at .*: quiet test$" "$WORK/quiet.err" || fail "a quiet frozen deploy hides the error"
-grep -q "^Try: deploy fixture unfreeze$" "$WORK/quiet.err" || fail "a quiet frozen deploy hides the hint"
 [ "$(live_release)" = "$fresh" ] || fail "a failed quiet deploy changed the live release"
-check "quiet: silent deploy and skip; a failure shows the step output, error and hint"
+check "quiet: silent deploy, skip and freeze; a failure shows the step output, error and hint"
 
 step "Freeze stops deploys and rollbacks until unfreeze"
 deploy fixture freeze "moving hosts" > /dev/null
@@ -1072,6 +1099,45 @@ grep -q "^check|fixture: check ok again$" "$ALERTS" || fail "no alert when the c
 NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null
 [ "$(wc -l < "$ALERTS" | tr -d ' ')" = 2 ] || fail "a healthy check sent another alert"
 check "one alert for a failing check, one when it is ok again, none while nothing changes"
+
+step "Check skips the site and health() while a deploy runs"
+: > "$ALERTS"
+if CHECK_URL="http://127.0.0.1:$PORT/missing" NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null 2>&1; then
+    fail "check passed with a 404"
+fi
+[ -f "$BASE/.check-failed" ] || fail "a failed check left no alert state"
+cp "$BASE/.check-failed" "$WORK/check-failed.before"
+mkdir "$BASE/.deploy.lock"
+# Held by this test's shell, which is alive.
+printf '%s %s deploy\n' "$$" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+CHECK_URL="http://127.0.0.1:$PORT/missing" FIXTURE_UNHEALTHY=1 NOTIFY_CMD="$alert_cmd" deploy fixture check \
+    > "$WORK/busy-check.log" 2>&1 || fail "check failed while a deploy runs"
+cat "$WORK/busy-check.log"
+grep -q "^ok    fixture: site and health: not checked, a deploy is running (PID $$, deploy, 0 min)$" \
+    "$WORK/busy-check.log" || fail "check does not say a deploy is running"
+grep -qE "fixture: (site|health):" "$WORK/busy-check.log" && fail "check ran the site or health() while a deploy runs"
+grep -q "^ok    fixture: disk: " "$WORK/busy-check.log" || fail "check skipped the disk while a deploy runs"
+CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture check --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" \
+    || fail "a quiet check failed while a deploy runs"
+[ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet check printed something while a deploy runs"
+[ "$(wc -l < "$ALERTS" | tr -d ' ')" = 1 ] || fail "check alerted while a deploy runs"
+cmp -s "$BASE/.check-failed" "$WORK/check-failed.before" || fail "check changed the alert state while a deploy runs"
+deploy status --all > "$WORK/busy-all.log" || fail "status --all failed while a deploy runs"
+grep -qE "^fixture .*not checked, a deploy is running" "$WORK/busy-all.log" || fail "status --all does not say a deploy is running"
+if DISK_LIMIT=1K NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null 2> "$WORK/busy-disk.log"; then
+    fail "check passed over DISK_LIMIT while a deploy runs"
+fi
+grep -q "^FAIL  fixture: disk: " "$WORK/busy-disk.log" || fail "check hid a disk problem while a deploy runs"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture check > "$WORK/stale-check.log" 2>&1; then
+    fail "check passed with a 404 and a stale lock"
+fi
+grep -q "^FAIL  fixture: site: .* answered 404" "$WORK/stale-check.log" || fail "a stale lock skipped the site check"
+grep -q "^ok    fixture: lock: stale (PID $dead" "$WORK/stale-check.log" || fail "check does not report the stale lock"
+rm -rf "$BASE/.deploy.lock"
+NOTIFY_CMD="$alert_cmd" deploy fixture check > /dev/null || fail "check failed once the deploy was done"
+grep -q "^check|fixture: check ok again$" "$ALERTS" || fail "no alert when the check is ok again after the deploy"
+check "a live deploy lock skips the site and health(), keeps the alert state; disk still fails; a stale lock does not skip"
 
 step "An unwritable deploy.log never stops the alert or the cleanup"
 # A folder in its place: appends fail, as on a full or read-only disk.

@@ -198,7 +198,8 @@ Commands:
                     folder past DISK_LIMIT, or free space under MIN_FREE_MB), and a lock held
                     for 30 min or more, or with no owner for 60 s. Problems go to stderr
                     and it exits with 1, so `deploy <project> check --quiet` in cron mails
-                    only problems
+                    only problems. While a deploy or rollback runs, it skips the site and
+                    health() (they may lag the switch for a moment) and says so
   check --all       The same for every project, production only
   log [count]       The last deploys and rollbacks, with results, times and the commits each
                     deploy shipped (20 by default)
@@ -266,8 +267,21 @@ question. Without a terminal (cron, pipes, `slots update`, `stage`) they never a
 problems. It works with any command, wherever it is on the line. A quiet run shows no `==>` lines,
 no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new, or a commit
 that failed its check or was rolled back) prints nothing. The output of `deploy.conf` steps shows only when a step fails. A problem the run carries
-on past (a failing `after_switch` or `PHP_RELOAD_CMD`) becomes a warning. On a terminal, questions
-still show; without one it never asks. The bare `deploy` menu ignores `--quiet`.
+on past (a failing `after_switch` or `PHP_RELOAD_CMD`), and the removal of a stale lock, become
+warnings. On a terminal, questions still show; without one it never asks. The bare `deploy` menu
+ignores `--quiet`.
+
+Two refusals print nothing with `--quiet`, so cron does not mail every 10 minutes during a planned
+freeze or a long manual deploy: a frozen project (deploy, rollback), and a lock held by another run
+that is still alive (deploy, rollback, `down`, `up`, `cache`, `free`, `copy-from`). The exit code
+stays 1. Both still show in `status` and `check`. A stale lock, a lock with no owner, a stale lock
+removal that stopped half way and a base folder that cannot be written still print: they need a
+person.
+
+`check` (and `status --all`) skips the site and `health()` while a live deploy or rollback holds the
+lock, as the site may still serve the old release for a moment. It prints one `ok` line instead, sends
+no alert and keeps the last alert state. The disk and the rest still run. A stale lock, or a lock
+held for 30 min or more, does not skip them.
 
 ```cron
 */10 * * * * $HOME/release-switch/deploy example --quiet
@@ -842,7 +856,8 @@ Try: deploy example status, or wait for PID 4242
 A project runs one deploy, rollback, `down`, `up` or `cache` at a time; the message names the
 other run. Wait for it to end. A lock whose process is gone is removed on its own, so remove
 `<base>/.deploy.lock` by hand only when that process is not running (`ps -p 4242`). `check` warns about a lock held for 30 min or more:
-`lock: held for 30 min (...); a deploy may be stuck`.
+`lock: held for 30 min (...); a deploy may be stuck`. With `--quiet` the refusal prints nothing,
+as cron would mail it every run; a lock with no owner still prints.
 
 If a run died while it removed a stale lock, you get
 `a stale lock removal stopped half way; remove <base>/.deploy.lock.break and <base>/.deploy.lock if no deploy is running`.
@@ -860,7 +875,8 @@ Try: deploy example unfreeze
 ```
 
 Someone ran `deploy example freeze`. Deploys and rollbacks stop until `deploy example unfreeze`.
-Ask why first: the reason is in the message and in `status`.
+Ask why first: the reason is in the message and in `status`. With `--quiet` the refusal prints
+nothing (the exit code stays 1), so cron stays quiet during a freeze.
 
 ### The site is down for maintenance
 
@@ -1043,7 +1059,7 @@ a user who can, for example with the hosting panel's file manager.
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
+with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet` (with quiet refusals on a freeze or a held lock), shipped commits, `self log`, `health()`, `check` during a deploy, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a closed output pipe, a rollback with the live folder missing, a read-only base folder, alerts for 2000 commits, prune and
 `KEEP_RELEASES` with a release that cannot be removed, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.

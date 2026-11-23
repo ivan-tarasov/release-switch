@@ -1028,6 +1028,49 @@ is_bad() {
     [ -e "$DEPLOY_BASE/releases/$1/.bad" ]
 }
 
+# Commits a plain deploy skips: one line each, newest first, "<full sha> TAB <reason> TAB <release>".
+# A deploy that switched back after a failed check and a plain rollback add a line; a good deploy
+# empties the file. Up to 10 lines, so two rollbacks in a row still keep both commits.
+SKIP_FILE=".skip-commits"
+
+# Remembers commit $1 with reason $2 ("failed its check", "was rolled back") and release $3. Only warns.
+skip_commit() {
+    local file="$DEPLOY_BASE/$SKIP_FILE" sha reason release count=1
+
+    [ -n "$1" ] || return 0
+
+    if ! {
+        printf '%s\t%s\t%s\n' "$1" "$2" "$3"
+        if [ -f "$file" ]; then
+            while IFS=$'\t' read -r sha reason release && [ "$count" -lt 10 ]; do
+                [ -n "$sha" ] && [ "$sha" != "$1" ] || continue
+                printf '%s\t%s\t%s\n' "$sha" "$reason" "$release"
+                count=$((count + 1))
+            done < "$file"
+        fi
+    } 2>/dev/null > "$file.tmp" || ! mv "$file.tmp" "$file" 2>/dev/null; then
+        rm -f "$file.tmp" 2>/dev/null || true
+        warn "could not write $file; the next plain deploy may build ${1:0:7} again"
+    fi
+}
+
+# The reason commit $1 is skipped, or nothing (status 1) when it is not.
+skip_reason() {
+    local file="$DEPLOY_BASE/$SKIP_FILE" sha reason
+
+    [ -n "$1" ] && [ -f "$file" ] || return 1
+
+    while IFS=$'\t' read -r sha reason _; do
+        if [ "$sha" = "$1" ]; then
+            printf '%s\n' "$reason"
+
+            return 0
+        fi
+    done < "$file"
+
+    return 1
+}
+
 # The newest release older than the given one that is not marked bad, or nothing.
 rollback_target() {
     local release target=""
@@ -2058,7 +2101,7 @@ deploy() {
 
     DEPLOY_REF="${ref:-$DEPLOY_BRANCH}"
 
-    local stamp sha live_sha="" tip err subject forced
+    local stamp sha live_sha="" tip err subject forced reason
 
     [ -z "$PREVIOUS_RELEASE" ] || live_sha="$(git -C "$DEPLOY_BASE/current" rev-parse HEAD 2>/dev/null || true)"
 
@@ -2069,6 +2112,13 @@ deploy() {
         if [ -n "$live_sha" ] && [ "$tip" = "$live_sha" ]; then
             say "Nothing new on $(branch_label): $PREVIOUS_RELEASE already runs ${tip:0:7}"
             say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--force"
+
+            return
+        fi
+
+        # A commit that broke the site or was rolled back is not built again by every cron run.
+        if reason="$(skip_reason "$tip")"; then
+            say "${tip:0:7} $reason; push a fix, or deploy ${PROJECT:+$PROJECT }--force"
 
             return
         fi
@@ -2189,6 +2239,9 @@ deploy() {
             STAGE="check, switched back to $PREVIOUS_RELEASE"
             say "Rolling back to $PREVIOUS_RELEASE"
             switch_to "$PREVIOUS_RELEASE"
+            # A rebuild of the live commit (--force) is not skipped: that commit is live anyway.
+            sha="$(git -C "$RELEASE_DIR" rev-parse HEAD 2>/dev/null || true)"
+            [ "$sha" = "$live_sha" ] || skip_commit "$sha" "failed its check" "$NEW_RELEASE"
             # Requests may still run in it, so set it aside now and delete it on the next deploy.
             mv "$RELEASE_DIR" "$DEPLOY_BASE/releases/.failed-$NEW_RELEASE" 2>/dev/null \
                 || warn "could not set $NEW_RELEASE aside"
@@ -2199,6 +2252,7 @@ deploy() {
     fi
 
     prune
+    rm -f "$DEPLOY_BASE/$SKIP_FILE" 2>/dev/null || warn "could not remove $DEPLOY_BASE/$SKIP_FILE"
     log_event deploy "$NEW_RELEASE" ok
     ACTION=""
     say "Deployed ${PREVIOUS_RELEASE:+$(release_version "$PREVIOUS_RELEASE") → }$(release_version "$NEW_RELEASE")"
@@ -2240,7 +2294,7 @@ show_rollback_plan() {
     say "Target: $target"
 
     if [ "$named" -eq 0 ]; then
-        say "Would mark $live as bad, so later rollbacks skip it"
+        say "Would mark $live as bad, so later rollbacks and plain deploys skip it"
     else
         say "$live would not be marked bad"
         ! is_bad "$target" || say "Would clear the bad mark on $target"
@@ -2270,7 +2324,7 @@ show_rollback_plan() {
 }
 
 rollback() {
-    local name="" arg live target note dry_run=0
+    local name="" arg live target note sha dry_run=0
     local usage="usage: deploy [project] rollback [name] [--yes] [--dry-run]"
 
     for arg in "$@"; do
@@ -2333,6 +2387,9 @@ rollback() {
         if [ -d "$DEPLOY_BASE/releases/$live" ]; then
             if touch "$DEPLOY_BASE/releases/$live/.bad" 2>/dev/null; then
                 say "Marked $live as bad; later rollbacks skip it"
+                sha="$(git -C "$DEPLOY_BASE/releases/$live" rev-parse HEAD 2>/dev/null || true)"
+                skip_commit "$sha" "was rolled back" "$live"
+                [ -z "$sha" ] || say "Plain deploys skip ${sha:0:7} now; push a fix, or deploy ${PROJECT:+$PROJECT }--force"
             else
                 warn "could not mark $live as bad"
             fi
@@ -2506,6 +2563,7 @@ status() {
     done
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || printf '\nFrozen:    %s\n' "$(frozen_text)"
+    show_skip
     ! is_down || printf '\nDown:      %s\n' "$(marker_text "$DOWN_FILE")"
 
     case "$(lock_state)" in
@@ -2535,11 +2593,23 @@ status() {
     fi
 }
 
+# The Skips line of status: the newest commit a plain deploy skips, and how many more.
+show_skip() {
+    local file="$DEPLOY_BASE/$SKIP_FILE" sha="" reason="" release="" more
+
+    [ -f "$file" ] || return 0
+    IFS=$'\t' read -r sha reason release < "$file" || true
+    [ -n "$sha" ] || return 0
+    more="$(($(wc -l < "$file") - 1))"
+    printf '\nSkips:     %s %s (%s); push a fix, or deploy %s--force%s\n' "${sha:0:7}" "$reason" "$release" \
+        "${PROJECT:+$PROJECT }" "$([ "$more" -le 0 ] || printf '; %s older' "$more")"
+}
+
 # What status_row and the menu read for the loaded project: ROW_LIVE, ROW_SITE, ROW_SITE_BAD (1 when
 # the site does not serve the live release), ROW_PROBLEMS (frozen, down, lock, failed releases), and
 # pending_commits on the live release.
 project_facts() {
-    local failed
+    local failed reason
     ROW_LIVE="$(current_release)"
     ROW_SITE_BAD=0
     ROW_PROBLEMS=()
@@ -2568,6 +2638,9 @@ project_facts() {
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || ROW_PROBLEMS+=("frozen")
     ! is_down || ROW_PROBLEMS+=("down")
+    if [ "$PENDING_COUNT" != 0 ] && reason="$(skip_reason "$PENDING_TIP")"; then
+        ROW_PROBLEMS+=("tip ${PENDING_TIP:0:7} $reason")
+    fi
 
     case "$(lock_state)" in
         stale) ROW_PROBLEMS+=("stale lock") ;;
@@ -4514,11 +4587,11 @@ command_help() {
             cat <<EOF
   deploy [--ref <ref>] [--force] [--no-wait] [--yes] [--quiet]
                              Build the newest commit and switch to it (the default). Stops if
-                             that commit is already live, unless --force; on a terminal --force
-                             asks first, and --yes skips that. --ref deploys a tag, branch or
-                             commit instead. A commit under 5 minutes old waits for its release
-                             tag, unless --no-wait or --ref. --quiet prints only warnings and
-                             errors, for cron
+                             that commit is already live, failed its site check or was rolled
+                             back, unless --force; on a terminal --force asks first, and --yes
+                             skips that. --ref deploys a tag, branch or commit instead. A commit
+                             under 5 minutes old waits for its release tag, unless --no-wait or
+                             --ref. --quiet prints only warnings and errors, for cron
   deploy --branch <name>     On a slot only: follow that branch from now on and deploy it. A
                              plain deploy of the slot then deploys the newest commit of it
   deploy --pr <number>       On a slot only: follow the head of that pull request, the same way.

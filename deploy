@@ -583,15 +583,19 @@ branch_label() {
 }
 
 # A commits-only clone of DEPLOY_BRANCH from repo $1 into $2, with HEAD at its tip. A clone never
-# fetches refs/pull/*, so a pull request head is fetched on its own.
+# fetches refs/pull/*, so a pull request head is fetched on its own. No background maintenance:
+# a fetch, even one git makes on its own for a missing commit, would start it, and it would still
+# write in the folder when the folder is removed.
 history_clone() {
     if [ -z "$SLOT_PR" ]; then
-        git clone --quiet --bare --filter=tree:0 --single-branch --branch "$DEPLOY_BRANCH" "$1" "$2" 2>/dev/null
+        git clone --quiet --bare --filter=tree:0 --single-branch --config maintenance.auto=false --config gc.auto=0 \
+            --branch "$DEPLOY_BRANCH" "$1" "$2" 2>/dev/null
 
         return
     fi
 
-    git clone --quiet --bare --filter=tree:0 --single-branch "$1" "$2" 2>/dev/null \
+    git clone --quiet --bare --filter=tree:0 --single-branch --config maintenance.auto=false --config gc.auto=0 \
+        "$1" "$2" 2>/dev/null \
         && git -C "$2" fetch --quiet origin "+$(branch_ref):refs/heads/deploy-pr" 2>/dev/null \
         && git -C "$2" symbolic-ref HEAD refs/heads/deploy-pr
 }

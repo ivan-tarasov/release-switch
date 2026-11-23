@@ -1030,7 +1030,7 @@ is_bad() {
 
 # Commits a plain deploy skips: one line each, newest first, "<full sha> TAB <reason> TAB <release>".
 # A deploy that switched back after a failed check and a plain rollback add a line; a good deploy
-# empties the file. Up to 10 lines, so two rollbacks in a row still keep both commits.
+# of the branch tip (no --ref) empties the file. Up to 10 lines, so two rollbacks in a row still keep both commits.
 SKIP_FILE=".skip-commits"
 
 # Remembers commit $1 with reason $2 ("failed its check", "was rolled back") and release $3. Only warns.
@@ -2252,7 +2252,8 @@ deploy() {
     fi
 
     prune
-    rm -f "$DEPLOY_BASE/$SKIP_FILE" 2>/dev/null || warn "could not remove $DEPLOY_BASE/$SKIP_FILE"
+    # Only the branch tip: after a --ref back to an older release the tip may still be broken.
+    [ -n "$ref" ] || rm -f "$DEPLOY_BASE/$SKIP_FILE" 2>/dev/null || warn "could not remove $DEPLOY_BASE/$SKIP_FILE"
     log_event deploy "$NEW_RELEASE" ok
     ACTION=""
     say "Deployed ${PREVIOUS_RELEASE:+$(release_version "$PREVIOUS_RELEASE") → }$(release_version "$NEW_RELEASE")"

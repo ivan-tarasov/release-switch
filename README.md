@@ -64,8 +64,8 @@ Each project has a base folder on the server:
 3. stops if the newest commit of the branch is already live, so no empty release pushes a good one
    out (`--force` builds it anyway). It also stops, with exit 0, if that commit failed its site
    check (the deploy switched back) or was rolled back by a plain `rollback`, so cron does not
-   break the site again every run. `--force` and `--ref` build it anyway; a good deploy of any
-   commit clears the list in `.skip-commits`. A failure before the switch (a build or `verify`
+   break the site again every run. `--force` and `--ref` build it anyway; a good deploy of the
+   branch tip (plain or `--force`, not `--ref`) clears the list in `.skip-commits`. A failure before the switch (a build or `verify`
    step) adds nothing: the site never went down, and a retry may pass;
 4. clones the newest commit of the branch into `releases/.building-<stamp>`, renames it to its
    final name with a `.building` file in it, and writes its name to `RELEASE` in the release root.
@@ -931,7 +931,9 @@ It builds nothing and exits with 0, like "Nothing new", so cron does not break t
 with `--quiet` it prints nothing. `status` shows it on a `Skips:` line, and `status --all` and the
 menu note `tip abc1234 failed its check`. Push a fix: a new commit deploys as usual. To build the
 same commit again (say the cause was outside the code and is fixed), run
-`deploy example --force`, or `--ref <sha>`. A good deploy of any commit clears the list. Failures
+`deploy example --force`, or `--ref <sha>`. A good deploy of the branch tip (plain or `--force`)
+clears the list. A good `--ref` deploy, say back to an older tag, leaves it, as the tip may still be
+broken. Failures
 before the switch (`build`, `verify`) are not remembered, so a flaky network only costs a retry.
 The list lives in `<base>/.skip-commits`, one line per commit (full sha, reason, release), newest
 first, up to 10; a staging slot has its own in its own base folder.

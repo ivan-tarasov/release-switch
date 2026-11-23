@@ -2009,10 +2009,18 @@ deploy fixture@s1 > "$WORK/slot.log"
 grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
     || fail "a plain slot deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
 [ "$(slot_live)" = "$first_slot" ] || fail "a skipped slot deploy switched"
+slot_skip="$(cat "$SLOT/.skip-commits")"
+deploy fixture@s1 --ref "$(git -C "$SLOT/releases/$first_slot" rev-parse HEAD)" --force > /dev/null
+[ "$(slot_live)" != "$first_slot" ] && [ "$(cat "$SLOT/current/VERSION")" = "feature one" ] \
+    || fail "a --ref --force slot deploy did not build the older commit"
+[ "$(cat "$SLOT/.skip-commits")" = "$slot_skip" ] || fail "a good --ref deploy changed the skipped commits"
+deploy fixture@s1 > "$WORK/slot.log"
+grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
+    || fail "a plain slot deploy after a --ref deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
 deploy fixture@s1 --force > /dev/null
 [ "$(cat "$SLOT/current/VERSION")" = "feature two" ] || fail "--force did not build the slot's skipped commit"
 [ ! -e "$SLOT/.skip-commits" ] || fail "a good slot deploy did not clear its skipped commit"
-check "the slot keeps its own skipped commit in its own folder; --force builds it and clears it"
+check "the slot keeps its own skipped commit in its own folder; a good --ref deploy keeps it; --force builds it and clears it"
 
 step "Slots are listed, refused when wrong, and leave production alone"
 deploy fixture slots > "$WORK/slots.log"

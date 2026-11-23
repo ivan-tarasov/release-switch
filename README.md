@@ -82,7 +82,8 @@ Each project has a base folder on the server:
    If it does not, it switches back and sets the new release aside as `releases/.failed-<name>`;
 9. deletes all but the last `KEEP_RELEASES` releases, and any `.failed-*` folder. It always keeps
    the release that was live before this deploy, since requests may still run in it; that one can
-   go on the next deploy.
+   go on the next deploy. It also keeps the rollback target. `deploy <project> prune` does the
+   same without a deploy.
 
 If a step before the switch fails, the new folder is deleted and the old release stays live.
 When a deploy fails after `deploy.conf` was loaded, its `failed()` step runs once (see
@@ -138,7 +139,7 @@ Staging (see [Staging](#staging)):
   staging <project>@sN free         Forget the slot's branch, deploy DEPLOY_BRANCH
   staging <project>@sN copy-from <project> [--yes] [path ...]
                                     Copy production's SHARED data into the slot
-  staging <project>@sN status | diff | log | path | rollback | down | up | cache
+  staging <project>@sN status | diff | log | path | rollback | down | up | cache | prune
 
 Commands:
   deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
@@ -167,6 +168,15 @@ Commands:
                     OPCACHE_RESET_DIR is set. Fails with a hint when neither is set. Takes the
                     lock and writes a log line. On a terminal in production it asks first;
                     on a staging slot it does not ask
+  prune [--keep <n>] [--dry-run] [--yes]
+                    Free disk space without a deploy: remove `.failed-*` folders, builds a
+                    killed deploy left, and releases past `KEEP_RELEASES` (or past the newest
+                    n with `--keep`, 2 or more). Never the live release or the rollback target
+                    (the one `rollback` would pick). Takes the lock and writes a log line. On a
+                    terminal in production it lists the folders with their sizes and asks
+                    first; on a staging slot it does not ask. `--dry-run` lists them with a
+                    total and changes nothing: no lock, no log line. Prints one line when
+                    there is nothing to remove
   status            The live release, the rollback target, the commits not deployed yet, all
                     releases, a commit plain deploys skip, the lock, the disk and the site
   status --all      One line per project: live release, deploy time, site check, lock, pending
@@ -253,10 +263,10 @@ carry the error only. See [Troubleshooting](#troubleshooting) for each one.
 
 ### Questions before risky commands
 
-`rollback`, `down`, `cache` and `deploy --force` change the live site, so on a terminal they first show what
+`rollback`, `down`, `cache`, `prune` and `deploy --force` change the live site or its releases, so on a terminal they first show what
 will happen and ask `y/N`: `rollback` shows the live release and the one it goes to, `down` the
-reason and that the site will show its maintenance page, `cache` the live release, `deploy --force`
-the commit it builds. `cache` on a staging slot does not ask. Only
+reason and that the site will show its maintenance page, `cache` the live release, `prune` the folders it removes and their sizes, `deploy --force`
+the commit it builds. `cache` and `prune` on a staging slot do not ask. Only
 `y` goes on; `n` or an empty answer does nothing and exits with 0. `--yes` (or `-y`) skips the
 question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
 `copy-from` asks the same way.
@@ -273,7 +283,7 @@ ignores `--quiet`.
 
 Two refusals print nothing with `--quiet`, so cron does not mail every 10 minutes during a planned
 freeze or a long manual deploy: a frozen project (deploy, rollback), and a lock held by another run
-that is still alive (deploy, rollback, `down`, `up`, `cache`, `free`, `copy-from`). The exit code
+that is still alive (deploy, rollback, `down`, `up`, `cache`, `prune`, `free`, `copy-from`). The exit code
 stays 1. Both still show in `status` and `check`. A stale lock, a lock with no owner, a stale lock
 removal that stopped half way and a base folder that cannot be written still print: they need a
 person.
@@ -328,11 +338,12 @@ Enter opens the action list of the picked row:
 │    4  Log
 │    5  Rollback…
 │    6  Clear cache
-│    7  Freeze…
-│    8  Down…
+│    7  Prune releases
+│    8  Freeze…
+│    9  Down…
 │       Back
 │
-│  ↑↓/1-8 pick · Enter run · b back · q quit
+│  ↑↓/1-9 pick · Enter run · b back · q quit
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
@@ -345,9 +356,9 @@ something to ship come first, each with its slots right under it; up-to-date row
 Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its own action list:
 
 - Production: Deploy new release (or Redeploy when up to date), Status, Check site, Log, Rollback…,
-  Clear cache, Freeze… or Unfreeze, Down… or Up.
-- Staging slot: Update (or a redeploy when up to date), Checkout branch or PR…, Clear cache, Copy
-  data from production…, Status, Log, Rollback…, Down… or Up, Free slot.
+  Clear cache, Prune releases, Freeze… or Unfreeze, Down… or Up.
+- Staging slot: Update (or a redeploy when up to date), Checkout branch or PR…, Clear cache, Prune
+  releases, Copy data from production…, Status, Log, Rollback…, Down… or Up, Free slot.
 - Free slot leaf: no list; it asks for a branch, or `#N` for a pull request, and runs
   `deploy staging <project> checkout …`, which uses the first free slot.
 - Engine: Update engine (`deploy self`), Log (`deploy self log`).
@@ -1026,11 +1037,15 @@ after the next deploy), or set `OPCACHE_RESET_DIR` (see [OPcache](#opcache)).
 
 ```
 deploy: only 312.0M free on the disk of <base>, under MIN_FREE_MB (500M); free some space before deploying
+Try: deploy example prune (removes failed and old releases)
 deploy: disk: 2.3G used of 2.0G, 40.1G free, over DISK_LIMIT (2G); prune after the deploy may help
 ```
 
 The first is an error: the deploy stops before it writes anything when free space is under
-`MIN_FREE_MB`. Free space, or lower `MIN_FREE_MB` (`0` turns it off). The second is a warning: the
+`MIN_FREE_MB`. Run `deploy example prune --dry-run` to see what `prune` would free, then
+`deploy example prune` to remove failed releases, unfinished builds and releases past
+`KEEP_RELEASES` (`--keep 2` keeps the fewest). If that is
+not enough, free space elsewhere, or lower `MIN_FREE_MB` (`0` turns it off). The second is a warning: the
 base folder is bigger than `DISK_LIMIT`. The deploy goes on and deletes old releases at the end,
 which may bring it back down; if not, lower `KEEP_RELEASES` or clean `shared/`. `check` fails on
 both, as `disk: ...; over DISK_LIMIT (2G)` or `disk: ...; under MIN_FREE_MB (500M free)`.
@@ -1061,7 +1076,7 @@ a user who can, for example with the hosting panel's file manager.
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet` (with quiet refusals on a freeze or a held lock), shipped commits, `self log`, `health()`, `check` during a deploy, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a closed output pipe, a rollback with the live folder missing, a read-only base folder, alerts for 2000 commits, prune and
-`KEEP_RELEASES` with a release that cannot be removed, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
+`KEEP_RELEASES` with a release that cannot be removed, the `prune` command (dry run, `--keep`, the lock), staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

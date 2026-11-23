@@ -1223,6 +1223,8 @@ fi
 cat "$WORK/disk.log"
 grep -q "under MIN_FREE_MB ($((free_mb + 1000000))M); free some space before deploying" "$WORK/disk.log" \
     || fail "no clear message for too little free space"
+grep -q "^Try: deploy fixture prune (removes failed and old releases)$" "$WORK/disk.log" \
+    || fail "the free space error does not name prune"
 grep -q "Cloning" "$WORK/disk.out" && fail "a deploy with too little free space started to clone"
 [ "$(live_release)" = "$before" ] || fail "a deploy with too little free space changed the live release"
 [ "$(release_count)" = "$count" ] || fail "a deploy with too little free space made a release"
@@ -1861,6 +1863,75 @@ r4="$(live_release)"
     || fail "prune did not keep only $r3 and $r4"
 serves "$r4" || fail "server does not show $r4"
 check "prune kept $r1 after a rollback, then kept the newest 2 and deleted the oldest"
+
+step "prune removes failed, unfinished and old releases without a deploy"
+# Two old releases, a failed one and a leftover clone, 1 MB each; r3 marked bad, so the rollback
+# target of r4 is the newer old one.
+old_a="20200101-000000-aaaaaaa"
+old_b="20200102-000000-bbbbbbb"
+for name in "$old_a" "$old_b" .failed-20200103-000000-ccccccc .building-20200104-000000; do
+    mkdir -p "$BASE/releases/$name"
+    dd if=/dev/zero of="$BASE/releases/$name/blob" bs=1024 count=1024 2> /dev/null
+done
+touch "$BASE/releases/$r3/.bad"
+logged="$(wc -l < "$BASE/deploy.log" | tr -d ' ')"
+count="$(release_count)"
+KEEP_RELEASES=2 deploy fixture prune --dry-run > "$WORK/prune.log" || fail "prune --dry-run failed"
+cat "$WORK/prune.log"
+for line in "$old_a \([0-9.]+[KMG], old\)" "[.]failed-20200103-000000-ccccccc \([0-9.]+[KMG], failed\)" \
+    "[.]building-20200104-000000 \([0-9.]+[KMG], unfinished\)"; do
+    grep -qE "^==> Would remove $line$" "$WORK/prune.log" || fail "prune --dry-run does not list $line"
+done
+grep -qE "^==> Would free [0-9.]+M in 3 folders; nothing changed$" "$WORK/prune.log" || fail "prune --dry-run shows no total"
+! grep -qE "$old_b|$r3|$r4" "$WORK/prune.log" || fail "prune --dry-run lists the rollback target, a kept or the live release"
+[ "$(release_count)" = "$count" ] || fail "prune --dry-run removed a folder"
+[ "$(wc -l < "$BASE/deploy.log" | tr -d ' ')" = "$logged" ] || fail "prune --dry-run wrote a log line"
+KEEP_RELEASES=2 deploy fixture prune --yes > "$WORK/prune.log" || fail "prune --yes failed"
+cat "$WORK/prune.log"
+[ ! -e "$BASE/releases/$old_a" ] && [ ! -e "$BASE/releases/.failed-20200103-000000-ccccccc" ] \
+    && [ ! -e "$BASE/releases/.building-20200104-000000" ] || fail "prune left a failed, unfinished or old folder"
+[ -d "$BASE/releases/$old_b" ] || fail "prune removed $old_b, the rollback target"
+[ -d "$BASE/releases/$r3" ] && [ "$(live_release)" = "$r4" ] || fail "prune removed a kept or the live release"
+grep -qE "^==> Freed [0-9.]+M in 3 folders$" "$WORK/prune.log" || fail "prune does not say what it freed"
+[ "$(wc -l < "$BASE/deploy.log" | tr -d ' ')" = "$((logged + 1))" ] || fail "prune did not write one log line"
+tail -n1 "$BASE/deploy.log" | grep -qE "	prune	$r4	ok	" || fail "the prune log line does not name $r4"
+[ ! -d "$BASE/.deploy.lock" ] || fail "prune left the lock behind"
+KEEP_RELEASES=2 deploy fixture prune --yes > "$WORK/prune.log" || fail "prune with nothing to remove failed"
+[ "$(cat "$WORK/prune.log")" = "==> Nothing to prune in $BASE/releases (keeping 2)" ] \
+    || { cat "$WORK/prune.log"; fail "prune with nothing to remove did not print one line"; }
+[ "$(wc -l < "$BASE/deploy.log" | tr -d ' ')" = "$((logged + 1))" ] || fail "prune with nothing to remove wrote a log line"
+rm -f "$BASE/releases/$r3/.bad"
+deploy fixture prune --keep 2 --yes > /dev/null || fail "prune --keep 2 failed"
+[ "$(release_count)" = 2 ] && [ -d "$BASE/releases/$r3" ] && [ "$(live_release)" = "$r4" ] \
+    || fail "prune --keep 2 did not keep only $r3 and $r4"
+for args in "--keep 1" "--keep x" "--keep" "--keep=-3" "--nope"; do
+    # shellcheck disable=SC2086 # Word splitting wanted.
+    if deploy fixture prune $args --yes > /dev/null 2> "$WORK/prune.err"; then
+        fail "prune $args was not refused"
+    fi
+    grep -q "usage: deploy \[project\] prune \[--keep <n>\] \[--dry-run\] \[--yes\]" "$WORK/prune.err" \
+        || { cat "$WORK/prune.err"; fail "prune $args gave no usage"; }
+done
+mkdir "$BASE/releases/.failed-locked" "$BASE/.deploy.lock"
+printf '%s %s deploy\n' "$$" "$(date +%s)" > "$BASE/.deploy.lock/owner"
+if deploy fixture prune --yes > /dev/null 2> "$WORK/prune.err"; then
+    fail "prune ran while a live process held the lock"
+fi
+grep -q "another deploy is running (PID $$, deploy" "$WORK/prune.err" || fail "a locked prune does not name the owner"
+code=0
+deploy fixture prune --yes --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err" || code=$?
+[ "$code" = 1 ] && [ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet prune on a held lock was not silent with exit 1"
+[ -d "$BASE/releases/.failed-locked" ] || fail "a locked prune removed a folder"
+rm -rf "$BASE/.deploy.lock"
+deploy fixture prune --quiet > "$WORK/quiet.out" 2>&1 || fail "a quiet prune failed"
+[ ! -s "$WORK/quiet.out" ] || fail "a quiet prune printed something"
+[ ! -e "$BASE/releases/.failed-locked" ] || fail "a quiet prune without a terminal did not remove the failed folder"
+deploy help prune | grep "^Usage: deploy \[project\] prune \[--keep <n>\] \[--dry-run\] \[--yes\]$" > /dev/null \
+    || fail "help prune shows no usage line"
+deploy --help | grep "^  prune \[--keep <n>\]" > /dev/null || fail "the full help does not list prune"
+! deploy fixture prnue 2> "$WORK/typo.log" || fail "prnue succeeded"
+grep -q "Did you mean prune?" "$WORK/typo.log" || fail "no hint for prnue"
+check "prune --dry-run listed failed, unfinished and old folders with sizes and changed nothing; prune removed them, kept $old_b (the rollback target), $r3 and $r4, logged one line; nothing to remove printed one line; --keep 2 kept two; bad --keep refused; a held lock refused, quiet with --quiet; help and typo hint"
 
 step "A new untagged commit waits for its release tag"
 # Run a command once the deploy logs that it waits for the release tag on $1.
@@ -2524,7 +2595,7 @@ else
     check "skipped: no script command to make a terminal"
 fi
 
-step "rollback, down, cache and deploy --force ask on a terminal"
+step "rollback, down, cache, prune and deploy --force ask on a terminal"
 # Like on_terminal, but holds the terminal open for $1 seconds after the answer, so a deploy can
 # build. A run that ends before the answer, as with --yes, is fine.
 on_terminal_hold() {
@@ -2591,6 +2662,18 @@ if command -v script > /dev/null; then
     ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "cache asked on a slot"
     [ -e "$SLOT/shared/data/cache_cleared" ] || fail "cache on a slot did not run cache()"
 
+    mkdir "$BASE/releases/.failed-ask" "$SLOT/releases/.failed-ask"
+    ask_run n fixture prune
+    grep -q "Pruning fixture, live release $live, keeping 5:" "$WORK/ask.log" || fail "prune does not show the live release"
+    grep -qE "^==>   [.]failed-ask \([0-9.]+K, failed\)" "$WORK/ask.log" || fail "prune does not list the folder it removes"
+    grep -q "Remove these folders? \[y/N\]" "$WORK/ask.log" || fail "prune does not ask on a terminal"
+    [ -d "$BASE/releases/.failed-ask" ] || fail "prune removed a folder after n"
+    ask_run "" fixture@s1 prune
+    ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "prune asked on a slot"
+    [ ! -e "$SLOT/releases/.failed-ask" ] || fail "prune on a slot did not remove the failed folder"
+    ask_run y fixture prune
+    [ ! -e "$BASE/releases/.failed-ask" ] || fail "prune did not remove the failed folder on y"
+
     ask_run n fixture --force
     grep -qE -- "--force (rebuilds [0-9a-f]+, which $live already runs|deploys [0-9a-f]+): " "$WORK/ask.log" \
         || fail "deploy --force does not show the commit it rebuilds"
@@ -2612,7 +2695,7 @@ if command -v script > /dev/null; then
     [ "$(live_release)" = "$live" ] || fail "the failed check on a terminal left a new release live"
     # Later tests expect no failed release.
     rm -rf "$BASE"/releases/.failed-*
-    check "on a terminal rollback, down, cache and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes and a slot did not ask; a pipe was not asked"
+    check "on a terminal rollback, down, cache, prune and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes and a slot did not ask; a pipe was not asked"
 else
     check "skipped: no script command to make a terminal"
 fi
@@ -2724,7 +2807,7 @@ if command -v script > /dev/null; then
     grep -q "fixture — production · .* → v2026.11.20000" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the production list has no title"; }
     for label in "1  Deploy new release (1 commit)" "2  Status" "3  Check site" "4  Log" "5  Rollback…" \
-        "6  Clear cache" "7  Freeze…" "8  Down…"; do
+        "6  Clear cache" "7  Prune releases" "8  Freeze…" "9  Down…"; do
         grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the production list has no $label"; }
     done
     grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
@@ -2743,14 +2826,14 @@ if command -v script > /dev/null; then
 
     # A failed deploy keeps the menu; a frozen project shows Unfreeze, and it unfreezes.
     deploy fixture freeze "menu fail" > /dev/null
-    on_terminal_hold 10 $'1\n1\n\n7\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+    on_terminal_hold 10 $'1\n1\n\n8\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
     grep -q "deploy fixture --force failed with exit code 1" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed"; }
-    grep -qF "7  Unfreeze" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a frozen project shows no Unfreeze"; }
+    grep -qF "8  Unfreeze" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a frozen project shows no Unfreeze"; }
     grep -q "deploy fixture unfreeze finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Unfreeze did not run"; }
     [ ! -e "$BASE/.frozen" ] || fail "Unfreeze in the menu left the project frozen"
-    [ "$(grep -cF "7  Freeze…" "$WORK/menu.log")" -eq 1 ] || { cat "$WORK/menu.log"; fail "the list after Unfreeze shows no Freeze"; }
+    [ "$(grep -cF "8  Freeze…" "$WORK/menu.log")" -eq 1 ] || { cat "$WORK/menu.log"; fail "the list after Unfreeze shows no Freeze"; }
     deploy fixture unfreeze > /dev/null 2>&1 || true
 
     # Keys pressed between a pick and its question are dropped, so they do not answer it: Clear
@@ -2794,11 +2877,11 @@ if command -v script > /dev/null; then
     grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
 
     # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
-    on_terminal_hold 6 $'2\n1\nn\n\n5\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+    on_terminal_hold 6 $'2\n1\nn\n\n6\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
     grep -q "fixture s1 — staging · feature/x" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no title"; }
-    for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Copy data from production…" "5  Status" \
-        "6  Log" "7  Rollback…" "8  Down…" "9  Free slot"; do
+    for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Prune releases" \
+        "5  Copy data from production…" "6  Status" "7  Log" "8  Rollback…" "9  Down…" "10  Free slot"; do
         grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no $label"; }
     done
     grep -q "Build it? \[y/N\]" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not ask"; }

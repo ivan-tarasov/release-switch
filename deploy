@@ -1695,7 +1695,11 @@ prune() {
     live="$(current_release)"
     count="$(list_releases | wc -l)"
 
-    rm -rf "${DEPLOY_BASE:?}"/releases/.failed-*
+    # The release is live and checked by now, so a folder that cannot be removed only warns.
+    for release in "${DEPLOY_BASE:?}"/releases/.failed-*; do
+        [ -e "$release" ] || continue
+        rm -rf "$release" 2>/dev/null || warn "could not remove $release; some files in it cannot be deleted, remove it by hand"
+    done
 
     # BSD head rejects -n 0.
     if [ "$count" -le "$KEEP_RELEASES" ]; then
@@ -1707,7 +1711,8 @@ prune() {
     for release in $(list_releases | head -n "$((count - KEEP_RELEASES))"); do
         if [ "$release" != "$live" ] && [ "$release" != "$PREVIOUS_RELEASE" ]; then
             say "Removing old release $release"
-            rm -rf "${DEPLOY_BASE:?}/releases/$release"
+            rm -rf "${DEPLOY_BASE:?}/releases/$release" 2>/dev/null \
+                || warn "could not remove $DEPLOY_BASE/releases/$release; some files in it cannot be deleted, remove it by hand"
         fi
     done
 }

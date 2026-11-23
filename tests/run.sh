@@ -1070,6 +1070,31 @@ DISK_LIMIT=1K deploy fixture --force > /dev/null 2> "$WORK/disk.log" || fail "a 
 grep -q "over DISK_LIMIT (1K)" "$WORK/disk.log" || fail "a deploy over DISK_LIMIT did not warn"
 check "check passes under DISK_LIMIT and fails over it with an alert; status shows the disk; too little free space stops check and deploy"
 
+step "A release that cannot be removed only warns; the deploy is ok"
+oldest="$(find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' -exec basename {} \; | sort | head -n1)"
+kept="$(find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*' | wc -l | tr -d ' ')"
+[ "$oldest" != "$(live_release)" ] && [ "$kept" -ge 2 ] || fail "no old release to prune"
+# A read-only folder with a file in it, as one made by the web server user.
+mkdir -p "$BASE/releases/$oldest/stuck" "$BASE/releases/.failed-stuck/stuck"
+touch "$BASE/releases/$oldest/stuck/file" "$BASE/releases/.failed-stuck/stuck/file"
+chmod 555 "$BASE/releases/$oldest/stuck" "$BASE/releases/.failed-stuck/stuck"
+: > "$ALERTS"
+rm -f "$BASE/shared/data/failed"
+status=0
+KEEP_RELEASES="$kept" NOTIFY_CMD="$alert_cmd" deploy fixture --force \
+    > /dev/null 2> "$WORK/stuck.log" || status=$?
+chmod 755 "$BASE/releases/$oldest/stuck" "$BASE/releases/.failed-stuck/stuck"
+cat "$WORK/stuck.log"
+[ "$status" -eq 0 ] || fail "a release that cannot be removed failed the deploy (exit $status)"
+grep -q "could not remove $BASE/releases/$oldest; " "$WORK/stuck.log" || fail "no warning that names the old release"
+grep -q "could not remove $BASE/releases/.failed-stuck; " "$WORK/stuck.log" || fail "no warning that names the failed release"
+[ -d "$BASE/releases/$oldest" ] || fail "the old release that cannot be removed is gone"
+tail -n1 "$BASE/deploy.log" | grep -qE "	deploy	[^	]+	ok	" || fail "the deploy is not logged ok"
+[ ! -s "$ALERTS" ] || fail "a deploy with a release that cannot be removed sent an alert"
+[ ! -e "$BASE/shared/data/failed" ] || fail "the failed step ran"
+rm -rf "$BASE/releases/$oldest" "$BASE/releases/.failed-stuck"
+check "an old or failed release that cannot be removed gives a warning; the deploy is logged ok, exits 0, no alert"
+
 step "Deploy history"
 DISPLAY_TZ=America/Toronto deploy fixture log 50 > "$WORK/history.log"
 cat "$WORK/history.log"

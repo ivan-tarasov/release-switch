@@ -985,13 +985,23 @@ base folder is bigger than `DISK_LIMIT`. The deploy goes on and deletes old rele
 which may bring it back down; if not, lower `KEEP_RELEASES` or clean `shared/`. `check` fails on
 both, as `disk: ...; over DISK_LIMIT (2G)` or `disk: ...; under MIN_FREE_MB (500M free)`.
 
+### An old release cannot be removed
+
+```
+deploy: could not remove <base>/releases/<release>; some files in it cannot be deleted, remove it by hand
+```
+
+A warning: the new release is live and the deploy is logged `ok`. A file in the old release
+belongs to another user (often the web server) or sits in a read-only folder. Remove the folder as
+a user who can, for example with the hosting panel's file manager.
+
 ## Tests
 
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
 deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
 with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet`, shipped commits, `self log`, `health()`, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
 `PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a closed output pipe, a rollback with the live folder missing, prune and
-`KEEP_RELEASES`, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
+`KEEP_RELEASES` with a release that cannot be removed, staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
 files survive.
 It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
 `shellcheck deploy tests/run.sh` before a pull request.

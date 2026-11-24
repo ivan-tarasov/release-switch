@@ -71,6 +71,16 @@ release_count() {
     find "$BASE/releases" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' '
 }
 
+# Waits until the clock second changes, so the next release gets a newer name than the last one.
+next_second() {
+    local now
+    now="$(date +%s)"
+
+    while [ "$(date +%s)" = "$now" ]; do
+        sleep 0.05
+    done
+}
+
 # Runs the engine for the test project, from a projects/ folder in the temp dir.
 run() {
     # No wait for release tags unless a test asks for one.
@@ -261,7 +271,7 @@ serves "$first" || fail "server does not show $first"
 [ -f "$BASE/current/deploy.conf" ] && [ -d "$BASE/current/public" ] || fail "CLEAR_PATHS deleted more than its paths"
 check "live: $first; backup ran before build; after_switch ran; data/ is shared; failed did not run; CLEAR_PATHS are gone"
 
-sleep 1
+next_second
 step "Second deploy, of a new tagged commit"
 commit "fixture v2"
 git -C "$REPO" tag v2026.11.99 develop
@@ -301,7 +311,7 @@ check "the rolled-back commit is remembered; a plain deploy prints one line, exi
 
 releases_before="$(release_count)"
 
-sleep 1
+next_second
 step "Failing deploy: the build stops at its first error"
 if FIXTURE_FAIL_BUILD=1 deploy fixture --force; then
     fail "deploy with a failing build succeeded"
@@ -315,7 +325,7 @@ built_release="$(cat "$BASE/shared/data/failed")"
     || fail "a failed build changed the remembered commits"
 check "$first is still live and the broken release is gone; failed ran in it; no commit remembered"
 
-sleep 1
+next_second
 step "A failing failed() only warns; the deploy still fails"
 rm -f "$BASE/shared/data/failed"
 if FIXTURE_FAIL_BUILD=1 FIXTURE_FAIL_FAILED=1 deploy fixture --force 2> "$WORK/failed.log"; then
@@ -328,7 +338,7 @@ grep -q "build failed" "$WORK/failed.log" || fail "a failing failed() hid the bu
 rm -f "$BASE/shared/data/failed"
 check "the warning shows and the build error stays"
 
-sleep 1
+next_second
 step "A failed step keeps its output, redacted, in <base>/deploy-failed.log; the error and status name it"
 kept="$BASE/deploy-failed.log"
 if FIXTURE_FAIL_BUILD=1 FIXTURE_BUILD_SAY="fetching https://user:s3cret@example.com/app.git" \
@@ -350,7 +360,7 @@ grep -E "^Failed: +build at [0-9T:-]+Z; its output is in " "$WORK/kept-status.lo
     || fail "status does not point to the kept output: $(cat "$WORK/kept-status.log")"
 check "the build output is kept with its step, release and time, the password hidden; the error and status name the file"
 
-sleep 1
+next_second
 step "Failing deploy: a failing backup stops it before build"
 if FIXTURE_FAIL_BACKUP=1 deploy fixture --force > "$WORK/backup.log" 2> "$WORK/backup-err.log"; then
     fail "deploy with a failing backup succeeded"
@@ -363,7 +373,7 @@ grep -q "backup failed" "$WORK/backup-err.log" || fail "the failure does not sho
 rm -f "$BASE/shared/data/failed"
 check "$first is still live; build did not run; failed ran"
 
-sleep 1
+next_second
 step "Failing deploy: preflight refuses a wrong .env"
 sed -i.bak 's/production/staging/' "$BASE/shared/.env"
 if deploy fixture --force 2> /dev/null; then
@@ -373,7 +383,7 @@ mv "$BASE/shared/.env.bak" "$BASE/shared/.env"
 [ "$(live_release)" = "$first" ] || fail "current moved after a failed preflight"
 check "preflight stopped it"
 
-sleep 1
+next_second
 step "Failing deploy: the check fails after the switch"
 if CHECK_URL="http://127.0.0.1:$PORT/missing" deploy fixture --force 2> "$WORK/check.log"; then
     fail "deploy with a failing check succeeded"
@@ -408,7 +418,7 @@ grep -qxF "Skips:     ${second_sha:0:7} failed its check ($failed_release); push
 deploy status --all | grep -qE "^fixture .*tip ${second_sha:0:7} failed its check" || fail "status --all does not note the skipped tip"
 check "the failed commit is skipped with one line, silently with --quiet; status and status --all show it"
 
-sleep 1
+next_second
 step "A failing after_switch only warns; the deploy deletes the failed release"
 FIXTURE_FAIL_AFTER=1 deploy fixture --force > "$WORK/after.log"
 grep -qF "after_switch failed; its output is in $BASE/deploy-failed.log; carrying on" "$WORK/after.log" \
@@ -721,14 +731,14 @@ grep -q "Nothing new on develop: $fresh already runs" "$WORK/skip.log" || fail "
 [ "$(release_count)" = "$releases_now" ] || fail "a deploy with nothing new made a release"
 [ "$(live_release)" = "$fresh" ] || fail "a deploy with nothing new changed the live release"
 [ "$(sed -n '$=' "$BASE/shared/data/backups")" = "$backups_now" ] || fail "backup ran on a deploy with nothing new"
-sleep 1
+next_second
 deploy fixture --force > /dev/null
 fresh="$(live_release)"
 [ "$(release_count)" = "$((releases_now + 1))" ] || fail "--force did not build a release"
 serves "$fresh" || fail "server does not show $fresh"
 check "nothing new: no release, no backup; --force: live with $fresh"
 
-sleep 1
+next_second
 step "--quiet prints nothing on success and the same errors on failure"
 commit "fixture quiet"
 git -C "$REPO" tag v2026.10.5 develop
@@ -740,11 +750,11 @@ serves "$fresh" || fail "server does not show $fresh after a quiet deploy"
 deploy fixture -q > "$WORK/quiet.out" 2> "$WORK/quiet.err" || fail "a quiet deploy with nothing new failed"
 [ ! -s "$WORK/quiet.out" ] && [ ! -s "$WORK/quiet.err" ] || fail "a quiet deploy with nothing new printed something"
 [ "$(live_release)" = "$fresh" ] || fail "a quiet deploy with nothing new changed the live release"
-sleep 1
+next_second
 if FIXTURE_FAIL_BUILD=1 deploy fixture --force > "$WORK/loud.out" 2> "$WORK/loud.err"; then
     fail "deploy with a failing build succeeded"
 fi
-sleep 1
+next_second
 if FIXTURE_FAIL_BUILD=1 deploy fixture --force --quiet > "$WORK/quiet.out" 2> "$WORK/quiet.err"; then
     fail "a quiet deploy with a failing build succeeded"
 fi
@@ -790,7 +800,7 @@ deploy fixture > /dev/null || fail "deploy failed after unfreeze"
 check "freeze refused deploy and rollback, showed in status; unfreeze allowed deploys again"
 
 step "Deploy a chosen tag, commit or branch with --ref"
-sleep 1
+next_second
 deploy fixture --ref v2026.11.99 > /dev/null
 tagged="$(live_release)"
 [[ "$tagged" =~ -v2026\.11\.99-[0-9a-f]{7,}$ ]] || fail "--ref v2026.11.99 deployed $tagged"
@@ -798,7 +808,7 @@ serves "$tagged" || fail "server does not show $tagged"
 deploy fixture --ref v2026.11.99 > "$WORK/ref.log"
 grep -q "$tagged already runs v2026.11.99" "$WORK/ref.log" || fail "--ref of the live commit did not stop"
 [ "$(live_release)" = "$tagged" ] || fail "--ref of the live commit changed the live release"
-sleep 1
+next_second
 older="$(git -C "$REPO" rev-parse --short develop~1)"
 deploy fixture --ref "$older" > "$WORK/ref.log"
 [[ "$(live_release)" == *"-$older" ]] || fail "--ref $older deployed $(live_release)"
@@ -807,7 +817,7 @@ if deploy fixture --ref nope 2> "$WORK/ref.log"; then
     fail "--ref of a missing ref succeeded"
 fi
 grep -q "no tag, branch or commit nope" "$WORK/ref.log" || fail "no message for a missing ref"
-sleep 1
+next_second
 deploy --ref=develop > "$WORK/ref.log"
 fresh="$(live_release)"
 grep -q "^1 commit(s):$" "$WORK/ref.log" || fail "--ref=develop does not list the commit it ships"
@@ -861,7 +871,7 @@ check "the note from before init is still served"
 
 step "Rails on a terminal"
 commit "fixture rails"
-sleep 1
+next_second
 DEPLOY_RAILS=1 deploy fixture > "$WORK/rails.log"
 cat "$WORK/rails.log"
 fresh="$(live_release)"
@@ -904,7 +914,7 @@ deploy fixture check > "$WORK/down-check.log" 2>&1 || fail "check failed while d
 grep -q "^ok    fixture: site: 503, down for maintenance$" "$WORK/down-check.log" || fail "check does not accept the 503"
 grep -q "^ok    fixture: health: not checked, down for maintenance$" "$WORK/down-check.log" \
     || fail "check ran health() while down"
-sleep 1
+next_second
 deploy fixture --force > "$WORK/down-deploy.log" 2>&1 || fail "deploy failed while down"
 grep -q "not checking .*: the site is down for maintenance; check it with: deploy fixture up$" "$WORK/down-deploy.log" \
     || fail "deploy while down does not warn to run up"
@@ -1023,7 +1033,7 @@ check "a token in REPO_URL is redacted in errors, alerts, deploy.log and help; S
 step "A deploy lists the commits it ships, in the output, the log and the alert"
 commit "fixture shipped one"
 commit "fixture shipped two"
-sleep 1
+next_second
 before="$(live_release)"
 : > "$WORK/hook.log"
 # shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here.
@@ -1313,7 +1323,7 @@ grep -q "E[SD]T " "$WORK/history.log" || fail "the log does not use DISPLAY_TZ"
 check "the log shows deploys, failures and rollbacks"
 
 step "PHP_RELOAD_CMD runs after the switch; a failing one only warns"
-sleep 1
+next_second
 PHP_RELOAD_CMD="readlink \"$BASE/current\" > \"$WORK/reload.txt\"; exit 3" deploy fixture --force > "$WORK/reload.log" \
     || fail "a failing PHP_RELOAD_CMD failed the deploy"
 reloaded="$(live_release)"
@@ -1324,7 +1334,7 @@ check "PHP_RELOAD_CMD ran with $reloaded linked; its failure only warned"
 
 step "A hangup or TERM during PHP_RELOAD_CMD keeps the new release live"
 for signal in HUP:129 TERM:143; do
-    sleep 1
+    next_second
     code=0
     # shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here: $PPID is the deploy.
     PHP_RELOAD_CMD='kill -'"${signal%:*}"' $PPID' deploy fixture --force > /dev/null 2> "$WORK/signal.log" || code=$?
@@ -1358,7 +1368,7 @@ check "rolled back from the missing $hung to $back, checked the site and logged 
 
 step "A step past STEP_TIMEOUT fails the deploy, stops all it started and frees the lock"
 before="$(live_release)"
-sleep 1
+next_second
 rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep"
 started="$(date +%s)"
 if STEP_TIMEOUT=2 FIXTURE_SLOW_BUILD="$WORK/slow.pid" deploy fixture --force > /dev/null 2> "$WORK/timeout.log"; then
@@ -1393,7 +1403,7 @@ grep -q "health: ran past STEP_TIMEOUT (1 s)$" "$WORK/timeout.log" || fail "chec
 check "a slow build failed after STEP_TIMEOUT with its sleep stopped, also on the rails; 0 is no limit; a bad value and a slow health() are reported"
 
 step "A TERM during a step stops the step and its watchdog"
-sleep 1
+next_second
 rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep"
 # A STEP_TIMEOUT tied to this run's port, so pgrep finds only this run's watchdog.
 watchdog=$((90000 + PORT))
@@ -1418,7 +1428,7 @@ pgrep -f "^sleep $watchdog\$" > /dev/null && fail "a good deploy left a watchdog
 check "TERM stopped the step and its watchdog and freed the lock; a good deploy leaves no watchdog"
 
 step "A deploy whose output pipe closes during the build still finishes and cleans up"
-sleep 1
+next_second
 : > "$ALERTS"
 log_lines="$(wc -l < "$BASE/deploy.log")"
 before="$(live_release)"
@@ -1438,7 +1448,7 @@ grep -qE "^deploy\|fixture: deploy $(live_release): ok \([0-9]+s\)$" "$ALERTS" |
 check "the lock is free, the log says ok and the alert went out"
 
 step "A failing build with a closed output pipe still runs the failed step, logs and alerts"
-sleep 1
+next_second
 : > "$ALERTS"
 rm -f "$WORK/slow.pid" "$WORK/slow.pid.sleep" "$WORK/pipe.code" "$BASE/shared/data/failed"
 log_lines="$(wc -l < "$BASE/deploy.log")"
@@ -1520,12 +1530,12 @@ done
 TMPDIR="$WORK/tmp" deploy fixture diff > /dev/null || fail "diff failed with its own TMPDIR"
 TMPDIR="$WORK/tmp" deploy fixture check > /dev/null || fail "check failed with its own TMPDIR"
 [ -z "$(ls -A "$WORK/tmp")" ] || fail "diff or check left a temp folder: $(ls -A "$WORK/tmp")"
-sleep 1
+next_second
 deploy fixture > /dev/null || fail "the deploy after the stopped status failed"
 check "a TERM during the clone of status and diff, and a full diff and check, leave TMPDIR empty"
 
 step "A slow PHP_RELOAD_CMD only warns"
-sleep 1
+next_second
 started="$(date +%s)"
 STEP_TIMEOUT=3 PHP_RELOAD_CMD="sleep 20" deploy fixture --force > /dev/null 2> "$WORK/reload.log" \
     || fail "a slow PHP_RELOAD_CMD failed the deploy"
@@ -1540,11 +1550,11 @@ no_opcache_files() {
 }
 
 step "OPCACHE_RESET_DIR resets OPcache through a one-time URL, on deploy and rollback"
-sleep 1
+next_second
 rm -f "$WORK/opcache.log"
 deploy fixture --force > /dev/null || fail "a deploy without OPCACHE_RESET_DIR failed"
 [ ! -e "$WORK/opcache.log" ] || fail "an OPcache reset ran with OPCACHE_RESET_DIR off"
-sleep 1
+next_second
 OPCACHE_RESET_DIR=public deploy fixture --force > "$WORK/opcache.out" 2>&1 || fail "a deploy with OPCACHE_RESET_DIR failed"
 [ "$(wc -l < "$WORK/opcache.log" | tr -d ' ')" = 1 ] || fail "the deploy did not call the OPcache reset once"
 grep -qE '^/rs-opcache-[0-9a-f]{32}[.]php$' "$WORK/opcache.log" || fail "the OPcache reset URL has no random name"
@@ -1559,7 +1569,7 @@ no_opcache_files || fail "the rollback left the OPcache reset file behind"
 check "one request to a random rs-opcache URL per switch, the file gone after; none when off"
 
 step "A failing, slow or misplaced OPcache reset only warns"
-sleep 1
+next_second
 touch "$WORK/opcache-fail"
 OPCACHE_RESET_DIR=public deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
     || fail "a failing OPcache reset failed the deploy"
@@ -1567,7 +1577,7 @@ rm -f "$WORK/opcache-fail"
 grep -qE "OPcache reset at http://127[.]0[.]0[.]1:$PORT/rs-opcache-[0-9a-f]{32}[.]php answered 500; carrying on" "$WORK/opcache.out" \
     || fail "no warning for a failing OPcache reset"
 no_opcache_files || fail "a failing OPcache reset left the file behind"
-sleep 1
+next_second
 touch "$WORK/opcache-stall"
 started="$(date +%s)"
 STEP_TIMEOUT=3 OPCACHE_RESET_DIR=public deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
@@ -1576,7 +1586,7 @@ rm -f "$WORK/opcache-stall"
 [ $(($(date +%s) - started)) -lt 15 ] || fail "the slow OPcache reset held the deploy for $(($(date +%s) - started)) s"
 grep -q "ran past 3 s; carrying on" "$WORK/opcache.out" || fail "no warning for a slow OPcache reset"
 no_opcache_files || fail "a slow OPcache reset left the file behind"
-sleep 1
+next_second
 OPCACHE_RESET_DIR=web deploy fixture --force > /dev/null 2> "$WORK/opcache.out" \
     || fail "a missing OPCACHE_RESET_DIR folder failed the deploy"
 grep -q "the release has no web folder; OPcache not reset, carrying on" "$WORK/opcache.out" \
@@ -1621,10 +1631,10 @@ serves "$live" || fail "server does not show $live after cache"
 check "cache ran cache() and the OPcache reset, logged it, failed with a hint when neither is set, and kept STEP_TIMEOUT"
 
 step "A rollback past a new migration warns; it never blocks"
-sleep 1
+next_second
 deploy fixture --force > /dev/null || fail "a deploy before the migrations test failed"
 older="$(live_release)"
-sleep 1
+next_second
 deploy fixture --force > /dev/null || fail "a deploy before the migrations test failed"
 newer="$(live_release)"
 mkdir -p "$BASE/releases/$older/database/migrations" "$BASE/releases/$newer/database/migrations"
@@ -1681,7 +1691,7 @@ grep -q "frozen" "$WORK/dry-run.err" || fail "rollback --dry-run while frozen sh
 check "dry-run showed live, target, mark, after_rollback and the migration warning; nothing changed; errors match a real rollback"
 
 step "The site check gets past a cache"
-sleep 1
+next_second
 rm -f "$WORK/cached.log"
 CHECK_URL="http://127.0.0.1:$PORT/cached" deploy fixture --force > "$WORK/cached.out" 2>&1 \
     || fail "a deploy behind a cache failed"
@@ -1689,7 +1699,7 @@ cached="$(live_release)"
 cat "$WORK/cached.log"
 grep -q "^/cached?rs=$cached-[0-9]* no-cache no-cache$" "$WORK/cached.log" \
     || fail "the check did not send rs=$cached and the no-cache headers"
-sleep 1
+next_second
 url="http://127.0.0.1:$PORT/cached?lang=en#top"
 CHECK_URL="$url" deploy fixture --force > "$WORK/cached.out" 2>&1 || fail "a deploy to a URL with a query failed"
 cached="$(live_release)"
@@ -1705,7 +1715,7 @@ grep -q "^/cached?lang=en&rs=[0-9]* no-cache no-cache$" "$WORK/cached.log" || fa
 check "the check sends rs=<release> and no-cache, after any query; output shows the plain URL; check and status pass"
 
 step "One stuck check request still leaves time to retry"
-sleep 1
+next_second
 touch "$WORK/stall"
 started=$(date +%s)
 CHECK_URL="http://127.0.0.1:$PORT/stall" deploy fixture --force > "$WORK/stall.out" 2>&1 \
@@ -1785,7 +1795,7 @@ kill_build() {
 
 step "A build killed with SIGKILL is never listed, and the next rollback or deploy removes it"
 before="$(live_release)"
-sleep 1
+next_second
 kill_build
 [ "$(live_release)" = "$before" ] || fail "a killed build changed the live release"
 deploy fixture status > "$WORK/killed-status.log" 2>&1 || true
@@ -1801,10 +1811,10 @@ grep -q "Removing unfinished build $KILLED" "$WORK/killed-rollback.log" || fail 
 [ "$(live_release)" = "$before" ] || fail "rollback to a killed build changed the live release"
 check "the killed build $KILLED was not listed, rollback refused it and removed it"
 
-sleep 1
+next_second
 kill_build
 mkdir "$BASE/releases/.building-20260101-000000"
-sleep 1
+next_second
 deploy fixture --force > "$WORK/after-kill.log" 2>&1 || fail "the deploy after a killed build failed"
 grep -q "Removing unfinished build $KILLED" "$WORK/after-kill.log" || fail "the deploy did not say it removed $KILLED"
 grep -q "Removing unfinished build .building-20260101-000000" "$WORK/after-kill.log" \
@@ -1853,7 +1863,7 @@ for clash in "prune() { :; }" "KEEP_RELEASES=3"; do
     printf '%s\n' 'own_helper() { :; }' 'seen="$PHP_BIN $DEPLOY_BASE"' "$clash" >> "$tmp/deploy.conf"
     git -C "$tmp" -c user.name=test -c user.email=test@example.com commit --quiet -am "clash: $clash"
     git -C "$tmp" push --quiet --force origin clash
-    sleep 1
+    next_second
     if deploy fixture --ref clash > "$WORK/clash.log" 2>&1; then
         fail "a deploy.conf with $clash deployed"
     fi
@@ -1872,20 +1882,20 @@ serves "$before" || fail "server does not show $before"
 check "a deploy.conf with prune() or KEEP_RELEASES failed before any step; $before is still live, the lock is free"
 
 step "Prune keeps the release that was just live"
-sleep 1
+next_second
 KEEP_RELEASES=2 deploy fixture --force > /dev/null
 r1="$(live_release)"
-sleep 1
+next_second
 KEEP_RELEASES=2 deploy fixture --force > /dev/null
 r2="$(live_release)"
 KEEP_RELEASES=2 deploy fixture rollback > /dev/null
 [ "$(live_release)" = "$r1" ] || fail "rollback did not go back to $r1"
-sleep 1
+next_second
 KEEP_RELEASES=2 deploy fixture --force > /dev/null
 r3="$(live_release)"
 [ -d "$BASE/releases/$r1" ] || fail "prune deleted $r1, live before $r3"
 [ -d "$BASE/releases/$r2" ] && [ "$(release_count)" = 3 ] || fail "prune did not keep $r1, $r2 and $r3"
-sleep 1
+next_second
 KEEP_RELEASES=2 deploy fixture --force > /dev/null
 r4="$(live_release)"
 [ "$(release_count)" = 2 ] && [ -d "$BASE/releases/$r3" ] && [ -d "$BASE/releases/$r4" ] \
@@ -1995,7 +2005,7 @@ wait "$pid" || code=$?
 [ "$(release_count)" = "$releases_now" ] || fail "a TERM during the wait left the release folder behind"
 check "a TERM during the wait freed the lock and removed the clone"
 
-sleep 1
+next_second
 RELEASE_WAIT=30 RELEASE_POLL=1 deploy fixture --no-wait > "$WORK/wait.log" 2>&1
 if grep -q "Waiting for the release tag" "$WORK/wait.log"; then
     fail "--no-wait waited for the release tag"
@@ -2004,7 +2014,7 @@ grep -q "no release tag on $waiting; deploying without one" "$WORK/wait.log" || 
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "--no-wait deployed $(live_release)"
 check "--no-wait deployed $waiting without a tag and warned"
 
-sleep 1
+next_second
 commit "fixture wait timeout"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 RELEASE_WAIT=2 RELEASE_POLL=1 deploy fixture > "$WORK/wait.log" 2>&1
@@ -2016,7 +2026,7 @@ grep -q "^Try: deploy fixture --no-wait, or RELEASE_WAIT=0 if the repo does not 
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the deploy after the wait deployed $(live_release)"
 check "the wait ran out after 2 s; $waiting deployed without a tag"
 
-sleep 1
+next_second
 commit "fixture wait tagged"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 : > "$WORK/wait.log"
@@ -2031,7 +2041,7 @@ fi
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "the tag pushed during the wait is in $(live_release)"
 
-sleep 1
+next_second
 commit "fixture two tags"
 git -C "$REPO" tag v2026.11.1000 develop
 git -C "$REPO" tag v2026.11.10000 develop
@@ -2043,7 +2053,7 @@ deploy fixture rollback v2026.11.100 > /dev/null 2> "$WORK/exact.err" \
 serves "$(live_release)" || fail "server does not show $(live_release)"
 check "a commit with two tags got the higher one; rollback v2026.11.100 picked the exact tag over v2026.11.10000"
 
-sleep 1
+next_second
 commit "fixture no-release marker"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 git -C "$REPO" update-ref "refs/no-release/$(git -C "$REPO" rev-parse develop)" develop
@@ -2057,7 +2067,7 @@ fi
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the no-release commit deployed $(live_release)"
 check "a commit with a no-release marker deployed $waiting at once"
 
-sleep 1
+next_second
 commit "fixture no-release marker during the wait"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 : > "$WORK/wait.log"
@@ -2074,7 +2084,7 @@ fi
 [[ "$(live_release)" =~ ^[0-9]{8}-[0-9]{6}-$waiting$ ]] || fail "the no-release commit deployed $(live_release)"
 check "the no-release marker pushed during the wait stopped it; $waiting deployed"
 
-sleep 1
+next_second
 git init --quiet --bare "$WORK/notags.git"
 commit "fixture no tags"
 git -C "$REPO" push --quiet "$WORK/notags.git" develop
@@ -2089,7 +2099,7 @@ fi
 grep -q "RELEASE_WAIT must be a whole number of seconds, not 'soon'" "$WORK/wait.log" || fail "no message for RELEASE_WAIT=soon"
 check "a repo without release tags did not wait; a bad RELEASE_WAIT is refused"
 
-sleep 1
+next_second
 commit "fixture ref no wait"
 waiting="$(git -C "$REPO" rev-parse --short develop)"
 started="$(date +%s)"
@@ -2153,6 +2163,8 @@ step "A plain slot deploy follows the stored branch"
 printf 'feature two\n' > "$WORK/feature/VERSION"
 git -C "$WORK/feature" -c user.name=test -c user.email=test@example.com commit --quiet -am "feature two"
 git -C "$WORK/feature" push --quiet origin feature/x
+# On a fast machine both slot releases can land in one second; rollback --dry-run below needs them apart.
+next_second
 deploy fixture@s1 > /dev/null
 [ "$(cat "$SLOT/current/VERSION")" = "feature two" ] || fail "a plain slot deploy did not follow feature/x"
 [ "$(slot_live)" != "$first_slot" ] || fail "a plain slot deploy built nothing new"
@@ -2183,7 +2195,7 @@ deploy fixture@s1 --ref "$(git -C "$SLOT/releases/$first_slot" rev-parse HEAD)" 
 deploy fixture@s1 > "$WORK/slot.log"
 grep -q "${slot_sha:0:7} was rolled back; push a fix, or deploy fixture@s1 --force" "$WORK/slot.log" \
     || fail "a plain slot deploy after a --ref deploy did not skip the rolled-back commit: $(cat "$WORK/slot.log")"
-sleep 1
+next_second
 prod_kept="$(cat "$BASE/deploy-failed.log" 2>/dev/null || true)"
 if FIXTURE_FAIL_BUILD=1 deploy fixture@s1 --force > /dev/null 2> "$WORK/slot.err"; then
     fail "a slot deploy with a failing build succeeded"
@@ -2610,24 +2622,69 @@ grep -q "data is missing in fixture; the slot keeps its own" "$WORK/copy.log" ||
 check "copy-from replaced the slot's data/ with production's, kept its .env, logged it, and refused production, other sources, .env, unknown paths, a pipe and a held lock"
 
 step "copy-from asks on a terminal"
-# Runs the engine on a terminal made by script; the answer comes once the prompt is up.
-on_terminal() {
-    local answer="$1"
+# Types keys $2 into the terminal once text $1 shows in log $LOG one more time than in the pairs
+# before it, for each pair; waits 30 seconds at most for each text. Stops once the command has
+# ended (file $LOG.done), and after the last pair waits for that, 120 seconds at most.
+expect_feed() {
+    local log="$1" i j seen text keys tries
     shift
+    trap '' PIPE
 
+    for ((i = 1; i < $#; i += 2)); do
+        text="${!i}"
+        j=$((i + 1))
+        keys="${!j}"
+        seen=1
+        for ((j = 1; j < i; j += 2)); do
+            [ "${!j}" != "$text" ] || seen=$((seen + 1))
+        done
+        tries=0
+        while [ "$({ grep -oF -- "$text" "$log" || true; } | wc -l)" -lt "$seen" ] && [ "$tries" -lt 300 ]; do
+            [ ! -e "$log.done" ] || return 0
+            sleep 0.1
+            tries=$((tries + 1))
+        done
+        sleep 0.3
+        printf '%s' "$keys" 2> /dev/null
+    done
+    tries=0
+    while [ ! -e "$log.done" ] && [ "$tries" -lt 1200 ]; do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    true
+}
+# Runs the command after -- on a terminal made by script, into log $1; the pairs before -- go to
+# expect_feed. The terminal stays open until the command ends.
+on_terminal_expect() {
+    local log="$1" pairs=()
+    shift
+    while [ "$1" != -- ]; do
+        pairs+=("$1")
+        shift
+    done
+    shift
+    : > "$log"
+    rm -f "$log.done"
+    # shellcheck disable=SC2016 # Expanded by the inner bash.
+    set -- bash -c '"$@"; code=$?; : > "$0"; exit "$code"' "$log.done" "$@"
+
+    # shellcheck disable=SC2094 # The feeder waits for what the run writes to the log.
     if script --version > /dev/null 2>&1; then
-        { sleep 2; printf '%s\n' "$answer"; sleep 2; } | script -qec "$(printf '%q ' "$@")" /dev/null
+        expect_feed "$log" ${pairs[@]+"${pairs[@]}"} | script -qec "$(printf '%q ' "$@")" /dev/null >> "$log" 2>&1
     else
-        { sleep 2; printf '%s\n' "$answer"; sleep 2; } | script -q /dev/null "$@"
+        expect_feed "$log" ${pairs[@]+"${pairs[@]}"} | script -q /dev/null "$@" >> "$log" 2>&1
     fi
 }
 if command -v script > /dev/null; then
-    on_terminal n env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture > "$WORK/copy.log" 2>&1
+    on_terminal_expect "$WORK/copy.log" "[y/N]" $'n\n' \
+        -- env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture
     cat "$WORK/copy.log"
     grep -q "Copy these into fixture@s1? Its files are replaced \[y/N\]" "$WORK/copy.log" || fail "copy-from does not ask on a terminal"
     grep -q "Nothing copied" "$WORK/copy.log" || fail "copy-from does not stop on n"
     [ "$(cat "$SLOT/shared/data/note.txt")" = "slot data" ] || fail "copy-from copied after n"
-    on_terminal y env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture > "$WORK/copy.log" 2>&1
+    on_terminal_expect "$WORK/copy.log" "[y/N]" $'y\n' \
+        -- env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture
     grep -q "Copied into fixture@s1: data" "$WORK/copy.log" || fail "copy-from does not copy on y"
     diff -r "$BASE/shared/data" "$SLOT/shared/data" > /dev/null || fail "copy-from on y did not copy data/"
     check "copy-from asked on a terminal: n copied nothing, y copied data/"
@@ -2636,26 +2693,15 @@ else
 fi
 
 step "rollback, down, cache, prune and deploy --force ask on a terminal"
-# Like on_terminal, but holds the terminal open for $1 seconds after the answer, so a deploy can
-# build. A run that ends before the answer, as with --yes, is fine.
-on_terminal_hold() {
-    local hold="$1" answer="$2"
-    shift 2
-
-    if script --version > /dev/null 2>&1; then
-        { trap '' PIPE; sleep 2; printf '%s\n' "$answer" 2> /dev/null; sleep "$hold"; true; } \
-            | script -qec "$(printf '%q ' "$@")" /dev/null
-    else
-        { trap '' PIPE; sleep 2; printf '%s\n' "$answer" 2> /dev/null; sleep "$hold"; true; } | script -q /dev/null "$@"
-    fi
-}
-# Runs the engine on a terminal with answer $1, into ask.log; fails with the log when it fails.
+# Runs the engine on a terminal into ask.log, typing answer $1 at a [y/N] question; fails with the
+# log when it fails.
 ask_run() {
     local answer="$1"
     shift
 
-    on_terminal_hold 10 "$answer" env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 DEPLOY_RAILS=0 \
-        "$ROOT/deploy" "$@" > "$WORK/ask.log" 2>&1 || { cat "$WORK/ask.log"; fail "deploy $* failed on a terminal"; }
+    on_terminal_expect "$WORK/ask.log" "[y/N]" "$answer"$'\n' \
+        -- env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 DEPLOY_RAILS=0 "$ROOT/deploy" "$@" \
+        || { cat "$WORK/ask.log"; fail "deploy $* failed on a terminal"; }
 }
 deploy fixture down "pipe" > "$WORK/ask.log" 2>&1
 ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "down asked in a pipe"
@@ -2720,71 +2766,36 @@ if command -v script > /dev/null; then
     grep -q "Nothing done" "$WORK/ask.log" || fail "deploy --force does not stop on n"
     [ "$(live_release)" = "$live" ] && [ "$(release_count)" = "$count" ] || fail "deploy --force built after n"
     [ -z "$(find "$BASE/releases" -maxdepth 1 -name '.building-*')" ] || fail "deploy --force left a .building folder after n"
+    next_second
+    ask_run y fixture --force
+    ! grep -q "Nothing done" "$WORK/ask.log" || fail "deploy --force stopped on y"
+    [ "$(live_release)" != "$live" ] || fail "deploy --force did not build on y"
+    serves "$(live_release)" || fail "server does not show $(live_release) after deploy --force on y"
+    live="$(live_release)"
+    next_second
     ask_run "" fixture --force --yes
     ! grep -q "\[y/N\]" "$WORK/ask.log" || fail "deploy --force --yes asked"
     [ "$(live_release)" != "$live" ] || fail "deploy --force --yes did not deploy"
 
     # On the rails, a failing site check draws the spinner, then its time.
     live="$(live_release)"
-    on_terminal_hold 10 "" env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=3 RELEASE_WAIT=0 NO_COLOR=1 \
-        CHECK_URL="http://127.0.0.1:$PORT/missing" "$ROOT/deploy" fixture --force --yes > "$WORK/spin.log" 2>&1 || true
+    next_second
+    on_terminal_expect "$WORK/spin.log" -- env PROJECTS_DIR="$WORK/projects" CHECK_WAIT=3 RELEASE_WAIT=0 NO_COLOR=1 \
+        CHECK_URL="http://127.0.0.1:$PORT/missing" "$ROOT/deploy" fixture --force --yes || true
     grep -qE "◒  Checking http://127.0.0.1:$PORT/missing · [0-9]+s of 3s" "$WORK/spin.log" \
         || { cat "$WORK/spin.log"; fail "the site check shows no spinner on a terminal"; }
     grep -qE "◇  Checking http://127.0.0.1:$PORT/missing \([0-9]+s\)" "$WORK/spin.log" \
         || { cat "$WORK/spin.log"; fail "the site check does not end with its time"; }
     [ "$(live_release)" = "$live" ] || fail "the failed check on a terminal left a new release live"
+    serves "$live" || fail "server does not show $live after the failed check on a terminal"
     # Later tests expect no failed release.
     rm -rf "$BASE"/releases/.failed-*
-    check "on a terminal rollback, down, cache, prune and deploy --force showed what they do and asked: n or empty did nothing, y went on, --yes and a slot did not ask; a pipe was not asked"
+    check "on a terminal rollback, down, cache, prune and deploy --force showed what they do and asked: n or empty did nothing, y went on (deploy --force built), --yes and a slot did not ask; a pipe was not asked"
 else
     check "skipped: no script command to make a terminal"
 fi
 
 step "A bare deploy on a terminal shows the project menu"
-# Types keys $2 into the terminal once text $1 shows in log $LOG one more time than in the pairs
-# before it, for each pair; waits 30 seconds at most for each text.
-expect_feed() {
-    local log="$1" i j seen text keys tries
-    shift
-    trap '' PIPE
-
-    for ((i = 1; i < $#; i += 2)); do
-        text="${!i}"
-        j=$((i + 1))
-        keys="${!j}"
-        seen=1
-        for ((j = 1; j < i; j += 2)); do
-            [ "${!j}" != "$text" ] || seen=$((seen + 1))
-        done
-        tries=0
-        while [ "$({ grep -oF -- "$text" "$log" || true; } | wc -l)" -lt "$seen" ] && [ "$tries" -lt 300 ]; do
-            sleep 0.1
-            tries=$((tries + 1))
-        done
-        sleep 0.3
-        printf '%s' "$keys" 2> /dev/null
-    done
-    sleep 1
-    true
-}
-# Runs the command after -- on a terminal into log $1; the pairs before -- go to expect_feed.
-on_terminal_expect() {
-    local log="$1" pairs=()
-    shift
-    while [ "$1" != -- ]; do
-        pairs+=("$1")
-        shift
-    done
-    shift
-    : > "$log"
-
-    # shellcheck disable=SC2094 # The feeder waits for what the run writes to the log.
-    if script --version > /dev/null 2>&1; then
-        expect_feed "$log" "${pairs[@]}" | script -qec "$(printf '%q ' "$@")" /dev/null >> "$log" 2>&1
-    else
-        expect_feed "$log" "${pairs[@]}" | script -q /dev/null "$@" >> "$log" 2>&1
-    fi
-}
 # The menu row of project $1, from the engine's own function.
 menu_row() {
     run bash -c '. "$1"; menu_load "$2" && menu_row' _ "$ROOT/deploy" "$1"
@@ -2808,7 +2819,8 @@ rm "$WORK/projects/other.env"
 if command -v script > /dev/null; then
     live="$(live_release)"
     # j moves to the second row, r reads the rows again, q quits.
-    on_terminal_hold 2 jrq env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+    on_terminal_expect "$WORK/menu.log" "Pick a project" jr "Pick a project" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed on q"; }
     grep -q "Pick a project" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
     grep -qE "↑↓/1-[0-9] pick · Enter open · r refresh · q quit" "$WORK/menu.log" \
@@ -2820,7 +2832,8 @@ if command -v script > /dev/null; then
     [ "$(live_release)" = "$live" ] || fail "q in the menu deployed"
 
     # ↓ past the last row stops on Quit, and Enter there quits.
-    on_terminal_hold 2 jjjjjjjjj env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 \
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'jjjjjjjjj\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed on the Quit row"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "❯ " > "$WORK/menu.rows" || true
     [[ "$(sed -n '$p' "$WORK/menu.rows")" =~ ❯\ +Quit$ ]] || { cat "$WORK/menu.rows"; fail "the cursor did not reach the Quit row"; }
@@ -2841,8 +2854,11 @@ if command -v script > /dev/null; then
 
     # The production list: a deploy that works, Enter goes back to the list with fresh facts, b to
     # the project list with fresh rows.
-    on_terminal_hold 15 $'1\n1\ny\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb \
-        NO_COLOR=1 "$ROOT/deploy" > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
+    next_second
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "[y/N]" $'y\n' "Press Enter to go back" $'\n' \
+        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
     grep -q "r to refresh, q to quit" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
     grep -q "fixture — production · .* → v2026.11.20000" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the production list has no title"; }
@@ -2866,8 +2882,10 @@ if command -v script > /dev/null; then
 
     # A failed deploy keeps the menu; a frozen project shows Unfreeze, and it unfreezes.
     deploy fixture freeze "menu fail" > /dev/null
-    on_terminal_hold 10 $'1\n1\n\n8\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
-        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'8\n' "Press Enter to go back" $'\n' \
+        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
     grep -q "deploy fixture --force failed with exit code 1" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed"; }
     grep -qF "8  Unfreeze" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a frozen project shows no Unfreeze"; }
@@ -2917,8 +2935,10 @@ if command -v script > /dev/null; then
     grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
 
     # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
-    on_terminal_hold 6 $'2\n1\nn\n\n6\n\nb\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
-        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'1\n' "[y/N]" $'n\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'6\n' "Press Enter to go back" $'\n' \
+        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
     grep -q "fixture s1 — staging · feature/x" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no title"; }
     for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Prune releases" \
         "5  Copy data from production…" "6  Status" "7  Log" "8  Rollback…" "9  Down…" "10  Free slot"; do
@@ -2931,8 +2951,10 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.log"; fail "Status in the slot list did not run"; }
 
     # The free leaf asks for a branch: empty does nothing, a name runs staging checkout.
-    on_terminal_hold 6 $'3\n\n3\nno-such-branch\n\nq' env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
-        > "$WORK/menu.log" 2>&1 || { cat "$WORK/menu.log"; fail "the free leaf failed"; }
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'3\n' "Branch, or #N" $'\n' "r to refresh, q to quit" $'3\n' "Branch, or #N" $'no-such-branch\n' \
+        "Press Enter to go back" $'\n' "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the free leaf failed"; }
     grep -q "Check out into s2 of fixture" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf has no title"; }
     grep -q "Branch, or #N for a pull request:" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf does not ask for a branch"; }
     grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "an empty branch did something"; }

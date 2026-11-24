@@ -987,9 +987,10 @@ export ALERTS="$WORK/alerts.log"
 : > "$ALERTS"
 # shellcheck disable=SC2016 # Expanded by the engine's sh -c, not here.
 alert_cmd='printf "%s|%s\n" "$NOTIFY_EVENT" "$NOTIFY_TEXT" >> "$ALERTS"'
-if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd" deploy fixture --force 2> /dev/null; then
+if FIXTURE_FAIL_BUILD=1 NOTIFY_URL="http://127.0.0.1:$PORT/hook" NOTIFY_CMD="$alert_cmd; exit 3" deploy fixture --force 2> "$WORK/notify.log"; then
     fail "a deploy with a failing build succeeded"
 fi
+grep -qxF "deploy: NOTIFY_CMD failed" "$WORK/notify.log" || fail "no warning for a failing NOTIFY_CMD"
 cat "$ALERTS"
 grep -qE "^deploy\|fixture: deploy [0-9-]+.*: failed: build \(build failed; its output is in [^)]*/deploy-failed\.log\)$" "$ALERTS" || fail "no alert for the failed build"
 grep -qF '"text":"fixture: deploy ' "$WORK/hook.log" || fail "NOTIFY_URL got no JSON alert"
@@ -1001,9 +1002,12 @@ NOTIFY_ON=all NOTIFY_URL="http://127.0.0.1:1/" NOTIFY_CMD="$alert_cmd" deploy fi
     || fail "an alert that cannot be sent failed the deploy"
 grep -q "could not send the alert to NOTIFY_URL" "$WORK/notify.log" || fail "no warning for an alert that cannot be sent"
 grep -qE "^deploy\|fixture: deploy [0-9-]+.*: ok \([0-9]+s\)$" "$ALERTS" || fail "NOTIFY_ON=all sent no alert for a good deploy"
-NOTIFY_CMD="$alert_cmd" deploy fixture rollback > /dev/null
+# STEP_TIMEOUT also caps NOTIFY_CMD, so a slow one costs 1 s here.
+STEP_TIMEOUT=1 NOTIFY_CMD="$alert_cmd; sleep 30" deploy fixture rollback > /dev/null 2> "$WORK/notify.log" \
+    || fail "a slow NOTIFY_CMD failed the rollback"
 grep -qE "^rollback\|fixture: rollback [0-9-]+.*: ok, from " "$ALERTS" || fail "no alert for a rollback"
-check "alerts for a failed build and a rollback; good deploys only with NOTIFY_ON=all; a dead webhook only warns"
+grep -qxF "deploy: NOTIFY_CMD ran past 1 s" "$WORK/notify.log" || fail "no warning for a slow NOTIFY_CMD"
+check "alerts for a failed build and a rollback; good deploys only with NOTIFY_ON=all; a dead webhook, a failing or a slow NOTIFY_CMD only warns"
 
 step "A token in REPO_URL never shows in output, deploy.log or alerts"
 secret_url="http://user:ghp_FAKE123@127.0.0.1:1/missing.git"
@@ -3148,5 +3152,83 @@ for bad in 'deploy.conf' '.git' '.git/hooks' '/etc' '../outside' 'tests/../deplo
     [ -f "$WORK/spaces/current/deploy.conf" ] || fail "a refused CLEAR_PATHS path '$bad' deleted the live deploy.conf"
 done
 check "deploy.conf, .git, .git/hooks, /etc, ../outside, tests/../deploy.conf, . and an empty path are refused; the live release stays"
+
+step "Usage errors fail with their one-line message"
+# A project with no REPO_URL, for the first deploy, then with one fake release, for rollback.
+printf 'DEPLOY_BASE="%s"\nCHECK_URL="http://127.0.0.1:%s/"\n' "$WORK/lone" "$PORT" > "$WORK/projects/lone.env"
+printf 'not a folder\n' > "$WORK/a-file"
+prod="$(live_release)"
+# Runs the engine with the words after the message; fails unless it exits non-zero with that line.
+usage_error() {
+    local message="$1" code=0
+    shift
+    "$@" > /dev/null 2> "$WORK/usage.err" || code=$?
+    [ "$code" -ne 0 ] || fail "$* succeeded"
+    grep -qxF "deploy: $message" "$WORK/usage.err" || { cat "$WORK/usage.err"; fail "no message for $*: $message"; }
+}
+usage_error "unknown option for deploy: --bogus" deploy fixture --force --bogus
+usage_error "unknown option for deploy: --bogus" deploy fixture deploy --bogus
+usage_error "use --branch or --ref, not both" deploy fixture@s1 --branch feature/x --ref develop
+usage_error "pr/3 is how a slot stores a pull request; use --pr 3" deploy fixture@s1 --branch pr/3
+usage_error "set REPO_URL for the first deploy" deploy lone
+usage_error "$prod is already live" deploy fixture rollback "$prod"
+mkdir -p "$WORK/lone/releases/20260101-000000-abc1234"
+ln -sfn "$WORK/lone/releases/20260101-000000-abc1234" "$WORK/lone/current"
+usage_error "no good release older than 20260101-000000-abc1234" deploy lone rollback
+MIN_FREE_MB=lots usage_error "MIN_FREE_MB must be a whole number of megabytes, not 'lots'" deploy fixture status
+usage_error "'sx' is not a staging slot; use fixture@s1, fixture@s2, ..." deploy fixture@sx status
+STAGING_URL='' CHECK_URL=localhost/app \
+    usage_error "cannot find the host in CHECK_URL; set STAGING_URL with {slot}" deploy fixture@s1 status
+usage_error "usage: deploy [project] log [count]" deploy fixture log ten
+usage_error "usage: deploy self log [count]" deploy self log ten
+usage_error "unknown command: deploy self bogus (try: deploy self, deploy self log [count])" deploy self bogus
+usage_error "unknown command: deploy fixture slots bogus (try: slots, slots update)" deploy fixture slots bogus
+usage_error "self works on the engine, not on a project: deploy self" deploy fixture self
+usage_error "$WORK/a-file is not a folder" deploy fixture init "$WORK/a-file"
+[ "$(live_release)" = "$prod" ] || fail "a usage error changed the live release"
+[ "$(readlink "$WORK/lone/current")" = "$WORK/lone/releases/20260101-000000-abc1234" ] || fail "a refused rollback switched"
+rm -rf "$WORK/projects/lone.env" "$WORK/lone" "$WORK/a-file"
+check "each usage error exits non-zero with its message and changes nothing"
+
+step "Slot commands run for real, in the old and the staging forms"
+prod="$(live_release)"
+prod_log="$(wc -l < "$BASE/deploy.log")"
+slot_code() {
+    curl --silent --output /dev/null --write-out '%{http_code}' "http://$1.localhost:$PORT/"
+}
+deploy fixture@s1 --branch=feature/x -y > /dev/null || fail "a slot deploy with --branch=feature/x -y failed"
+[ "$(cat "$SLOT/BRANCH")" = feature/x ] || fail "--branch=feature/x did not store the branch"
+[ "$(cat "$SLOT/current/VERSION")" = "$(git -C "$REPO" show feature/x:VERSION)" ] || fail "s1 does not run the tip of feature/x"
+deploy fixture@s2 --pr=7 -y > /dev/null || fail "a slot deploy with --pr=7 -y failed"
+[ "$(cat "$SLOT2/BRANCH")" = pr/7 ] || fail "--pr=7 did not store pr/7"
+[ "$(cat "$SLOT2/current/VERSION")" = "$(git -C "$REPO" show refs/pull/7/head:VERSION)" ] || fail "s2 does not run the PR head"
+deploy fixture@s1 down "slot work" > "$WORK/slot.log"
+grep -qxF "==> The site is down for maintenance: slot work" "$WORK/slot.log" || fail "slot down did not say it is down"
+[ "$(slot_code s1)" = 503 ] || fail "slot down did not serve a 503"
+[ ! -e "$BASE/.down" ] || fail "slot down took production down"
+serves "$prod" || fail "production does not serve $prod while s1 is down"
+deploy fixture@s1 up > /dev/null
+[ "$(slot_code s1)" = 200 ] || fail "slot up did not bring s1 back"
+deploy staging fixture@s1 down "staging work" > /dev/null
+[ "$(slot_code s1)" = 503 ] || fail "staging down did not serve a 503"
+deploy staging fixture@s1 up > "$WORK/slot.log"
+grep -qxF "==> The site is up again" "$WORK/slot.log" || fail "staging up did not say it is up"
+[ "$(slot_code s1)" = 200 ] || fail "staging up did not bring s1 back"
+s1_live="$(slot_live)"
+deploy staging fixture@s1 rollback > /dev/null || fail "staging rollback failed"
+s1_back="$(slot_live)"
+[ "$s1_back" != "$s1_live" ] || fail "staging rollback did not switch s1"
+deploy fixture@s1 rollback "$s1_live" > /dev/null || fail "a named slot rollback failed"
+[ "$(slot_live)" = "$s1_live" ] || fail "a named slot rollback did not go back to $s1_live"
+deploy fixture@s1 log 2 > "$WORK/slot.log"
+cat "$WORK/slot.log"
+grep -qE "rollback@s1 +$s1_back +ok" "$WORK/slot.log" || fail "slot log does not show the staging rollback"
+grep -qE "rollback@s1 +$s1_live +ok" "$WORK/slot.log" || fail "slot log does not show the named rollback"
+[ "$(deploy staging fixture@s1 log 2)" = "$(cat "$WORK/slot.log")" ] || fail "staging log does not match the slot log"
+[ "$(deploy fixture@s1 staging log 2)" = "$(cat "$WORK/slot.log")" ] || fail "fixture@s1 staging log does not match the slot log"
+[ "$(deploy fixture staging)" = "$(deploy fixture slots)" ] || fail "fixture staging does not list the slots"
+[ "$(live_release)" = "$prod" ] || fail "slot commands changed the production release"
+[ "$(wc -l < "$BASE/deploy.log")" = "$prod_log" ] || fail "slot commands wrote to the production deploy.log"
+check "--branch=, --pr= and -y deployed slots; down, up, rollback and log worked on s1 in both forms; production is unchanged"
 
 printf '\nAll deploy tests passed.\n'

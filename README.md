@@ -1080,14 +1080,37 @@ a user who can, for example with the hosting panel's file manager.
 
 ## Tests
 
-`tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) in a temp folder with `php -S`: init,
-deploys, rollbacks and bad releases, `backup()`, `failed()` and `after_rollback()`, copies from the live release, failing builds and checks, `status`
-with pending commits, the rails and `--version`, `check`, alerts, `self-update`, skipped deploys, `freeze`, `down` and `up`, `cache`, `--ref`, the wait for a release tag, the no-release marker and `--no-wait`, `--quiet` (with quiet refusals on a freeze or a held lock), shipped commits, `self log`, `health()`, `check` during a deploy, the log, the lock, stale locks, locks with no owner and two runs racing for a stale lock,
-`PHP_RELOAD_CMD`, the web OPcache reset, `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, a signal after the switch, a closed output pipe, a rollback with the live folder missing, a read-only base folder, alerts for 2000 commits, prune and
-`KEEP_RELEASES` with a release that cannot be removed, the `prune` command (dry run, `--keep`, the lock), staging slots with their branch, folder, URL and `slots` list, `stage`, `free`, `slots update` and `copy-from`, and that shared
-files survive.
-It needs bash, PHP 8.1+, git and curl. There is no CI for now: run it and
-`shellcheck deploy tests/run.sh` before a pull request.
+`tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) from a throwaway bare repo into a temp
+folder and serves it with `php -S`. It covers:
+
+- init, deploys, rollbacks (also `--dry-run` and past a new migration) and bad releases; `backup()`,
+  `failed()`, `after_rollback()`, `health()` and `cache()`; copies from the live release;
+  `CLEAR_PATHS` and `SHARED`, and that shared files survive.
+- `status`, `diff`, `path`, `check`, the log and `self log`, the rails and `--version`, help and
+  typo hints, `--quiet`, `--ref`, the wait for a release tag, the no-release marker and
+  `--no-wait`, skipped commits, `freeze`, `down` and `up`.
+- The lock: stale locks, locks with no owner and runs racing for a stale lock.
+- Alerts (also for 2000 commits), a token in `REPO_URL`, `PHP_RELOAD_CMD`, the web OPcache reset,
+  `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, signals and a closed output
+  pipe, a missing live folder and a read-only base folder.
+- Prune and `KEEP_RELEASES`, and the `prune` command.
+- Staging slots: branches, pull requests, folders, URLs, `slots`, `stage`, `free`, `slots update`
+  and `copy-from`.
+- On a terminal: the questions before risky commands and the project menu.
+- `deploy self`: update, log and the wait for its tag.
+
+It needs bash, PHP 8.1+, git and curl. The terminal tests also need `script`; without it they are
+skipped. A full run takes about 8 minutes on a recent Mac.
+
+```bash
+tests/run.sh
+```
+
+- `DEPLOY_TEST_PORT` sets the port of the test server (default `8098`). Give each run its own port
+  when two run at once.
+- `DEPLOY_TEST_KEEP=1` keeps the temp folder after the run, for a look after a failure.
+
+There is no CI for now: run it and `shellcheck deploy tests/run.sh` before a pull request.
 
 ## Pull requests and releases
 

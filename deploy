@@ -2,15 +2,8 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
-#                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
-#                     | prune [--keep <n>] [--dry-run] [--yes]
-#                     | unfreeze | status | diff [--ref <ref>] | check [--setup] | log [count] | path [--base]
-#                     | rollback [name] [--yes] [--dry-run]
-#                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
-#                     | free | copy-from <project> [--yes] [path ...] | help [command]]
-#   deploy self-update | self [--no-wait | log [count]] | --version
-#   deploy [project] <command> --help
+#   deploy help                All commands, options and settings
+#   deploy help <command>      One command, its usage line and examples
 
 set -euo pipefail
 
@@ -5201,7 +5194,8 @@ EOF
         down)
             cat <<EOF
   down [reason] [--yes]      Run the down() step of the live release, like a maintenance page.
-                             Deploys and check skip the site check until up. Asks first on a
+                             Until up, deploys and rollbacks skip the site check, and check skips
+                             health() and takes a 503 from the site as ok. Asks first on a
                              terminal; --yes skips that
 EOF
             ;;

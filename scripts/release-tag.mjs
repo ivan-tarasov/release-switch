@@ -4,6 +4,7 @@
 // The version is vYEAR.MONTH.COUNT: year and month of the merge in UTC, COUNT is the release of
 // that month, from 1.
 import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 const TAGS = 'v[0-9]*.[0-9]*.[0-9]*';
 
@@ -31,7 +32,7 @@ export function nextVersion(tags, date) {
     return `${prefix}${counts.length === 0 ? 1 : Math.max(...counts) + 1}`;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const { MERGE_SHA: sha, MERGED_AT: mergedAt, GITHUB_REPOSITORY: repo } = process.env;
     if (!sha || !mergedAt || !repo) {
         console.error('MERGE_SHA, MERGED_AT and GITHUB_REPOSITORY are required.');

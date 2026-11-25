@@ -3,6 +3,7 @@
 // every pull request into main; run it by hand with:
 //   PR=<N> GITHUB_REPOSITORY=ivan-tarasov/release-switch node scripts/pr-check.mjs
 import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 export const RELEASE_LABELS = ['release:major', 'release:minor', 'release:patch', 'no-release'];
 
@@ -70,7 +71,7 @@ export function checkPullRequest({ title, body, labels = [], assignees = [], aut
     return errors;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
     const { PR, GITHUB_REPOSITORY: repo, GITHUB_ACTIONS, AUTHOR } = process.env;
     if (!PR || !repo) {
         console.error('PR and GITHUB_REPOSITORY are required.');

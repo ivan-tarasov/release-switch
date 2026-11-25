@@ -575,6 +575,11 @@ does not wait for release tags and sends no alerts. Its URL is `sN.` before the 
 `CHECK_URL` (`https://example.com/` gives `https://s1.example.com/`); set `STAGING_URL` with
 `{slot}` for anything else.
 
+Slots sit beside the production folder, so each project with slots needs a parent folder of its
+own. Two projects with production in `$HOME/apps/one` and `$HOME/apps/two` would both get
+`$HOME/apps/s1`. A slot folder's `OWNER` file names its project: a slot command of another project
+stops with both names, and `check` on production reports the clash before any slot is used.
+
 To set up a slot:
 
 1. In cPanel, add the subdomain `s1.example.com` with the document root

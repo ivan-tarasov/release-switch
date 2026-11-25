@@ -702,7 +702,7 @@ lock_text() {
 
 # Takes the lock for $1 (deploy, rollback, down or up). A stale lock is removed first.
 acquire_lock() {
-    local state error
+    local error
 
     # A run that changes things ends on its own terms, even when the reader of its output goes
     # away (a closed pipe, a dropped SSH connection): it finishes, or fails with a full cleanup.
@@ -714,26 +714,7 @@ acquire_lock() {
 
     # mkdir is atomic, and unlike flock it exists everywhere.
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        state="$(lock_state)"
-
-        # Only one run at a time removes a stale lock: the one that makes the break folder. The
-        # others fail, as that run is about to take the lock.
-        if [ "$state" = stale ] && mkdir "$LOCK_DIR.break" 2>/dev/null; then
-            LOCK_BREAK="$LOCK_DIR.break"
-
-            # Checked again: another run may have replaced the lock since. While this run holds
-            # the break folder, nobody else removes a lock, so a stale one stays the same.
-            if [ "$(lock_state)" = stale ]; then
-                carry_on "Removing a stale lock: $(lock_text | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
-                # Moved aside first, so the path frees at once and other runs never see half of it.
-                rm -rf "$LOCK_DIR.stale.$$"
-                mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null || true
-                rm -rf "$LOCK_DIR.stale.$$"
-            fi
-        elif [ "$state" = stale ] && [ "$(lock_age "$LOCK_DIR.break")" -ge 60 ]; then
-            LOCK_DIR=""
-            fail "a stale lock removal stopped half way; remove $DEPLOY_BASE/.deploy.lock.break and $DEPLOY_BASE/.deploy.lock if no deploy is running"
-        fi
+        remove_stale_lock "$LOCK_DIR"
 
         if ! error="$(LC_ALL=C mkdir "$LOCK_DIR" 2>&1)"; then
             LOCK_DIR=""
@@ -761,6 +742,32 @@ acquire_lock() {
         || ! mv "$LOCK_DIR/owner.$$" "$LOCK_DIR/owner" 2>/dev/null; then
         LOCK_DIR=""
         fail "lost the lock to another deploy while taking it" "deploy ${PROJECT:+$PROJECT }status"
+    fi
+}
+
+# Removes the lock folder $1 when it is stale. Only one run at a time does: the one that makes the
+# break folder (LOCK_BREAK, let go with release_lock_break once the lock is taken). The others fail
+# to take the lock, as that run is about to take it.
+remove_stale_lock() {
+    local lock="$1"
+
+    [ "$(lock_state "$lock")" = stale ] || return 0
+
+    if mkdir "$lock.break" 2>/dev/null; then
+        LOCK_BREAK="$lock.break"
+
+        # Checked again: another run may have replaced the lock since. While this run holds
+        # the break folder, nobody else removes a lock, so a stale one stays the same.
+        if [ "$(lock_state "$lock")" = stale ]; then
+            carry_on "Removing a stale lock: $(lock_text "$lock" | sed -E 's/^PID ([0-9]+).*/PID \1 is gone/')"
+            # Moved aside first, so the path frees at once and other runs never see half of it.
+            rm -rf "$lock.stale.$$"
+            mv "$lock" "$lock.stale.$$" 2>/dev/null || true
+            rm -rf "$lock.stale.$$"
+        fi
+    elif [ "$(lock_age "$lock.break")" -ge 60 ]; then
+        LOCK_DIR=""
+        fail "a stale lock removal stopped half way; remove $lock.break and $lock if no deploy is running"
     fi
 }
 
@@ -2214,8 +2221,21 @@ option_value() {
 # On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
 # does the same for the head of that pull request. A free slot deploys DEPLOY_BRANCH and stays free.
 # --ref and --pr never wait for a release tag.
+# Writes the branch a --branch or --pr run asked for ($1: a name or pr/<N>) to the slot's BRANCH.
+# Called only once that branch's release is live: a failed run leaves the slot on its old branch.
+follow_branch() {
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" > "$DEPLOY_BASE/BRANCH"
+
+    if is_pr_branch "$1"; then
+        say "$PROJECT now follows PR #${1#pr/}"
+    else
+        say "$PROJECT now follows $1"
+    fi
+}
+
 deploy() {
-    local force=0 ref="" no_wait=0 branch="" pr=""
+    local force=0 ref="" no_wait=0 branch="" pr="" follows=""
     local ref_usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"
     local branch_usage="usage: deploy <project>@sN --branch <name>" pr_usage="usage: deploy <project>@sN --pr <number>"
 
@@ -2297,21 +2317,19 @@ deploy() {
         [ "$branch" = "${branch#-}" ] \
             && [ "$(git ls-remote "$REPO_URL" "refs/heads/$branch" 2>/dev/null | cut -f2)" = "refs/heads/$branch" ] \
             || fail "no branch $branch in the repo"
-        printf '%s\n' "$branch" > "$DEPLOY_BASE/BRANCH"
         DEPLOY_BRANCH="$branch"
         SLOT_BRANCH="$branch"
         SLOT_PR=""
-        say "$PROJECT now follows $branch"
+        follows="$branch"
     fi
 
     if [ -n "$pr" ]; then
         [ "$(git ls-remote "$REPO_URL" "refs/pull/$pr/head" 2>/dev/null | cut -f2)" = "refs/pull/$pr/head" ] \
             || fail "no pull request #$pr in the repo (no refs/pull/$pr/head)"
-        printf 'pr/%s\n' "$pr" > "$DEPLOY_BASE/BRANCH"
         DEPLOY_BRANCH="pr/$pr"
         SLOT_BRANCH="pr/$pr"
         SLOT_PR="$pr"
-        say "$PROJECT now follows PR #$pr"
+        follows="pr/$pr"
     fi
 
     DEPLOY_REF="${ref:-$DEPLOY_BRANCH}"
@@ -2325,6 +2343,7 @@ deploy() {
         tip="$(git ls-remote "$REPO_URL" "$(branch_ref)" 2>/dev/null | cut -f1)" || true
 
         if [ -n "$live_sha" ] && [ "$tip" = "$live_sha" ]; then
+            follow_branch "$follows"
             say "Nothing new on $(branch_label): $PREVIOUS_RELEASE already runs ${tip:0:7}"
             say "To build it again anyway: deploy ${PROJECT:+$PROJECT }--force"
 
@@ -2462,10 +2481,13 @@ deploy() {
                 || warn "could not set $NEW_RELEASE aside"
         fi
 
+        # With no release to go back to, the new one stays live.
+        [ -n "$PREVIOUS_RELEASE" ] || follow_branch "$follows"
         fail "the check failed; ${PREVIOUS_RELEASE:-$NEW_RELEASE, the only release,} is live (data changes stay applied)" \
             "$(check_hint "$NEW_RELEASE")"
     fi
 
+    follow_branch "$follows"
     prune
     # Only the branch tip: after a --ref back to an older release the tip may still be broken.
     [ -n "$ref" ] || rm -f "$DEPLOY_BASE/$SKIP_FILE" 2>/dev/null || warn "could not remove $DEPLOY_BASE/$SKIP_FILE"
@@ -4322,13 +4344,26 @@ stage() {
     fi
 }
 
-# Takes the lock of slot $1 for stage when nobody holds it, and keeps it for the deploy. Keeps it
-# only while the slot's BRANCH is still $2 (empty: free) or already $3; else lets it go and fails.
+# Takes the lock of slot $1 for stage when nobody holds it or it is stale, and keeps it for the
+# deploy. Keeps it only while the slot's BRANCH is still $2 (empty: free) or already $3; else lets
+# it go and fails.
 claim_slot() {
     local base followed
 
     base="$(DEPLOY_SLOT="$1" && apply_slot && mkdir -p "$DEPLOY_BASE" && cd "$DEPLOY_BASE" && pwd -P)" || return 1
-    mkdir "$base/.deploy.lock" 2>/dev/null || return 1
+
+    if ! mkdir "$base/.deploy.lock" 2>/dev/null; then
+        remove_stale_lock "$base/.deploy.lock"
+
+        if ! mkdir "$base/.deploy.lock" 2>/dev/null; then
+            release_lock_break
+
+            return 1
+        fi
+
+        release_lock_break
+    fi
+
     LOCK_DIR="$base/.deploy.lock"
     # Called in a condition, so `set -e` does not stop a lock with no owner.
     if ! printf '%s %s stage\n' "$$" "$(date +%s)" 2>/dev/null > "$LOCK_DIR/owner.$$" \

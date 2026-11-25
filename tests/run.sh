@@ -2528,8 +2528,62 @@ kill "$holder" 2>/dev/null || true
 rm -rf "$SLOT2/.deploy.lock"
 check "stage skipped a locked free slot, failed with no slot left, and refused a locked slot on its branch"
 
+step "stage takes over a stale slot lock; a failed --branch leaves the slot on its old branch"
+# s1 is free on develop, s2 follows feature/z. A slot run that died hard leaves its lock behind.
+sh -c 'exit 0' &
+dead=$!
+wait "$dead"
+mkdir "$SLOT2/.deploy.lock"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$SLOT2/.deploy.lock/owner"
+deploy fixture stage feature/z > "$WORK/stage.log"
+grep -q "Removing a stale lock: PID $dead is gone" "$WORK/stage.log" || fail "stage did not remove the stale lock of s2"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage did not take s2 past its stale lock"
+[ ! -e "$SLOT2/.deploy.lock" ] || fail "stage left the lock of s2 behind"
+# A stale lock on the free s1: stage takes it; the build fails, so s1 stays free.
+mkdir "$SLOT/.deploy.lock"
+printf '%s %s deploy\n' "$dead" "$(date +%s)" > "$SLOT/.deploy.lock/owner"
+s1_before="$(slot_live)"
+if FIXTURE_FAIL_BUILD=1 deploy fixture stage feature/x > "$WORK/stage.log" 2>&1; then
+    fail "stage succeeded with a failing build"
+fi
+grep -q "Removing a stale lock: PID $dead is gone" "$WORK/stage.log" || fail "stage did not remove the stale lock of the free s1"
+grep -q "Cloning feature/x" "$WORK/stage.log" || fail "stage did not take the free s1 past its stale lock"
+[ ! -e "$SLOT/BRANCH" ] || fail "a failed stage stored a branch for the free s1"
+[ "$(slot_live)" = "$s1_before" ] || fail "a failed stage changed the release of s1"
+[ ! -e "$SLOT/.deploy.lock" ] || fail "a failed stage left the lock of s1 behind"
+# A live lock still refuses: the test shell holds it.
+mkdir "$SLOT/.deploy.lock"
+printf '%s %s stage\n' "$$" "$(date +%s)" > "$SLOT/.deploy.lock/owner"
+if deploy fixture stage feature/x > /dev/null 2> "$WORK/stage.err"; then
+    fail "stage took a slot with a live lock"
+fi
+grep -q "all 2 slots are busy" "$WORK/stage.err" || fail "no busy message with a live lock on the free slot"
+[ -e "$SLOT/.deploy.lock/owner" ] || fail "stage removed a live lock"
+rm -rf "$SLOT/.deploy.lock"
+# A failed --branch leaves s2 on feature/z: a failing build, and a branch the repo lacks.
+s2_before="$(basename "$(readlink "$SLOT2/current")")"
+if FIXTURE_FAIL_BUILD=1 deploy fixture@s2 --branch feature/x > "$WORK/branch.log" 2>&1; then
+    fail "a --branch deploy with a failing build succeeded"
+fi
+! grep -q "now follows" "$WORK/branch.log" || fail "a failed --branch deploy said the slot follows the new branch"
+if deploy fixture@s2 --branch feature/nope > "$WORK/branch.log" 2>&1; then
+    fail "a --branch deploy of a missing branch succeeded"
+fi
+[ "$(cat "$SLOT2/BRANCH")" = feature/z ] || fail "a failed --branch deploy changed BRANCH of s2"
+[ "$(basename "$(readlink "$SLOT2/current")")" = "$s2_before" ] || fail "a failed --branch deploy changed the release of s2"
+deploy fixture slots | grep -qE "^s2 +feature/z +[0-9a-f]{7,} " || fail "slots does not show s2 on feature/z after a failed --branch"
+deploy fixture stage feature/z > "$WORK/stage.log"
+grep -q "Nothing new on feature/z" "$WORK/stage.log" || fail "stage feature/z did not reuse s2 after a failed --branch"
+[ "$(tail -n1 "$WORK/stage.log")" = "http://s2.localhost:$PORT/" ] || fail "stage feature/z took another slot after a failed --branch"
+# A good --branch still switches.
+deploy fixture@s1 --branch feature/x > "$WORK/branch.log"
+grep -q "fixture@s1 now follows feature/x" "$WORK/branch.log" || fail "a good --branch deploy did not say it follows feature/x"
+[ "$(cat "$SLOT/BRANCH")" = feature/x ] || fail "a good --branch deploy did not store feature/x"
+[ "$(slot_live)" != "$s1_before" ] || fail "a good --branch deploy did not change the release of s1"
+check "stage took over stale locks on a following and a free slot, refused a live one; a failed --branch kept s2 on feature/z; a good one switched s1"
+
 step "staging runs the same slot commands as the old forms"
-# s1 is free on develop, s2 follows feature/z.
+# s1 follows feature/x, s2 follows feature/z.
 deploy fixture slots > "$WORK/slots.log"
 deploy staging fixture > "$WORK/staging.log"
 diff "$WORK/slots.log" "$WORK/staging.log" || fail "staging fixture does not list the slots like slots"

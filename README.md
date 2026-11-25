@@ -596,8 +596,9 @@ To set up a slot:
    is never copied. Give the slot its own `shared/.env`, with its own `APP_URL`
    (`https://s1.example.com`), `APP_ENV=staging`, its own database, and mail to the log
    (`MAIL_MAILER=log`).
-3. Deploy a branch to it: `deploy staging example@s1 checkout feature/login`. The slot stores the
-   branch in `s1/BRANCH` and deploys it. Or deploy it with no branch,
+3. Deploy a branch to it: `deploy staging example@s1 checkout feature/login`. The slot deploys the
+   branch and stores it in `s1/BRANCH` once it is live. A failed clone or build leaves the slot on
+   its old branch. Or deploy it with no branch,
    `deploy staging example@s1 update`: a free slot runs production's `DEPLOY_BRANCH`.
 
 All slot work goes through `deploy staging <project>[@sN] <command>`:
@@ -644,7 +645,8 @@ release name has `pr281` in place of a tag (`20261114-101500-pr281-abc1234`), an
 line. `deploy staging example checkout --pr 281` does the same for a pull request. With no free slot, it takes the
 first slot whose branch is gone from the repo, and says which branch it replaces. When all slots
 are busy, it fails and shows the slot list. It takes each slot under the slot's lock, so two
-`checkout` runs at once never pick the same slot.
+`checkout` runs at once never pick the same slot. A stale lock (its run is gone) is removed, as a
+deploy does.
 
 `deploy staging example@s1 free` forgets the slot's branch, so `checkout` can use it again, and
 deploys the newest commit of `DEPLOY_BRANCH` to it, so a free slot always runs something current.

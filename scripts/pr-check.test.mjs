@@ -52,3 +52,33 @@ test('Dependabot still needs exactly one release label', () => {
 test('Dependabot still needs an assignee', () => {
     assert.deepEqual(checkPullRequest({ ...dependabot, assignees: [] }), ['Add an assignee.']);
 });
+
+const withNote = note => ({ ...person, body: `## Description\nWhy.\n\n## Changes\n1. What.\n\n## Release note\n${note}` });
+
+test('a Release note with no sentence fails', () => {
+    for (const note of ['-', '—', '...', '- -', '_', '* * *']) {
+        assert.deepEqual(
+            checkPullRequest(withNote(note)),
+            ['The Release note has no sentence. Write 1–3 sentences, or "None".'],
+            `note: ${JSON.stringify(note)}`,
+        );
+    }
+});
+
+test('an empty Release note fails', () => {
+    assert.match(checkPullRequest(withNote(''))[0], /Release note/);
+});
+
+test('a Release note of None or 1–3 sentences passes', () => {
+    for (const note of ['None', 'none.', 'Deploys stop on a full disk.', 'One. Two. Three.', 'Версия 2']) {
+        assert.deepEqual(checkPullRequest(withNote(note)), [], `note: ${JSON.stringify(note)}`);
+    }
+});
+
+test('a no-release pull request with a None Release note passes', () => {
+    assert.deepEqual(checkPullRequest({ ...withNote('None'), labels: [{ name: 'no-release' }] }), []);
+});
+
+test('a Release note with more than 3 sentences fails', () => {
+    assert.match(checkPullRequest(withNote('One. Two. Three. Four.'))[0], /4 sentences/);
+});

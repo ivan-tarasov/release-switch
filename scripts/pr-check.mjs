@@ -26,7 +26,7 @@ export function section(body, name) {
 }
 
 export function countSentences(text) {
-    return text.split(/(?<=[.!?])\s+/).filter(part => /\w/.test(part)).length;
+    return text.split(/(?<=[.!?])\s+/).filter(part => /[\p{L}\p{N}]/u.test(part)).length;
 }
 
 export function checkPullRequest({ title, body, labels = [], assignees = [], author }) {
@@ -59,7 +59,9 @@ export function checkPullRequest({ title, body, labels = [], assignees = [], aut
         errors.push('Add a "## Release note" section: 1–3 sentences, or "None".');
     } else if (!/^none\.?$/i.test(note)) {
         const count = countSentences(note);
-        if (count > 3) {
+        if (count === 0) {
+            errors.push('The Release note has no sentence. Write 1–3 sentences, or "None".');
+        } else if (count > 3) {
             errors.push(`The Release note has ${count} sentences. Keep it to 1–3, or write "None".`);
         }
     }

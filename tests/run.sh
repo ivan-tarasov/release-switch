@@ -223,7 +223,8 @@ deploy fixture init "$OLD" --dry-run
 check "dry run left everything in place"
 
 step "init"
-deploy fixture init "$OLD"
+deploy fixture init "$OLD" > "$WORK/init.log"
+grep -q "Check the setup: deploy fixture check --setup$" "$WORK/init.log" || fail "init does not point to check --setup"
 [ -f "$BASE/shared/.env" ] && [ -L "$OLD/.env" ] || fail ".env not moved and linked back"
 [ -f "$BASE/shared/data/note.txt" ] && [ -L "$OLD/data" ] || fail "data/ not moved and linked back"
 check "shared/ holds .env and data/; the old checkout links to them"
@@ -293,6 +294,98 @@ require "\$base/current/public/index.php";
 EOF
 PHP_CLI_SERVER_WORKERS=4 php -d realpath_cache_size=0 -S "127.0.0.1:$PORT" "$WORK/router.php" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
+
+step "check --setup before the first deploy"
+# Branches of a repo of their own: one with no deploy.conf, one with no build step, one that
+# uses a name of the engine.
+git init --quiet --bare "$WORK/setup.git"
+git clone --quiet --branch develop "file://$REPO" "$WORK/setup-src"
+git -C "$WORK/setup-src" push --quiet "$WORK/setup.git" develop
+while IFS='|' read -r branch conf; do
+    git -C "$WORK/setup-src" checkout --quiet -b "$branch" develop
+    if [ -n "$conf" ]; then
+        printf '%b' "$conf" > "$WORK/setup-src/deploy.conf"
+    else
+        rm "$WORK/setup-src/deploy.conf"
+    fi
+    git -C "$WORK/setup-src" -c user.name=test -c user.email=test@example.com commit --quiet -am "$branch"
+    git -C "$WORK/setup-src" push --quiet "$WORK/setup.git" "$branch"
+done <<EOF
+no-conf|
+no-build|SHARED=(.env data)\n
+clash|build() { :; }\nprune() { :; }\n
+EOF
+printf '#!/bin/sh\necho "Composer version 2.0.0"\n' > "$WORK/composer"
+mkdir -p "$WORK/setup-base/shared"
+touch "$WORK/setup-base/shared/.env"
+cat > "$WORK/projects/setup.env" <<EOF
+DEPLOY_BASE="$BASE"
+CHECK_URL="http://127.0.0.1:$PORT/"
+REPO_URL="file://$WORK/setup.git"
+COMPOSER_BIN="sh $WORK/composer"
+NOTIFY_CMD='printf "%s|%s|%s\\n" "\$NOTIFY_EVENT" "\$NOTIFY_STATUS" "\$NOTIFY_TEXT" >> "$WORK/setup-alerts.log"'
+STAGING_SERVERS=1
+STAGING_URL="http://127.0.0.1:$PORT/"
+EOF
+
+# Runs check --setup of project $1 (setup or setup@s1) with the env settings after it. Keeps the
+# output in setup.log and the exit code in SETUP_CODE; every run must show all six items.
+setup_check() {
+    local project="$1"
+    shift
+    SETUP_CODE=0
+    run env "$@" "$ROOT/deploy" "$project" check --setup > "$WORK/setup.log" 2>&1 || SETUP_CODE=$?
+    [ "$(grep -cE "^(ok  |FAIL)  $project: (repo|deploy.conf|shared|php|site|alerts): " "$WORK/setup.log")" = 6 ] \
+        || fail "check --setup with $* did not show all six items: $(cat "$WORK/setup.log")"
+}
+
+deploy fixture check --help | grep "^  check --setup \[--quiet\]" > /dev/null || fail "check --help does not show check --setup"
+find "$BASE" "$WORK/projects" | sort > "$WORK/setup-files"
+setup_check setup
+[ "$SETUP_CODE" = 0 ] || fail "check --setup failed on a good setup: $(cat "$WORK/setup.log")"
+[ "$(grep -c '^ok    setup: ' "$WORK/setup.log")" = 6 ] || fail "a good setup has a line that is not ok"
+grep -q '^ok    setup: site: http://127.0.0.1:[0-9]*/ answered [0-9]*$' "$WORK/setup.log" \
+    || fail "a site with no release yet does not count as answering"
+[ "$(cat "$WORK/setup-alerts.log")" = "check|test|setup: test alert from check --setup; nothing is wrong" ] \
+    || fail "check --setup did not send one test alert to NOTIFY_CMD: $(cat "$WORK/setup-alerts.log")"
+setup_check setup NOTIFY_CMD= NOTIFY_URL="http://127.0.0.1:$PORT/hook"
+[ "$SETUP_CODE" = 0 ] || fail "check --setup failed with NOTIFY_URL: $(cat "$WORK/setup.log")"
+grep -qF '"text":"setup: test alert from check --setup; nothing is wrong","project":"setup","event":"check","status":"test"' \
+    "$WORK/hook.log" || fail "NOTIFY_URL got no test alert"
+rm -f "$WORK/hook.log"
+setup_check setup NOTIFY_CMD=
+grep -q '^ok    setup: alerts: none set up (no NOTIFY_URL or NOTIFY_CMD)$' "$WORK/setup.log" || fail "no line for no alerts"
+
+# Each case: an env setting, then the line it must fail with. The other five items stay ok.
+while IFS='|' read -r setting message; do
+    setup_check setup "$setting"
+    [ "$SETUP_CODE" = 1 ] || fail "check --setup with $setting exited with $SETUP_CODE"
+    grep -qF "FAIL  setup: $message" "$WORK/setup.log" || fail "check --setup with $setting: $(cat "$WORK/setup.log")"
+    [ "$(grep -c '^FAIL' "$WORK/setup.log")" = 1 ] || fail "check --setup with $setting failed more than one item"
+done <<EOF
+REPO_URL=file://$WORK/nope.git|repo: file://$WORK/nope.git does not answer
+DEPLOY_BRANCH=nope|repo: no branch nope in file://$WORK/setup.git
+DEPLOY_BRANCH=no-conf|deploy.conf: none on no-conf
+DEPLOY_BRANCH=no-build|deploy.conf: no build step
+DEPLOY_BRANCH=clash|deploy.conf: uses names of the engine: prune()
+DEPLOY_BASE=$WORK/setup-base|shared: missing data in $WORK/setup-base/shared/
+DEPLOY_BASE=$WORK/setup-none|shared: no base folder yet ($WORK/setup-none)
+PHP_BIN=$WORK/no-php|php: PHP_BIN ($WORK/no-php) does not run
+COMPOSER_BIN=$WORK/no-composer|php: COMPOSER_BIN ($WORK/no-composer) does not run
+CHECK_URL=http://127.0.0.1:1/|site: http://127.0.0.1:1/ does not answer
+NOTIFY_CMD=false|alerts: the test alert to NOTIFY_CMD failed
+EOF
+
+setup_check setup@s1
+[ "$SETUP_CODE" = 1 ] || fail "check --setup on a slot with no folder exited with $SETUP_CODE"
+grep -qF "FAIL  setup@s1: shared: no base folder yet ($WORK/s1)" "$WORK/setup.log" || fail "a slot does not report its missing folder"
+grep -q '^ok    setup@s1: alerts: none, staging slots do not send them$' "$WORK/setup.log" || fail "a slot sent alerts"
+# One per run with NOTIFY_CMD: the good setup and the ten cases that keep it.
+[ "$(wc -l < "$WORK/setup-alerts.log" | tr -d ' ')" = 11 ] || fail "check --setup did not send one alert per run"
+[ ! -e "$WORK/setup-none" ] && [ ! -e "$WORK/s1" ] || fail "check --setup made a base folder"
+find "$BASE" "$WORK/projects" | sort | diff "$WORK/setup-files" - > /dev/null || fail "check --setup changed files"
+rm -rf "$WORK/projects/setup.env" "$WORK/setup.git" "$WORK/setup-src" "$WORK/setup-base" "$WORK/setup-alerts.log"
+check "check --setup shows all six items with no release, fails each on its own, sends one test alert and makes nothing"
 
 step "First deploy, with the project left out"
 deploy > "$WORK/first.log"

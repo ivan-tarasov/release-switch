@@ -5,7 +5,7 @@
 #   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
 #                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
 #                     | prune [--keep <n>] [--dry-run] [--yes]
-#                     | unfreeze | status | diff [--ref <ref>] | check | log [count] | path [--base]
+#                     | unfreeze | status | diff [--ref <ref>] | check [--setup] | log [count] | path [--base]
 #                     | rollback [name] [--yes] [--dry-run]
 #                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
 #                     | free | copy-from <project> [--yes] [path ...] | help [command]]
@@ -80,6 +80,9 @@ LIMIT_FD=0
 
 # The last fail() message, for the alert.
 FAIL_MESSAGE=""
+
+# Set to 1 by notify when an alert could not be sent.
+NOTIFY_FAILED=0
 
 # The engine's functions, set in main. deploy.conf may not define any of them.
 ENGINE_FUNCS=""
@@ -975,6 +978,7 @@ notify() {
 
         if [ -z "$body" ] || ! curl --silent --fail --max-time 10 --output /dev/null \
             --header 'Content-Type: application/json' --data "$body" "$NOTIFY_URL"; then
+            NOTIFY_FAILED=1
             warn "could not send the alert to NOTIFY_URL"
         fi
     fi
@@ -982,6 +986,7 @@ notify() {
     if [ -n "$NOTIFY_CMD" ]; then
         if ! run_limited "$(short_limit 30)" env NOTIFY_EVENT="$1" NOTIFY_TEXT="$text" NOTIFY_PROJECT="$PROJECT" \
             NOTIFY_STATUS="$3" NOTIFY_RELEASE="$4" NOTIFY_DURATION="$duration" sh -c "$NOTIFY_CMD" > /dev/null 2>&1; then
+            NOTIFY_FAILED=1
             if [ "$TIMED_OUT" -eq 1 ]; then
                 warn "NOTIFY_CMD ran past $(short_limit 30) s"
             else
@@ -4243,6 +4248,158 @@ check() {
     return "$CHECK_FAILED"
 }
 
+# What check --setup needs from deploy.conf $1: "build" or "no build" on the first line, then its
+# SHARED paths, one per line. Loads it in a subshell; fails when it does not load.
+conf_facts() (
+    SHARED=()
+    unset -f build
+    # shellcheck source=/dev/null
+    . "$1" > /dev/null 2>&1 || exit 1
+
+    if declare -F build > /dev/null; then
+        printf 'build\n'
+    else
+        printf 'no build\n'
+    fi
+
+    for conf_path in ${SHARED[@]+"${SHARED[@]}"}; do
+        printf '%s\n' "$conf_path"
+    done
+)
+
+# Checks a setup before its first deploy, one line per item: the repo and branch, deploy.conf, the
+# SHARED paths, PHP and Composer, the site, and one test alert. Needs no base folder and no live
+# release, and goes on after a problem. Writes only in the run's temp folder: no base folder,
+# lock or alert state. Exits with 1 if anything is wrong.
+check_setup() {
+    local repo="$REPO_URL" tip="" tmp conf="" facts="" listed path bad="" absent="" php composer bins=() names
+    CHECK_FAILED=0
+    CHECK_PROBLEMS=""
+    CHECK_KEYS=""
+
+    # Like a deploy: with no REPO_URL, the origin of the live release.
+    [ -n "$repo" ] || repo="$(git -C "$DEPLOY_BASE/current" remote get-url origin 2>/dev/null || true)"
+
+    # Only the refs, no clone.
+    if [ -z "$repo" ]; then
+        check_bad "repo: REPO_URL not set; the first deploy needs it"
+    elif ! tip="$(git ls-remote "$repo" "$(branch_ref)" 2>/dev/null)"; then
+        check_bad "repo: $repo does not answer"
+        tip=""
+    elif [ "$(printf '%s\n' "$tip" | cut -f2)" != "$(branch_ref)" ]; then
+        check_bad "repo: no branch $(branch_label) in $repo"
+        tip=""
+    else
+        check_ok "repo: $(branch_label) at $(printf '%s' "$tip" | cut -c1-7)"
+    fi
+
+    # One commit with its folders but no file contents, so git show fetches deploy.conf alone. A
+    # server that cannot filter sends the whole commit instead.
+    if [ -n "$tip" ]; then
+        tmp="$(run_tmp)"
+        if git init --quiet --bare "$tmp" \
+            && git -C "$tmp" config remote.origin.url "$repo" \
+            && git -C "$tmp" config remote.origin.promisor true \
+            && git -C "$tmp" config remote.origin.partialclonefilter blob:none \
+            && git -C "$tmp" -c maintenance.auto=false -c gc.auto=0 fetch --quiet --depth 1 --filter=blob:none \
+                origin "$(branch_ref)" 2>/dev/null; then
+            conf="$tmp/deploy.conf"
+            git -C "$tmp" -c maintenance.auto=false -c gc.auto=0 show FETCH_HEAD:deploy.conf > "$conf" 2>/dev/null \
+                || conf=""
+        else
+            tip=""
+        fi
+    fi
+
+    # The same checks as a deploy: a build step and no names of the engine.
+    if [ -z "$tip" ]; then
+        check_ok "deploy.conf: not checked, the branch could not be read"
+    elif [ -z "$conf" ]; then
+        check_bad "deploy.conf: none on $(branch_label); add one to the repo, see README.md#deployconf"
+    elif ! facts="$(conf_facts "$conf")"; then
+        facts=""
+        check_bad "deploy.conf: does not load"
+    elif bad="$(conf_clashes "$conf")" && [ -n "$bad" ]; then
+        check_bad "deploy.conf: uses names of the engine: ${bad% }; rename them (see README, deploy.conf)"
+    elif [ "${facts%%$'\n'*}" != build ]; then
+        check_bad "deploy.conf: no build step"
+    else
+        check_ok "deploy.conf: has a build step"
+    fi
+
+    listed="$(printf '%s\n' "$facts" | sed 1d)"
+    bad=""
+    while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "/$path/" in
+            //* | */../*) bad+="$path " ;;
+            *) [ -e "$DEPLOY_BASE/shared/$path" ] || absent+="$path " ;;
+        esac
+    done <<< "$listed"
+
+    if [ -z "$facts" ]; then
+        check_ok "shared: not checked, no deploy.conf to read"
+    elif [ -z "$listed" ]; then
+        check_ok "shared: none listed in deploy.conf"
+    elif [ -n "$bad" ]; then
+        check_bad "shared: ${bad% } must stay inside the release: no leading / and no .."
+    elif [ -z "$DEPLOY_BASE" ] || [ ! -d "$DEPLOY_BASE" ]; then
+        check_bad "shared: no base folder yet (${DEPLOY_BASE:-DEPLOY_BASE not set}); run init, or create ${absent% } in <base>/shared/"
+    elif [ -n "$absent" ]; then
+        check_bad "shared: missing ${absent% } in $DEPLOY_BASE/shared/ (run init, or create them)"
+    else
+        check_ok "shared: all present"
+    fi
+
+    # COMPOSER_BIN may hold arguments, like php composer.phar.
+    # shellcheck disable=SC2016 # PHP code, not shell.
+    php="$("$PHP_BIN" -r 'echo PHP_VERSION;' < /dev/null 2>/dev/null)" || php=""
+    read -ra bins <<< "$COMPOSER_BIN"
+    composer="$(${bins[@]+"${bins[@]}"} --version --no-ansi < /dev/null 2>/dev/null | sed -n 1p)" || composer=""
+    bad=""
+    [ -n "$php" ] || bad="PHP_BIN ($PHP_BIN)"
+    [ -n "$composer" ] || bad="${bad:+$bad and }COMPOSER_BIN ($COMPOSER_BIN)"
+
+    if [ -n "$bad" ]; then
+        check_bad "php: $bad does not run"
+    else
+        check_ok "php: PHP $php; $composer"
+    fi
+
+    # Any HTTP answer will do: before the first deploy the site may well fail.
+    if [ -z "$CHECK_URL" ]; then
+        check_bad "site: CHECK_URL not set; a deploy needs it"
+    else
+        probe
+
+        if [ -n "$PROBE_STATUS" ]; then
+            check_ok "site: $CHECK_URL answered $PROBE_STATUS"
+        else
+            check_bad "site: $CHECK_URL does not answer"
+        fi
+    fi
+
+    names="${NOTIFY_URL:+NOTIFY_URL}"
+    names+="${NOTIFY_CMD:+${names:+ and }NOTIFY_CMD}"
+
+    if [ -n "$DEPLOY_SLOT" ]; then
+        check_ok "alerts: none, staging slots do not send them"
+    elif [ -z "$names" ]; then
+        check_ok "alerts: none set up (no NOTIFY_URL or NOTIFY_CMD)"
+    else
+        NOTIFY_FAILED=0
+        notify check "test alert from check --setup; nothing is wrong" test ""
+
+        if [ "$NOTIFY_FAILED" -eq 1 ]; then
+            check_bad "alerts: the test alert to $names failed"
+        else
+            check_ok "alerts: test alert sent to $names"
+        fi
+    fi
+
+    return "$CHECK_FAILED"
+}
+
 # One tab-separated row for `slots`: slot $1, its branch, live sha, deploy time and URL. The branch
 # gets "(gone)" when $2 is 1; a free slot with a live release shows "free (<DEPLOY_BRANCH>)". Changes the settings to the slot's, so it runs in a subshell.
 slot_row() {
@@ -4778,10 +4935,11 @@ init() {
     cat <<EOF
 
 Next steps:
-  1. Deploy the first release: deploy ${PROJECT:-<project>}
+  1. Check the setup: deploy ${PROJECT:-<project>} check --setup
+  2. Deploy the first release: deploy ${PROJECT:-<project>}
      (REPO_URL must be set for it: $(redact "$(git -C "$checkout" remote get-url origin 2>/dev/null || printf 'the repo URL')"))
-  2. Point the web root at $DEPLOY_BASE/current/public (or replace it with a link to it).
-  3. Point cron at $DEPLOY_BASE/current.
+  3. Point the web root at $DEPLOY_BASE/current/public (or replace it with a link to it).
+  4. Point cron at $DEPLOY_BASE/current.
 EOF
 }
 
@@ -5092,6 +5250,10 @@ EOF
                              nothing. Problems go to stderr; exits with 1 on any. --quiet hides
                              the ok lines
   check --all [--quiet]      The same for every project, production only
+  check --setup [--quiet]    Check a setup before the first deploy, with no base folder or
+                             release needed: the repo and branch, deploy.conf, the SHARED
+                             paths, PHP_BIN and COMPOSER_BIN, that CHECK_URL answers, and one
+                             test alert. Exits with 1 on any problem; changes nothing
 EOF
             ;;
         log)
@@ -5285,7 +5447,7 @@ command_examples() {
         prune) printf '%s\n' "deploy example prune --dry-run" "deploy example prune --keep 2 --yes" "deploy example@s1 prune" ;;
         status) printf '%s\n' "deploy example status" "deploy status --all" ;;
         diff) printf '%s\n' "deploy example diff" "deploy example diff --ref v2026.11.1" "deploy example@s1 diff" ;;
-        check) printf '%s\n' "deploy example check" "deploy check --all" ;;
+        check) printf '%s\n' "deploy example check" "deploy check --all" "deploy example check --setup" ;;
         log) printf '%s\n' "deploy example log 50" ;;
         path) printf '%s\n' 'cd "$(deploy path example)"' ;;
         rollback) printf '%s\n' "deploy example rollback" "deploy example rollback v2026.11.1" "deploy example rollback --dry-run" ;;
@@ -5719,7 +5881,11 @@ main() {
             report "${PROJECT:+$PROJECT · }diff" show_diff "$@"
             ;;
         check)
-            report "${PROJECT:+$PROJECT · }check" check
+            if [ "${2:-}" = --setup ]; then
+                report "${PROJECT:+$PROJECT · }check --setup" check_setup
+            else
+                report "${PROJECT:+$PROJECT · }check" check
+            fi
             ;;
         log)
             resolve_base --read

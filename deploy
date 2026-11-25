@@ -998,6 +998,12 @@ current_release() {
     fi
 }
 
+# The live release folder, resolved, when current is a link to a folder. Fails when not.
+live_dir() {
+    [ -n "$DEPLOY_BASE" ] && [ -L "$DEPLOY_BASE/current" ] && [ -d "$DEPLOY_BASE/current" ] || return 1
+    (cd "$DEPLOY_BASE/current" && pwd -P)
+}
+
 # Prints the full path of the live release, or of DEPLOY_BASE with --base, and nothing else, so
 # `cd "$(deploy path <project>)"` works. Creates nothing and takes no lock.
 show_path() {
@@ -3510,6 +3516,10 @@ menu_actions() {
                 menu_add down "Down…"
             fi
 
+            if (menu_load "$target" && live_dir) > /dev/null 2>&1; then
+                menu_add cd "Go to current folder"
+            fi
+
             case "$target" in
                 *@*) menu_add free "Free slot" ;;
             esac
@@ -3696,6 +3706,33 @@ menu_done() {
     after_answer
 }
 
+# Opens $SHELL (else /bin/sh) in the live release folder of row $1, with the terminal back to
+# normal. Any exit comes back to the menu.
+menu_shell() {
+    local dir tty
+
+    if ! dir="$( (menu_load "${M_TARGET[$1]}" && live_dir) 2> /dev/null)"; then
+        warn "$(menu_name "$1") has no live release (current is gone)"
+        M_RAN=1
+
+        return 0
+    fi
+
+    M_RAN=1
+    say "$dir · type exit to return to the menu"
+    [ "$RAILS" -eq 0 ] || printf '%s└%s\n' "$C_DIM" "$C_OFF"
+    tty="$(stty -g 2>/dev/null)" || tty=""
+    before_answer
+    trap ':' INT
+    (
+        unset DEPLOY_MENU_TTY
+        cd "$dir" && exec "${SHELL:-/bin/sh}"
+    ) || true
+    trap 'exit 130' INT
+    [ -z "$tty" ] || stty "$tty" 2>/dev/null || true
+    intro ""
+}
+
 # Runs `deploy $@` and waits for Enter.
 menu_run() {
     menu_child "$@"
@@ -3770,6 +3807,7 @@ menu_act() {
             fi
             ;;
         checkout) menu_checkout "$target" ;;
+        cd) menu_shell "$2" ;;
         copy) menu_run "$target" copy-from "${target%@*}" ;;
         free)
             ask_yes "Free $(menu_name "$2") and deploy the production branch to it?" \

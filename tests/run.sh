@@ -2981,7 +2981,7 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
     grep -q "fixture s1 — staging · feature/x" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no title"; }
     for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Prune releases" \
-        "5  Copy data from production…" "6  Status" "7  Log" "8  Rollback…" "9  Down…" "10  Free slot"; do
+        "5  Copy data from production…" "6  Status" "7  Log" "8  Rollback…" "9  Down…" "10  Go to current folder" "11  Free slot"; do
         grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no $label"; }
     done
     grep -q "Build it? \[y/N\]" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not ask"; }
@@ -3000,11 +3000,58 @@ if command -v script > /dev/null; then
     grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "an empty branch did something"; }
     grep -q "deploy staging fixture checkout no-such-branch failed" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the free leaf did not run staging checkout"; }
+    # Go to current folder: a shell (a fake SHELL that saves its folder) starts in the live release,
+    # and any exit comes back to the menu. Production uses the arrow-key list, the slot exits non-zero.
+    cat > "$WORK/shell.sh" <<'EOF'
+#!/bin/sh
+pwd -P > "$SHELL_PWD"
+exit "${SHELL_CODE:-0}"
+EOF
+    chmod +x "$WORK/shell.sh"
+    : > "$WORK/shell.pwd"
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "fixture — production" $'9j\n' "fixture — production" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 SHELL="$WORK/shell.sh" \
+        SHELL_PWD="$WORK/shell.pwd" "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on Go to current folder"; }
+    grep -qF "10  Go to current folder" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the production list has no Go to current folder"; }
+    grep -qF "$(cd "$BASE/current" && pwd -P) · type exit to return to the menu" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "Go to current folder does not name the folder"; }
+    [ "$(cat "$WORK/shell.pwd")" = "$(cd "$BASE/current" && pwd -P)" ] \
+        || { cat "$WORK/menu.log"; fail "the shell did not start in the live release"; }
+    [ "$(grep -c "fixture — production" "$WORK/menu.log")" -eq 2 ] \
+        || { cat "$WORK/menu.log"; fail "the action list did not come back after the shell"; }
+    ! grep -qE "[0-9]  Go to current folder$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the engine list has Go to current folder"; }
+    : > "$WORK/shell.pwd"
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'10\n' \
+        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 SHELL="$WORK/shell.sh" \
+        SHELL_PWD="$WORK/shell.pwd" SHELL_CODE=3 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the slot list failed on Go to current folder"; }
+    [ "$(cat "$WORK/shell.pwd")" = "$(cd "$SLOT/current" && pwd -P)" ] \
+        || { cat "$WORK/menu.log"; fail "the shell did not start in the slot's live release"; }
+    [ "$(grep -c "b to go back, q to quit" "$WORK/menu.log")" -eq 2 ] \
+        || { cat "$WORK/menu.log"; fail "the slot list did not come back after a shell that failed"; }
+    # No row without a live release or with current not a link; current gone at the pick fails.
+    slot_actions() {
+        # shellcheck disable=SC2016 # Expanded by the inner bash.
+        run bash -c '. "$1"; M_TARGET=(fixture@s1); M_PENDING=(-); M_VERSION=(-); M_SHIP=(0); M_PROBLEMS=("")
+            menu_actions 0; printf "%s\n" "${A_LABEL[@]}"; menu_shell 0 2>&1' _ "$ROOT/deploy"
+    }
+    mv "$SLOT/current" "$WORK/s1.current"
+    slot_actions > "$WORK/actions.log"
+    ! grep -q "Go to current folder" "$WORK/actions.log" || fail "a slot without current shows Go to current folder"
+    grep -q "fixture s1 (staging) has no live release (current is gone)" "$WORK/actions.log" \
+        || { cat "$WORK/actions.log"; fail "Go to current folder without current does not fail"; }
+    mkdir "$SLOT/current"
+    slot_actions > "$WORK/actions.log"
+    ! grep -q "Go to current folder" "$WORK/actions.log" || fail "a slot whose current is not a link shows Go to current folder"
+    rmdir "$SLOT/current"
+    mv "$WORK/s1.current" "$SLOT/current"
     rm -f "$SLOT/BRANCH" "$SLOT2/BRANCH"
     [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
     [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
     mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing, Recheck projects read the rows again and arrows never showed as text; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; stray keys before the cache question were dropped; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing, Recheck projects read the rows again and arrows never showed as text; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; stray keys before the cache question were dropped; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout; Go to current folder showed on production and a live slot only, its shell started in the live release and the list came back after any exit, and current gone at the pick failed"
 else
     check "skipped: no script command to make a terminal"
 fi

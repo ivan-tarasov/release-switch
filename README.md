@@ -359,9 +359,10 @@ something to ship come first, each with its slots right under it; up-to-date row
 Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its own action list:
 
 - Production: Deploy new release (or Redeploy when up to date), Status, Check site, Log, Rollback…,
-  Clear cache, Prune releases, Freeze… or Unfreeze, Down… or Up.
+  Clear cache, Prune releases, Freeze… or Unfreeze, Down… or Up, Go to current folder.
 - Staging slot: Update (or a redeploy when up to date), Checkout branch or PR…, Clear cache, Prune
-  releases, Copy data from production…, Status, Log, Rollback…, Down… or Up, Free slot.
+  releases, Copy data from production…, Status, Log, Rollback…, Down… or Up, Go to current folder,
+  Free slot.
 - Free slot leaf: no list; it asks for a branch, or `#N` for a pull request, and runs
   `deploy staging <project> checkout …`, which uses the first free slot.
 - Engine: Update engine (`deploy self`), Log (`deploy self log`).
@@ -374,6 +375,12 @@ its own questions. When it ends, the menu shows whether it worked or failed and 
 shows the same action list with fresh facts. A failed run keeps the menu open. Ctrl-C during a run
 stops that run and comes back to the menu; Ctrl-C in a list quits. After `deploy self` the new engine
 opens its own menu.
+
+Go to current folder shows only when `current` is a link to a live release. A script cannot change
+the folder of the shell that started it (see `deploy path`), so this row opens a new shell instead:
+it prints the folder, then starts `$SHELL` (else `/bin/sh`) in the live release folder, with the
+terminal back to normal. `exit` returns to the menu with fresh facts, whatever the exit code. When
+`current` is gone by the time of the pick, it says so and stays in the menu.
 
 `b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
 action ran and puts the cursor back on the same row. `r` or the `Recheck projects` row reads the rows again. `q`, Ctrl-D, the

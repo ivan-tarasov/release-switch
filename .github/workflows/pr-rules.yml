@@ -29,8 +29,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Test the check
-        run: node --test scripts/pr-check.test.mjs
+      - name: Test the scripts
+        run: node --test scripts/*.test.mjs
 
       - name: Check title, label, assignee and body
         env:

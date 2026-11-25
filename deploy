@@ -538,6 +538,7 @@ apply_slot() {
     DEPLOY_BASE="$(dirname "$prod_base")/$DEPLOY_SLOT"
     [ "$DEPLOY_BASE" != "$prod_base" ] \
         || fail "$DEPLOY_SLOT would share the production folder $prod_base; give production a folder of its own"
+    refuse_foreign_slot
 
     # The first deploy of a slot clones what production runs.
     if [ -z "$REPO_URL" ]; then
@@ -615,11 +616,28 @@ history_clone() {
         && git -C "$2" symbolic-ref HEAD refs/heads/deploy-pr
 }
 
+# Slots sit beside the production folder, so two projects with sibling production folders would
+# share them. OWNER in a slot folder names the project it belongs to.
+refuse_foreign_slot() {
+    local owner
+
+    owner="$(cat "$DEPLOY_BASE/OWNER" 2>/dev/null || true)"
+    [ -z "$owner" ] || [ "$owner" = "${PROJECT%@*}" ] \
+        || fail "$DEPLOY_BASE belongs to $owner, not ${PROJECT%@*}: slots sit beside the production folder" \
+            "give $owner and ${PROJECT%@*} each a parent folder of its own, like .../${PROJECT%@*}/www"
+}
+
 resolve_base() {
     [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/<project>.env"
 
     mkdir -p "$DEPLOY_BASE"
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
+
+    # A slot made before OWNER existed gets it here too.
+    if [ -n "$DEPLOY_SLOT" ] && [ ! -f "$DEPLOY_BASE/OWNER" ]; then
+        printf '%s\n' "${PROJECT%@*}" 2>/dev/null > "$DEPLOY_BASE/OWNER" \
+            || warn "could not write $DEPLOY_BASE/OWNER"
+    fi
 }
 
 # A real folder at current (a web panel makes one for a new document root) would get the release
@@ -3945,6 +3963,44 @@ switch_running() {
     esac
 }
 
+# The parent folder of production folder $1, with links resolved when it exists.
+parent_folder() {
+    local parent
+
+    parent="$(dirname "${1%/}")"
+    (cd "$parent" 2>/dev/null && pwd -P) || printf '%s\n' "$parent"
+}
+
+# Reports other projects that share the slot folders: their production folder has the same parent
+# and they have slots too, or a slot folder's OWNER names them.
+check_slot_owners() {
+    local parent other base i owner clash=" "
+
+    parent="$(parent_folder "$DEPLOY_BASE")"
+
+    for other in $(list_projects); do
+        [ "$other" != "$PROJECT" ] || continue
+        # shellcheck source=/dev/null
+        base="$(unset DEPLOY_BASE STAGING_SERVERS && . "$PROJECTS_DIR/$other.env" > /dev/null 2>&1 \
+            && [[ "${STAGING_SERVERS:-0}" =~ ^[0-9]+$ ]] && [ $((10#$STAGING_SERVERS)) -gt 0 ] \
+            && printf '%s' "${DEPLOY_BASE:-}")" || continue
+        [ -z "$base" ] || [ "$(parent_folder "$base")" != "$parent" ] || clash+="$other "
+    done
+
+    for ((i = 1; i <= STAGING_SERVERS; i++)); do
+        owner="$(cat "$parent/s$i/OWNER" 2>/dev/null || true)"
+        case "$clash" in
+            *" $owner "*) ;;
+            *) [ -z "$owner" ] || [ "$owner" = "$PROJECT" ] || clash+="$owner " ;;
+        esac
+    done
+
+    clash="${clash# }"
+    clash="${clash% }"
+    [ -n "$clash" ] || return 0
+    check_bad "slots: shared with ${clash// /, } in $parent; give each project a parent folder of its own"
+}
+
 # A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
 # anything is wrong.
 check() {
@@ -4021,6 +4077,8 @@ check() {
     else
         check_ok "disk: $DISK_TEXT"
     fi
+
+    [ "$STAGING_SERVERS" -eq 0 ] || [ -n "$DEPLOY_SLOT" ] || [ -z "$PROJECT" ] || check_slot_owners
 
     [ ! -f "$DEPLOY_BASE/$FREEZE_FILE" ] || check_ok "frozen $(frozen_text)"
     ! is_down || check_ok "down for maintenance $(marker_text "$DOWN_FILE")"

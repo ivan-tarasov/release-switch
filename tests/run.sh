@@ -2249,6 +2249,42 @@ serves "$prod" || fail "production does not serve $prod"
 [ "$(cat "$BASE/current/slot")" = " 127.0.0.1" ] || fail "production steps do not see an empty DEPLOY_SLOT and its host"
 check "slots lists s1 and a free s2; bad slots and values are refused; production is unchanged"
 
+step "A slot folder belongs to one project"
+[ "$(cat "$SLOT/OWNER")" = fixture ] || fail "the first slot deploy did not mark the slot folder"
+# An old slot, made before the mark, keeps working and gets it on its next deploy.
+rm "$SLOT/OWNER"
+deploy fixture@s1 > /dev/null || fail "a slot without a mark did not deploy"
+[ "$(cat "$SLOT/OWNER")" = fixture ] || fail "a slot without a mark did not get one"
+# A second project whose production folder is a sibling of fixture's gets the same slot folders.
+mkdir "$WORK/second"
+printf 'DEPLOY_BASE="%s"\nREPO_URL="file://%s"\nSTAGING_SERVERS=2\n' "$WORK/second" "$REPO" > "$WORK/projects/second.env"
+slot_files() {
+    find "$SLOT" -exec ls -ld {} + | sed -E 's/^([^ ]+ +){5}//'
+}
+before="$(slot_files)"
+for args in "" "--branch feature/x" "rollback --yes" "down" "up" "log" "prune --yes" "status" \
+    "copy-from second --yes" "free"; do
+    # shellcheck disable=SC2086 # Split on purpose.
+    if deploy second@s1 $args > /dev/null 2> "$WORK/owner.err"; then
+        fail "second@s1 ${args:-deploy} used fixture's slot"
+    fi
+    grep -q "$SLOT belongs to fixture, not second" "$WORK/owner.err" \
+        || fail "second@s1 ${args:-deploy} does not name both projects: $(cat "$WORK/owner.err")"
+done
+if deploy second stage feature/x > /dev/null 2> "$WORK/owner.err"; then
+    fail "second stage used fixture's slot"
+fi
+grep -q "belongs to fixture, not second" "$WORK/owner.err" || fail "second stage does not name both projects"
+grep -q "give fixture and second each a parent folder of its own" "$WORK/owner.err" || fail "no hint for a shared slot"
+[ "$(slot_files)" = "$before" ] || fail "a refused slot command changed the slot folder"
+if deploy second check > "$WORK/owner.log" 2>&1; then
+    fail "check passed with shared slot folders"
+fi
+grep -q "^FAIL  second: slots: shared with fixture in $WORK; give each project a parent folder of its own$" "$WORK/owner.log" \
+    || fail "check does not report the shared slots: $(cat "$WORK/owner.log")"
+rm -rf "$WORK/projects/second.env" "$WORK/second"
+check "slots get an owner mark, old slots get it on the next deploy, another project's slot commands are refused, check reports the clash"
+
 step "A current folder that is not a link is refused"
 # Like a web panel making the document root of a new subdomain.
 mkdir -p "$WORK/s2/current/public"

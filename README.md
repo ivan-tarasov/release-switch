@@ -24,15 +24,17 @@ Once the server can read the project's repo (see [Setup on a server](#setup-on-a
    cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
    ```
 
-3. Move the existing checkout in, then deploy:
+3. Move the existing checkout in, check the setup, then deploy:
 
    ```bash
    deploy <project> init <checkout> --dry-run
    deploy <project> init <checkout>
+   deploy <project> check --setup
    deploy <project>
    ```
 
    A project with no checkout yet skips `init`; create its `SHARED` paths in `<base>/shared/` first.
+   `check --setup` finds setup mistakes before the first deploy does (see `check --setup` below).
 
 Then `deploy <project> status` shows the live release, and a bare `deploy` on a terminal opens a menu
 of every project (see [Project menu](#project-menu)). To deploy from cron and get mail only on
@@ -213,6 +215,16 @@ Commands:
                     only problems. While a deploy or rollback runs, it skips the site and
                     health() (they may lag the switch for a moment) and says so
   check --all       The same for every project, production only
+  check --setup     Check a setup before the first deploy; needs no base folder and no live
+                    release. One line each: the repo answers and has DEPLOY_BRANCH (`git
+                    ls-remote`, no clone); deploy.conf on that branch has a build() step and no
+                    names of the engine (only that file is fetched); each SHARED path is in
+                    shared/; PHP_BIN and COMPOSER_BIN run; CHECK_URL answers (any HTTP status
+                    counts, as the site may fail before its first release); and one test
+                    alert, marked as a test (status `test`), goes to NOTIFY_URL or NOTIFY_CMD.
+                    It goes on after a problem and exits with 1 on any. It writes nothing but
+                    its temp folder: no base folder, lock or alert state. Also on a slot
+                    (`<project>@sN check --setup`), which sends no alert
   log [count]       The last deploys and rollbacks, with results, times and the commits each
                     deploy shipped (20 by default)
   path [--base]     Print the full path of the live release, and nothing else, to copy or use
@@ -555,9 +567,10 @@ NOTIFY_CMD='printf "%s\n" "$NOTIFY_TEXT" | mail -s "deploy alert" you@example.co
 ```
 
 `NOTIFY_URL` gets JSON like this. `status` is `ok`, `failed`, `rolled back` (a rollback, or a deploy
-whose check failed and switched back) or `problem` (a failed `check`). `commits` lists up to 20
-commits the deploy ships, newest first, with full shas, and is empty when unknown. `check` alerts
-only fill `project`, `event`, `status`, `release` (the live one) and `duration`.
+whose check failed and switched back), `problem` (a failed `check`) or `test` (the test alert of
+`check --setup`). `commits` lists up to 20 commits the deploy ships, newest first, with full shas,
+and is empty when unknown. `check` alerts only fill `project`, `event`, `status`, `release` (the
+live one) and `duration`.
 
 ```json
 {

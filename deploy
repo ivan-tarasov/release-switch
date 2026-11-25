@@ -3963,8 +3963,6 @@ switch_running() {
     esac
 }
 
-# A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
-# anything is wrong.
 # The parent folder of production folder $1, with links resolved when it exists.
 parent_folder() {
     local parent
@@ -4003,6 +4001,8 @@ check_slot_owners() {
     check_bad "slots: shared with ${clash// /, } in $parent; give each project a parent folder of its own"
 }
 
+# A health check. Changes nothing, apart from remembering the last alert. Exits with 1 if
+# anything is wrong.
 check() {
     local live dir broken minutes running=0
     CHECK_FAILED=0

@@ -2216,11 +2216,6 @@ option_value() {
     [ -n "$2" ] && [ "$2" = "${2#-}" ] || fail "$1"
 }
 
-# Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
-# --force builds even when that commit is already live; --no-wait does not wait for a release tag.
-# On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
-# does the same for the head of that pull request. A free slot deploys DEPLOY_BRANCH and stays free.
-# --ref and --pr never wait for a release tag.
 # Writes the branch a --branch or --pr run asked for ($1: a name or pr/<N>) to the slot's BRANCH.
 # Called only once that branch's release is live: a failed run leaves the slot on its old branch.
 follow_branch() {
@@ -2234,6 +2229,11 @@ follow_branch() {
     fi
 }
 
+# Options: --ref <tag, branch or sha> deploys that instead of the newest commit of DEPLOY_BRANCH;
+# --force builds even when that commit is already live; --no-wait does not wait for a release tag.
+# On a staging slot, --branch <name> sets the branch the slot follows and deploys it; --pr <number>
+# does the same for the head of that pull request. A free slot deploys DEPLOY_BRANCH and stays free.
+# --ref and --pr never wait for a release tag.
 deploy() {
     local force=0 ref="" no_wait=0 branch="" pr="" follows=""
     local ref_usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"

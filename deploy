@@ -2,15 +2,8 @@
 #
 # Zero-downtime deploys with release folders. Runs on the server. See README.md.
 #
-#   deploy [project[@sN]] [deploy [--ref <ref>] [--branch <name>] [--pr <number>] [--force] [--no-wait] [--yes]
-#                     | freeze [reason] | down [reason] [--yes] | up | cache [--yes]
-#                     | prune [--keep <n>] [--dry-run] [--yes]
-#                     | unfreeze | status | diff [--ref <ref>] | check [--setup] | log [count] | path [--base]
-#                     | rollback [name] [--yes] [--dry-run]
-#                     | init <checkout> [--dry-run] | slots [update] | stage <branch> | stage --pr <number>
-#                     | free | copy-from <project> [--yes] [path ...] | help [command]]
-#   deploy self-update | self [--no-wait | log [count]] | --version
-#   deploy [project] <command> --help
+#   deploy help                All commands, options and settings
+#   deploy help <command>      One command, its usage line and examples
 
 set -euo pipefail
 
@@ -1053,7 +1046,7 @@ shipped_list() {
 show_log() {
     local count="${1:-20}" file="$DEPLOY_BASE/deploy.log"
 
-    [[ "$count" =~ ^[0-9]+$ ]] || fail "usage: deploy [project] log [count]"
+    [[ "$count" =~ ^[0-9]+$ ]] || usage_fail log
 
     if [ ! -f "$file" ]; then
         printf 'No deploys logged yet in %s\n' "$file"
@@ -1094,7 +1087,7 @@ show_path() {
 
     case "${1:-}" in
         "" | --base) ;;
-        *) fail "unknown project or option: $1 (usage: deploy path [project] [--base])" ;;
+        *) fail "unknown project or option: $1 (usage: $(usage_line path))" ;;
     esac
 
     [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/<project>.env"
@@ -1984,7 +1977,6 @@ prune_label() {
 # --keep <n> keeps n releases instead of KEEP_RELEASES. A dry run takes no lock.
 prune_releases() {
     local keep="$KEEP_RELEASES" dry_run=0 names name live kb total=0 count=0 lines=()
-    local usage="usage: deploy [project] prune [--keep <n>] [--dry-run] [--yes]"
     local keep_hint="--keep takes a whole number, 2 or more: the live release and one to roll back to"
 
     while [ $# -gt 0 ]; do
@@ -1993,23 +1985,23 @@ prune_releases() {
             --dry-run) dry_run=1 ;;
             --keep=*)
                 keep="${1#--keep=}"
-                option_value "$usage" "$keep"
+                option_value prune "$keep"
                 ;;
             --keep)
-                option_value "$usage" "${2:-}"
+                option_value prune "${2:-}"
                 keep="$2"
                 shift
                 ;;
-            *) fail "$usage" ;;
+            *) usage_fail prune ;;
         esac
         shift
     done
 
     case "$keep" in
-        '' | *[!0-9]*) fail "$usage" "$keep_hint" ;;
+        '' | *[!0-9]*) usage_fail prune "" "$keep_hint" ;;
     esac
     keep=$((10#$keep))
-    [ "$keep" -ge 2 ] || fail "$usage" "$keep_hint"
+    [ "$keep" -ge 2 ] || usage_fail prune "" "$keep_hint"
 
     resolve_base
     names="$(unfinished_builds; prune_list "$keep")"
@@ -2227,7 +2219,7 @@ clear_cache() {
     for arg in "$@"; do
         case "$arg" in
             --yes | -y) YES=1 ;;
-            *) fail "usage: deploy [project] cache [--yes]" ;;
+            *) usage_fail cache ;;
         esac
     done
 
@@ -2286,10 +2278,10 @@ unfreeze() {
     fi
 }
 
-# Fails with usage $1 when option value $2 is empty or starts with a dash: a forgotten value
-# must not take the next option as the value.
+# Fails with the usage of command $1 (its form with $3 in it, if set) when option value $2 is empty
+# or starts with a dash: a forgotten value must not take the next option as the value.
 option_value() {
-    [ -n "$2" ] && [ "$2" = "${2#-}" ] || fail "$1"
+    [ -n "$2" ] && [ "$2" = "${2#-}" ] || usage_fail "$1" "${3:-}"
 }
 
 # Writes the branch a --branch or --pr run asked for ($1: a name or pr/<N>) to the slot's BRANCH.
@@ -2312,8 +2304,6 @@ follow_branch() {
 # --ref and --pr never wait for a release tag.
 deploy() {
     local force=0 ref="" no_wait=0 branch="" pr="" follows=""
-    local ref_usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]"
-    local branch_usage="usage: deploy <project>@sN --branch <name>" pr_usage="usage: deploy <project>@sN --pr <number>"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -2322,28 +2312,28 @@ deploy() {
             --yes | -y) YES=1 ;;
             --ref=*)
                 ref="${1#--ref=}"
-                option_value "$ref_usage" "$ref"
+                option_value deploy "$ref"
                 ;;
             --ref)
-                option_value "$ref_usage" "${2:-}"
+                option_value deploy "${2:-}"
                 ref="$2"
                 shift
                 ;;
             --branch=*)
                 branch="${1#--branch=}"
-                option_value "$branch_usage" "$branch"
+                option_value deploy "$branch" --branch
                 ;;
             --branch)
-                option_value "$branch_usage" "${2:-}"
+                option_value deploy "${2:-}" --branch
                 branch="$2"
                 shift
                 ;;
             --pr=*)
                 pr="${1#--pr=}"
-                option_value "$pr_usage" "$pr"
+                option_value deploy "$pr" --pr
                 ;;
             --pr)
-                option_value "$pr_usage" "${2:-}"
+                option_value deploy "${2:-}" --pr
                 pr="$2"
                 shift
                 ;;
@@ -2639,15 +2629,14 @@ show_rollback_plan() {
 
 rollback() {
     local name="" arg live target note sha dry_run=0
-    local usage="usage: deploy [project] rollback [name] [--yes] [--dry-run]"
 
     for arg in "$@"; do
         case "$arg" in
             --yes | -y) YES=1 ;;
             --dry-run) dry_run=1 ;;
-            -*) fail "$usage" ;;
+            -*) usage_fail rollback ;;
             *)
-                [ -z "$name" ] || fail "$usage"
+                [ -z "$name" ] || usage_fail rollback
                 name="$arg"
                 ;;
         esac
@@ -2758,21 +2747,20 @@ show_pending() {
 # The files the next deploy would change: the live commit against the tip of DEPLOY_BRANCH, or
 # against --ref. Only reads: no lock and no log line.
 show_diff() {
-    local usage="usage: deploy [project] diff [--ref <tag, branch or sha>]"
     local ref="" live repo live_sha tip target="" label tmp files
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --ref=*)
                 ref="${1#--ref=}"
-                option_value "$usage" "$ref"
+                option_value diff "$ref"
                 ;;
             --ref)
-                option_value "$usage" "${2:-}"
+                option_value diff "${2:-}"
                 ref="$2"
                 shift
                 ;;
-            *) fail "$usage" ;;
+            *) usage_fail diff ;;
         esac
         shift
     done
@@ -4497,24 +4485,24 @@ show_slots() {
 # Deploys a branch (or --pr <N>) to the slot that already follows it, else to the first free slot,
 # else to the first slot whose branch is gone from the repo. Then prints the slot's URL last.
 stage() {
-    local branch="" pr="" want i slot="" following="" free="" gone="" usage="usage: deploy <project> stage <branch> | --pr <number>"
+    local branch="" pr="" want i slot="" following="" free="" gone=""
 
     require_slots stage
 
     case "${1:-}" in
         --pr)
-            option_value "$usage" "${2:-}"
+            option_value stage "${2:-}"
             pr="$2"
             shift
             ;;
         --pr=*)
             pr="${1#--pr=}"
-            option_value "$usage" "$pr"
+            option_value stage "$pr"
             ;;
-        -*) fail "$usage" ;;
+        -*) usage_fail stage ;;
         *) branch="${1:-}" ;;
     esac
-    [ $# -le 1 ] && [ -n "$branch$pr" ] || fail "$usage"
+    [ $# -le 1 ] && [ -n "$branch$pr" ] || usage_fail stage
     [ -z "$pr" ] || [[ "$pr" =~ ^[1-9][0-9]*$ ]] || fail "--pr takes a pull request number, not '$pr'"
     want="${branch:-pr/$pr}"
     read_slot_branches
@@ -4649,12 +4637,11 @@ is_env_path() {
 # first on a terminal, unless --yes. Each path is copied to a temp name and renamed into place.
 copy_from() {
     local source="" yes=0 arg conf conf_label shared_text path wanted=() paths=() from to old size
-    local usage="usage: deploy <project>@sN copy-from <project> [--yes] [path ...]"
 
     for arg in "$@"; do
         case "$arg" in
             --yes | -y) yes=1 ;;
-            -*) fail "$usage" ;;
+            -*) usage_fail copy-from ;;
             *)
                 if [ -z "$source" ]; then
                     source="$arg"
@@ -4665,7 +4652,7 @@ copy_from() {
         esac
     done
 
-    [ -n "$source" ] || fail "$usage"
+    [ -n "$source" ] || usage_fail copy-from
     case "$source" in
         *@*) fail "copy-from copies from production only, not from a slot: deploy $PROJECT copy-from ${PROJECT%@*}" ;;
     esac
@@ -4902,7 +4889,7 @@ move_to_shared() {
 init() {
     local checkout="${1:-}" dry_run=0 path
 
-    [ -n "$checkout" ] || fail "usage: deploy [project] init <checkout> [--dry-run]"
+    [ -n "$checkout" ] || usage_fail init
     [ -d "$checkout" ] || fail "$checkout is not a folder"
     checkout="$(cd "$checkout" && pwd -P)"
 
@@ -5039,7 +5026,7 @@ self_update_notes() {
 self_log() {
     local count="${1:-10}" tz="${DISPLAY_TZ:-}" first upstream="" new
 
-    [[ "$count" =~ ^[0-9]+$ ]] || fail "usage: deploy self log [count]"
+    [[ "$count" =~ ^[0-9]+$ ]] || usage_fail self log
     git -C "$ENGINE_DIR" rev-parse --git-dir > /dev/null 2>&1 || fail "$ENGINE_DIR is not a git checkout"
 
     # Times in the first project's DISPLAY_TZ, like the project logs.
@@ -5064,8 +5051,6 @@ self_log() {
         --date='format-local:%Y-%m-%d %H:%M %Z' HEAD
 }
 
-# The help block of command $1, as the full usage shows it: its forms on the left, what they do on
-# the right.
 # The only project with staging slots. Fails when none or several have them.
 only_staging_project() {
     local name count found=()
@@ -5088,7 +5073,7 @@ only_staging_project() {
 
 # Turns `staging [project[@sN]] [command] [args]` into the old form, in STAGING_ARGS.
 staging_args() {
-    local target sub branch="" pr="" flags=() usage
+    local target sub branch="" pr="" flags=()
 
     if [ $# -gt 0 ] && is_project "$1"; then
         target="$1"
@@ -5117,22 +5102,20 @@ staging_args() {
                 return
             fi
 
-            usage="usage: deploy staging $target checkout <branch> | --pr <number>"
-
             while [ $# -gt 0 ]; do
                 case "$1" in
                     --pr)
-                        option_value "$usage" "${2:-}"
+                        option_value "staging checkout" "${2:-}" @sN
                         pr="$2"
                         shift
                         ;;
                     --pr=*)
                         pr="${1#--pr=}"
-                        option_value "$usage" "$pr"
+                        option_value "staging checkout" "$pr" @sN
                         ;;
                     -*) flags+=("$1") ;;
                     *)
-                        [ -z "$branch" ] || fail "$usage"
+                        [ -z "$branch" ] || usage_fail "staging checkout" @sN
                         branch="$1"
                         ;;
                 esac
@@ -5140,7 +5123,7 @@ staging_args() {
             done
 
             if [ -z "$branch$pr" ] || { [ -n "$branch" ] && [ -n "$pr" ]; }; then
-                fail "$usage"
+                usage_fail "staging checkout" @sN
             fi
 
             if [ -n "$pr" ]; then
@@ -5169,6 +5152,8 @@ staging_args() {
     esac
 }
 
+# The help block of command $1, as the full usage shows it: its forms on the left, what they do on
+# the right.
 command_help() {
     local name
 
@@ -5201,7 +5186,8 @@ EOF
         down)
             cat <<EOF
   down [reason] [--yes]      Run the down() step of the live release, like a maintenance page.
-                             Deploys and check skip the site check until up. Asks first on a
+                             Until up, deploys and rollbacks skip the site check, and check skips
+                             health() and takes a 503 from the site as ok. Asks first on a
                              terminal; --yes skips that
 EOF
             ;;
@@ -5476,12 +5462,19 @@ command_examples() {
     esac
 }
 
-# The help of one command: its usage line, its block of the full usage, and examples.
+# The help of one command: its usage line, its block of the full usage, and examples. With $2, the
+# usage line shows the first form with $2 in it.
 command_usage() {
     local block form prefix="[project] "
     block="$(command_help "$1")"
-    # The first form of the block, without its text.
-    form="$(printf '%s\n' "$block" | sed -E '1!d; s/^ +//; s/ {2,}.*$//')"
+    # The first form of the block (or the first with $2 in it), without its text.
+    form="$(printf '%s\n' "$block" | awk -v want="${2:-}" '
+        !found && /^  [^ ]/ && (want == "" || index($0, want)) {
+            found = 1
+            sub(/^ +/, "")
+            sub(/  .*$/, "")
+            print
+        }')"
 
     case "$1" in
         self | help | version | staging*) prefix="" ;;
@@ -5490,6 +5483,21 @@ command_usage() {
 
     printf 'Usage: deploy %s%s\n\n%s\n\nExamples:\n' "$prefix" "$form" "$block"
     command_examples "$1" | sed 's/^/  /'
+}
+
+# The usage line of command $1 as `deploy help $1` shows it, without "Usage: ". $2 as in
+# command_usage.
+usage_line() {
+    local line
+    line="$(command_usage "$1" "${2:-}")"
+    line="${line%%$'\n'*}"
+    printf '%s' "${line#Usage: }"
+}
+
+# Fails with "usage: " and the usage line of command $1. $2 as in command_usage; $3 is a hint, as
+# in fail.
+usage_fail() {
+    fail "usage: $(usage_line "$1" "${2:-}")" "${3:-}"
 }
 
 is_command() {

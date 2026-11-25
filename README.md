@@ -135,24 +135,39 @@ Staging (see [Staging](#staging)):
   staging <project> checkout <branch> | --pr <number>
                                     Deploy to the slot on that branch, else a free one, else
                                     one whose branch is gone; print its URL
-  staging <project>@sN checkout <branch> | --pr <number>
+  staging <project>@sN checkout <branch> | --pr <number> [--force] [--yes]
                                     Make this slot follow it and deploy it
-  staging <project>@sN update       Deploy the newest commit of the slot's branch
+  staging <project>@sN update [--force] [--no-wait] [--yes]
+                                    Deploy the newest commit of the slot's branch
   staging <project> update          Redeploy every slot with new commits (for cron)
   staging <project>@sN free         Forget the slot's branch, deploy DEPLOY_BRANCH
   staging <project>@sN copy-from <project> [--yes] [path ...]
-                                    Copy production's SHARED data into the slot
-  staging <project>@sN status | diff | log | path | rollback | down | up | cache | prune
+                                    Copy production's SHARED data into the slot; without a
+                                    terminal --yes is required
+  staging <project>@sN status       The slot's status
+  staging <project>@sN diff [--ref <ref>]
+                                    The files the slot's next deploy would change
+  staging <project>@sN log [count]  The slot's last deploys and rollbacks
+  staging <project>@sN path [--base]
+                                    The full path of the slot's live release
+  staging <project>@sN rollback [name] [--yes] [--dry-run]
+                                    Roll the slot back
+  staging <project>@sN down [reason] [--yes]
+                                    Run the down() step of the slot's live release
+  staging <project>@sN up           Run the slot's up() step and check its site again
+  staging <project>@sN cache        Run the slot's cache() step, without asking
+  staging <project>@sN prune [--keep <n>] [--dry-run]
+                                    Remove the slot's failed and old releases, without asking
 
 Commands:
-  deploy [--force]  Build the newest commit and switch to it (the default). Stops if that commit
+  deploy [--ref <ref>] [--force] [--no-wait] [--yes] [--quiet]
+                    Build the newest commit and switch to it (the default). Stops if that commit
                     is already live, failed its site check or was rolled back, unless --force.
-                    On a terminal --force asks first
-  deploy --no-wait  Do not wait for the release tag of a new commit
-  deploy --ref <ref>
-                    Deploy a tag, branch or commit instead, e.g. --ref v2026.11.18, to go back
-                    to a release that rollback no longer keeps. Stops if it is already live.
-                    Never waits for a release tag
+                    On a terminal --force asks first; --yes skips that. --no-wait does not wait
+                    for the release tag of a new commit. --ref deploys a tag, branch or commit
+                    instead, e.g. --ref v2026.11.18, to go back to a release that rollback no
+                    longer keeps; it stops if that is already live and never waits for a
+                    release tag. --quiet prints only warnings and errors
   deploy --branch <name>
                     On a staging slot only: follow that branch from now on and deploy it
                     (see [Staging](#staging))
@@ -162,15 +177,16 @@ Commands:
   freeze [reason]   Refuse deploys and rollbacks until unfreeze, e.g. during a hosting move.
                     status, status --all and check show it
   unfreeze          Allow deploys again
-  down [reason]     Run the down() step of the live release, e.g. to show a maintenance page
+  down [reason] [--yes]
+                    Run the down() step of the live release, e.g. to show a maintenance page
                     during a risky data change. Until up, deploys and rollbacks do not check
                     the site, check accepts a 503 and skips health(), and status shows it.
-                    On a terminal it asks first
+                    On a terminal it asks first; --yes skips that
   up                Run the up() step, then check that the site serves the live release again
-  cache             Run the cache() step of the live release, then reset OPcache when
+  cache [--yes]     Run the cache() step of the live release, then reset OPcache when
                     OPCACHE_RESET_DIR is set. Fails with a hint when neither is set. Takes the
                     lock and writes a log line. On a terminal in production it asks first;
-                    on a staging slot it does not ask
+                    --yes skips that. On a staging slot it does not ask
   prune [--keep <n>] [--dry-run] [--yes]
                     Free disk space without a deploy: remove `.failed-*` folders, builds a
                     killed deploy left, and releases past `KEEP_RELEASES` (or past the newest
@@ -198,24 +214,28 @@ Commands:
                     pending. Changes nothing: no lock, no log line. A renamed file shows as a
                     D and an A, and there are no line counts: both would need the file contents,
                     and diff fetches only the file names
-  rollback [name]   Go to the previous good release, and mark the live one bad, so the next
+  rollback [name] [--yes] [--dry-run]
+                    Go to the previous good release, and mark the live one bad, so the next
                     rollback skips it, and so a plain deploy skips its commit until a new
                     commit or --force. With a name, go to that release instead (a full name, or
                     any part only one release has: date and time, sha, tag); this marks nothing,
-                    and clears the mark if that release had one. On a terminal it asks first.
+                    and clears the mark if that release had one. On a terminal it asks first;
+                    --yes skips that.
                     `--dry-run` (before or after the name) shows the live release, the target,
                     the bad mark it would set or clear, the migration warning and whether
                     `after_rollback()` would run, then stops. It changes nothing: no switch,
                     mark, lock, log line or alert. Errors are the same as for a real rollback
-  check             A quick health check that changes nothing: the live release, its shared
+  check [--quiet]   A quick health check that changes nothing: the live release, its shared
                     links, the project's health() step, the site, the disk (size of the base
                     folder past DISK_LIMIT, or free space under MIN_FREE_MB), and a lock held
                     for 30 min or more, or with no owner for 60 s. Problems go to stderr
                     and it exits with 1, so `deploy <project> check --quiet` in cron mails
                     only problems. While a deploy or rollback runs, it skips the site and
                     health() (they may lag the switch for a moment) and says so
-  check --all       The same for every project, production only
-  check --setup     Check a setup before the first deploy; needs no base folder and no live
+  check --all [--quiet]
+                    The same for every project, production only
+  check --setup [--quiet]
+                    Check a setup before the first deploy; needs no base folder and no live
                     release. One line each: the repo answers and has DEPLOY_BRANCH (`git
                     ls-remote`, no clone); deploy.conf on that branch has a build() step and no
                     names of the engine (only that file is fetched); each SHARED path is in
@@ -232,29 +252,35 @@ Commands:
                     Fails if there is no live release. Also works as `deploy path <project>`
   slots             One line per staging slot: its branch (PR #N, or `free (develop)`; `(gone)`
                     when the repo no longer has it), live commit, deploy time and URL
-  slots update      Redeploy each slot whose branch has new commits, free slots from
+  slots update [--quiet]
+                    Redeploy each slot whose branch has new commits, free slots from
                     `DEPLOY_BRANCH`; skip a slot whose branch is gone. For cron (see
                     [Staging](#staging))
-  stage <branch>    Deploy a branch to the slot that already follows it, else to the first free
-                    slot, else to one whose branch is gone, and print its URL last. Also
-                    `stage --pr <number>`
+  stage <branch>, stage --pr <number>
+                    Deploy a branch or pull request to the slot that already follows it, else
+                    to the first free slot, else to one whose branch is gone, and print its URL
+                    last
   free              On a staging slot only: forget its branch, so `stage` can use the slot,
                     and deploy the newest `DEPLOY_BRANCH` to it
   copy-from <project> [--yes] [path ...]
                     On a staging slot only: copy production's `SHARED` data into the slot,
                     every path but `.env`, or only the named ones. Asks first; `--yes` skips
-                    the question (see [Staging](#staging))
-  init <checkout>   Move the SHARED paths of an existing checkout into shared/
-                    and link them back (add --dry-run to only show what it would do)
-  self-update       Update the engine itself: a fast-forward git pull of its own folder. Shows
+                    the question, and without a terminal it is required (see [Staging](#staging))
+  init <checkout> [--dry-run]
+                    Move the SHARED paths of an existing checkout into shared/
+                    and link them back (--dry-run only shows what it would do)
+  self-update, self [--no-wait] [--quiet]
+                    Update the engine itself: a fast-forward git pull of its own folder. Shows
                     the old and new versions, then each new release with its GitHub notes (or
                     its commits when `gh` cannot read them) and the commits not released yet.
                     Stops if the folder has local changes. Short form: self. A new commit waits
                     for its release tag like a deploy, with `RELEASE_WAIT` from the environment
-                    (no project file here, default 90); `--no-wait` skips it
+                    (no project file here, default 90); `--no-wait` skips it. --quiet prints
+                    only warnings and errors
   self log [count]  The engine's last commits (10 by default) with times, and any not pulled yet
   help [command]    Commands and the settings in effect, or the help of one command
-  --version         The engine's version: its newest release tag, like v2026.11.1, with "+N" when
+  --version, version
+                    The engine's version: its newest release tag, like v2026.11.1, with "+N" when
                     it is N commits past it
 ```
 
@@ -283,7 +309,7 @@ reason and that the site will show its maintenance page, `cache` the live releas
 the commit it builds. `cache` and `prune` on a staging slot do not ask. Only
 `y` goes on; `n` or an empty answer does nothing and exits with 0. `--yes` (or `-y`) skips the
 question. Without a terminal (cron, pipes, `slots update`, `stage`) they never ask and run as before.
-`copy-from` asks the same way.
+`copy-from` asks the same way, but without a terminal it needs `--yes` and stops without it.
 
 ### Quiet runs for cron
 
@@ -1130,19 +1156,24 @@ a user who can, for example with the hosting panel's file manager.
 `tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) from a throwaway bare repo into a temp
 folder and serves it with `php -S`. It covers:
 
-- init, deploys, rollbacks (also `--dry-run` and past a new migration) and bad releases; `backup()`,
-  `failed()`, `after_rollback()`, `health()` and `cache()`; copies from the live release;
-  `CLEAR_PATHS` and `SHARED`, and that shared files survive.
-- `status`, `diff`, `path`, `check`, the log and `self log`, the rails and `--version`, help and
-  typo hints, `--quiet`, `--ref`, the wait for a release tag, the no-release marker and
+- Mistakes in a project file, `init` (also `--dry-run`) and `check --setup` before the first deploy.
+- Deploys, rollbacks (also to a named release, `rollback --dry-run` and past a new migration) and
+  bad releases; `backup()`, `failed()`, `after_rollback()`, `health()` and `cache()`; the kept
+  output of a failed step; copies from the live release; `CLEAR_PATHS` and `SHARED`, and that
+  shared files survive.
+- `status` and `status --all`, `diff`, `path`, `check`, the log and `self log`, the rails and
+  `--version`, `--quiet`, `--ref`, the wait for a release tag, the no-release marker and
   `--no-wait`, skipped commits, `freeze`, `down` and `up`.
+- Help: the full help, per-command help (`<command> --help`, `-h`, `help <command>`), typo hints,
+  usage errors that show the help's usage line, and that the [Commands](#commands) block lists
+  every command and every form of `deploy help <command>`.
 - The lock: stale locks, locks with no owner and runs racing for a stale lock.
 - Alerts (also for 2000 commits), a token in `REPO_URL`, `PHP_RELOAD_CMD`, the web OPcache reset,
   `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, signals and a closed output
   pipe, a missing live folder and a read-only base folder.
 - Prune and `KEEP_RELEASES`, and the `prune` command.
 - Staging slots: branches, pull requests, folders, URLs, `slots`, `stage`, `free`, `slots update`
-  and `copy-from`.
+  and `copy-from`, and the `staging` group in its own form and the old one.
 - On a terminal: the questions before risky commands and the project menu.
 - `deploy self`: update, log and the wait for its tag.
 

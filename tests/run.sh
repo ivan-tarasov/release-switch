@@ -171,6 +171,31 @@ fi
 grep -q "Unknown command: xyzzy.$" "$WORK/typo.log" || fail "a far typo got a hint"
 check "<command> --help, -h and help <command> show one command, with or without a project; a typo gets one hint and exits 2"
 
+step "The README command block has every command and every form of the help"
+# The block after "## Commands", and its left column: each form, without its text.
+awk '/^## Commands$/ { on = 1 } on && /^```/ { fences++; next } on && fences == 1' "$ROOT/README.md" \
+    | sed -E 's/^ +//; s/ {2,}.*$//' > "$WORK/readme-forms"
+[ -s "$WORK/readme-forms" ] || fail "no command block in README.md"
+eval "$(sed -n '/^COMMANDS=(/,/)$/p; /^STAGING_COMMANDS=(/p' "$ROOT/deploy")"
+[ "${#COMMANDS[@]}" -gt 10 ] && [ "${#STAGING_COMMANDS[@]}" -gt 5 ] || fail "no command lists in deploy"
+topics=("${COMMANDS[@]}")
+for name in "${STAGING_COMMANDS[@]}"; do
+    topics+=("staging $name")
+done
+for topic in "${topics[@]}"; do
+    case "$topic" in
+        "staging "*) grep -q "^staging <project>[^ ]* ${topic#staging } *" "$WORK/readme-forms" ;;
+        *) grep -qE "(^|[ ,])$topic([ ,]|$)" "$WORK/readme-forms" ;;
+    esac || fail "README.md command block misses: $topic"
+    # shellcheck disable=SC2086 # A staging topic is two words.
+    deploy help $topic | awk '/^Examples:$/ { done = 1 } !done && /^  [^ ]/' | sed -E 's/^ +//; s/ {2,}.*$//' > "$WORK/help-forms"
+    [ -s "$WORK/help-forms" ] || fail "deploy help $topic shows no form"
+    while IFS= read -r form; do
+        grep -qxF -- "$form" "$WORK/readme-forms" || fail "README.md command block misses: $form"
+    done < "$WORK/help-forms"
+done
+check "README.md lists every command, staging subcommand and form of deploy help <command>"
+
 step "Mistakes in a project file"
 # Each case: a line for the project file, then the text the error must hold.
 while IFS='|' read -r line message; do
@@ -625,7 +650,7 @@ grep -q "no tag, branch or commit no-such-ref in the repo" "$WORK/diff.err" || f
 if deploy fixture diff --ref > /dev/null 2> "$WORK/diff.err"; then
     fail "diff --ref without a value succeeded"
 fi
-grep -q "usage: deploy \[project\] diff \[--ref <tag, branch or sha>\]" "$WORK/diff.err" || fail "no usage for diff --ref without a value"
+grep -qF "usage: deploy [project] diff [--ref <ref>]" "$WORK/diff.err" || fail "no usage for diff --ref without a value"
 # No live release yet: an error and a hint.
 printf 'DEPLOY_BASE="%s"\nREPO_URL="file://%s"\n' "$WORK/nolive" "$REPO" > "$WORK/projects/nolive.env"
 if deploy nolive diff > /dev/null 2> "$WORK/diff.err"; then
@@ -961,10 +986,10 @@ log_lines="$(wc -l < "$BASE/deploy.log")"
 # Each line: the usage to expect, then the arguments after the project.
 while read -r kind args; do
     case "$kind" in
-        ref) usage="usage: deploy [project] [--ref <tag, branch or sha>] [--force] [--no-wait] [--yes]" ;;
-        branch) usage="usage: deploy <project>@sN --branch <name>" ;;
-        pr) usage="usage: deploy <project>@sN --pr <number>" ;;
-        diff) usage="usage: deploy [project] diff [--ref <tag, branch or sha>]" ;;
+        ref) usage="usage: deploy [project] deploy [--ref <ref>] [--force] [--no-wait] [--yes] [--quiet]" ;;
+        branch) usage="usage: deploy [project] deploy --branch <name>" ;;
+        pr) usage="usage: deploy [project] deploy --pr <number>" ;;
+        diff) usage="usage: deploy [project] diff [--ref <ref>]" ;;
     esac
     # shellcheck disable=SC2086 # The arguments are split on purpose.
     if deploy fixture $args > /dev/null 2> "$WORK/option.err"; then
@@ -2520,7 +2545,7 @@ for args in "fixture stage --pr" "fixture stage --pr --force" "fixture stage --p
     if deploy $args > /dev/null 2> "$WORK/stage.err"; then
         fail "deploy $args succeeded"
     fi
-    grep -q " | --pr <number>" "$WORK/stage.err" || fail "no usage for deploy $args"
+    grep -qE "^deploy: usage: deploy .*--pr <number>" "$WORK/stage.err" || fail "no usage for deploy $args"
 done
 
 develop_sha="$(git -C "$REPO" rev-parse develop)"
@@ -3448,6 +3473,14 @@ STAGING_URL='' CHECK_URL=localhost/app \
     usage_error "CHECK_URL must start with http:// or https://, not 'localhost/app'" deploy fixture@s1 status
 usage_error "usage: deploy [project] log [count]" deploy fixture log ten
 usage_error "usage: deploy self log [count]" deploy self log ten
+for name in rollback cache init path; do
+    usage="$(deploy help "$name" | sed -n '1s/^Usage: //p')"
+    case "$name" in
+        path) usage_error "unknown project or option: --bogus (usage: $usage)" deploy fixture path --bogus ;;
+        init) usage_error "usage: $usage" deploy fixture init ;;
+        *) usage_error "usage: $usage" deploy fixture "$name" --bogus ;;
+    esac
+done
 usage_error "unknown command: deploy self bogus (try: deploy self, deploy self log [count])" deploy self bogus
 usage_error "unknown command: deploy fixture slots bogus (try: slots, slots update)" deploy fixture slots bogus
 usage_error "self works on the engine, not on a project: deploy self" deploy fixture self

@@ -171,6 +171,30 @@ fi
 grep -q "Unknown command: xyzzy.$" "$WORK/typo.log" || fail "a far typo got a hint"
 check "<command> --help, -h and help <command> show one command, with or without a project; a typo gets one hint and exits 2"
 
+step "The README command block has every command and every form of the help"
+# The block after "## Commands", and its left column: each form, without its text.
+awk '/^## Commands$/ { on = 1 } on && /^```/ { fences++; next } on && fences == 1' "$ROOT/README.md" \
+    | sed -E 's/^ +//; s/ {2,}.*$//' > "$WORK/readme-forms"
+[ -s "$WORK/readme-forms" ] || fail "no command block in README.md"
+eval "$(sed -n '/^COMMANDS=(/,/)$/p; /^STAGING_COMMANDS=(/p' "$ROOT/deploy")"
+[ "${#COMMANDS[@]}" -gt 10 ] && [ "${#STAGING_COMMANDS[@]}" -gt 5 ] || fail "no command lists in deploy"
+topics=("${COMMANDS[@]}")
+for name in "${STAGING_COMMANDS[@]}"; do
+    topics+=("staging $name")
+done
+for topic in "${topics[@]}"; do
+    case "$topic" in
+        "staging "*) grep -q "^staging <project>[^ ]* ${topic#staging } *" "$WORK/readme-forms" ;;
+        *) grep -qE "(^|[ ,])$topic([ ,]|$)" "$WORK/readme-forms" ;;
+    esac || fail "README.md command block misses: $topic"
+    # shellcheck disable=SC2086 # A staging topic is two words.
+    deploy help $topic | awk '/^Examples:$/ { done = 1 } !done && /^  [^ ]/' | sed -E 's/^ +//; s/ {2,}.*$//' > "$WORK/help-forms"
+    [ -s "$WORK/help-forms" ] || fail "deploy help $topic shows no form"
+    while IFS= read -r form; do
+        grep -qxF -- "$form" "$WORK/readme-forms" || fail "README.md command block misses: $form"
+    done < "$WORK/help-forms"
+done
+check "README.md lists every command, staging subcommand and form of deploy help <command>"
 
 step "Mistakes in a project file"
 # Each case: a line for the project file, then the text the error must hold.

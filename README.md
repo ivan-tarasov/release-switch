@@ -498,6 +498,22 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `STAGING_SERVERS` | `0` | Number of staging slots, `s1` to `sN` (see [Staging](#staging)) |
 | `STAGING_URL` | `sN.` before the host of `CHECK_URL` | Slot URL, with `{slot}` for `s1`, `s2`, ... e.g. `https://user:pass@{slot}.example.com/` |
 
+Every command checks the project file first and stops on a mistake, naming the setting, the bad
+value and what is allowed:
+
+- An upper-case name that is not a setting fails, with the closest setting:
+  `CHECK_ULR in projects/example.env is not a setting; did you mean CHECK_URL?`. Env vars the shell
+  already had, like `PATH` or `HOME`, are not checked.
+- `CHECK_VERSION` must be `1` or `0`, and `NOTIFY_ON` `problems` or `all`.
+- `CHECK_URL` and `NOTIFY_URL` must start with `http://` or `https://`.
+- `DISPLAY_TZ` must be a time zone PHP knows, like `America/Toronto` or `UTC`.
+
+To keep a helper variable of your own in a project file, give its name a lower-case letter, like
+`my_host="example.com"` and then `CHECK_URL="https://$my_host/"`. Such names are never checked.
+
+`status`, `log`, `diff`, `path` and `check` only read: they never make the base folder, so a typo
+in `DEPLOY_BASE` shows up in `check` as "no base folder". A deploy makes the folder.
+
 ### OPcache
 
 PHP's OPcache can keep serving old code after `current` is switched. There are two ways to clear it.

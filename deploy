@@ -419,9 +419,37 @@ is_project() {
     [ -f "$PROJECTS_DIR/${1%%@*}.env" ]
 }
 
+# The setting closest to name $1, by edit distance, or nothing when none is close.
+closest_setting() {
+    printf '%s\n' "${SETTINGS[@]}" | awk -v word="$1" '
+        {
+            n = length($0)
+            m = length(word)
+            for (j = 0; j <= n; j++) prev[j] = j
+            for (i = 1; i <= m; i++) {
+                cur[0] = i
+                for (j = 1; j <= n; j++) {
+                    d = prev[j - 1] + (substr(word, i, 1) != substr($0, j, 1))
+                    if (prev[j] + 1 < d) d = prev[j] + 1
+                    if (cur[j - 1] + 1 < d) d = cur[j - 1] + 1
+                    cur[j] = d
+                }
+                for (j = 0; j <= n; j++) prev[j] = cur[j]
+            }
+            if (best == "" || prev[n] < dist) {
+                best = $0
+                dist = prev[n]
+            }
+        }
+        END { if (best != "" && dist <= 3 && dist * 2 < length(best)) print best }
+    '
+}
+
 # Reads projects/<name>.env for <name> or <name>@sN, keeping any setting already set as an env var.
+# Fails on an upper-case name the file sets that is not a setting, like CHECK_ULR: names with a
+# lower-case letter are free for the file's own use.
 load_project() {
-    local name kept_names=() kept_values=() i
+    local name kept_names=() kept_values=() i known closest
     PROJECT="${1%%@*}"
     DEPLOY_SLOT=""
 
@@ -440,8 +468,18 @@ load_project() {
         fi
     done
 
+    known=" ${SETTINGS[*]} $(compgen -v | tr '\n' ' ')"
+
     # shellcheck source=/dev/null
     . "$PROJECTS_DIR/$PROJECT.env"
+
+    for name in $(compgen -v); do
+        case "$known" in *" $name "*) continue ;; esac
+        case "$name" in *[[:lower:]]* | BASH_*) continue ;; esac
+        closest="$(closest_setting "$name")"
+        fail "$name in $PROJECTS_DIR/$PROJECT.env is not a setting${closest:+; did you mean $closest?}" \
+            "fix the name; for a name of your own, use a lower-case letter, like my_host (see README, Settings)"
+    done
 
     # The +-forms keep empty arrays safe under `set -u` in bash 3.2 (macOS).
     for i in ${kept_names[@]+"${!kept_names[@]}"}; do
@@ -450,6 +488,7 @@ load_project() {
 }
 
 apply_defaults() {
+    local tz_status
     DEPLOY_BASE="${DEPLOY_BASE:-}"
     CHECK_URL="${CHECK_URL:-}"
     REPO_URL="${REPO_URL:-}"
@@ -501,6 +540,34 @@ apply_defaults() {
         //) ;;
         //* | */../*) fail "MIGRATIONS_DIR must stay inside the release: no leading / and no .., not '$MIGRATIONS_DIR'" ;;
     esac
+    case "$CHECK_VERSION" in
+        0 | 1) ;;
+        *) fail "CHECK_VERSION must be 1 (wait for the new version) or 0 (only wait for a 200), not '$CHECK_VERSION'" ;;
+    esac
+    case "$NOTIFY_ON" in
+        problems | all) ;;
+        *) fail "NOTIFY_ON must be problems or all, not '$NOTIFY_ON'" ;;
+    esac
+    case "$CHECK_URL" in
+        '' | http://?* | https://?*) ;;
+        *) fail "CHECK_URL must start with http:// or https://, not '$CHECK_URL'" ;;
+    esac
+    # Only the host part: the path of a webhook URL is often its secret.
+    case "$NOTIFY_URL" in
+        '' | http://?* | https://?*) ;;
+        */*) fail "NOTIFY_URL must start with http:// or https://, not '${NOTIFY_URL%%/*}/...'" ;;
+        *) fail "NOTIFY_URL must start with http:// or https://, not '$NOTIFY_URL'" ;;
+    esac
+    # PHP shows the times, so PHP judges the zone. Exit 3 is a bad zone; other failures (no PHP)
+    # are left to the commands that need PHP.
+    if [ -n "$DISPLAY_TZ" ]; then
+        tz_status=0
+        # shellcheck disable=SC2016 # PHP code, not shell.
+        "$PHP_BIN" -r 'try { new DateTimeZone($argv[1]); } catch (Exception $e) { exit(3); }' "$DISPLAY_TZ" \
+            > /dev/null 2>&1 || tz_status=$?
+        [ "$tz_status" != 3 ] \
+            || fail "DISPLAY_TZ must be a time zone like America/Toronto or UTC, not '$DISPLAY_TZ'"
+    fi
     [ -z "$DISK_LIMIT" ] || [[ "$DISK_LIMIT" =~ ^[0-9]+([.][0-9]+)?[KkMmGgTt]?$ ]] \
         || fail "DISK_LIMIT must be a size like 2G, 500M or 1.5G, or plain bytes, not '$DISK_LIMIT'"
     # 10# drops leading zeros, which bash math reads as octal.
@@ -548,10 +615,6 @@ apply_slot() {
     if [ -n "$STAGING_URL" ]; then
         CHECK_URL="${STAGING_URL//"$pattern"/$DEPLOY_SLOT}"
     elif [ -n "$CHECK_URL" ]; then
-        case "$CHECK_URL" in
-            *://*) ;;
-            *) fail "cannot find the host in CHECK_URL; set STAGING_URL with {slot}" ;;
-        esac
         CHECK_URL="$(printf '%s' "$CHECK_URL" | sed -E "s|^([^:/]+://([^/@]*@)?)|\\1$DEPLOY_SLOT.|")"
     fi
 
@@ -627,8 +690,16 @@ refuse_foreign_slot() {
             "give $owner and ${PROJECT%@*} each a parent folder of its own, like .../${PROJECT%@*}/www"
 }
 
+# DEPLOY_BASE as a real path. Makes the folder and a slot's OWNER mark, unless $1 is --read: a
+# command that only reads leaves a missing folder missing, so check still reports it.
 resolve_base() {
     [ -n "$DEPLOY_BASE" ] || fail "set DEPLOY_BASE in $PROJECTS_DIR/<project>.env"
+
+    if [ "${1:-}" = --read ]; then
+        [ ! -d "$DEPLOY_BASE" ] || DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
+
+        return 0
+    fi
 
     mkdir -p "$DEPLOY_BASE"
     DEPLOY_BASE="$(cd "$DEPLOY_BASE" && pwd -P)"
@@ -2701,7 +2772,7 @@ show_diff() {
         shift
     done
 
-    resolve_base
+    resolve_base --read
     live="$(current_release)"
     [ -n "$live" ] || fail "no live release to compare with" "deploy ${PROJECT:+$PROJECT }status"
 
@@ -2768,7 +2839,7 @@ show_diff() {
 }
 
 status() {
-    resolve_base
+    resolve_base --read
 
     local live previous release failed
     live="$(current_release)"
@@ -5651,7 +5722,7 @@ main() {
             report "${PROJECT:+$PROJECT · }check" check
             ;;
         log)
-            resolve_base
+            resolve_base --read
             report "${PROJECT:+$PROJECT · }log" show_log "${2:-}"
             ;;
         path)

@@ -171,6 +171,43 @@ fi
 grep -q "Unknown command: xyzzy.$" "$WORK/typo.log" || fail "a far typo got a hint"
 check "<command> --help, -h and help <command> show one command, with or without a project; a typo gets one hint and exits 2"
 
+step "Mistakes in a project file"
+# Each case: a line for the project file, then the text the error must hold.
+while IFS='|' read -r line message; do
+    printf 'DEPLOY_BASE="%s"\n%s\n' "$WORK/typo" "$line" > "$WORK/projects/typo.env"
+    if deploy typo status > /dev/null 2> "$WORK/typo.err"; then
+        fail "a project file with $line loaded"
+    fi
+    grep -qF "$message" "$WORK/typo.err" || fail "no message for $line: $(cat "$WORK/typo.err")"
+done <<EOF
+NOTIFY_URL=hooks.example.com/secret|NOTIFY_URL must start with http:// or https://, not 'hooks.example.com/...'
+NOTIFY_ON=always|NOTIFY_ON must be problems or all, not 'always'
+CHECK_VERSION=false|CHECK_VERSION must be 1 (wait for the new version) or 0 (only wait for a 200), not 'false'
+DISPLAY_TZ=Mars/Base|DISPLAY_TZ must be a time zone like America/Toronto or UTC, not 'Mars/Base'
+CHECK_URL=example.com/|CHECK_URL must start with http:// or https://, not 'example.com/'
+KEEP_RELEASE=3|KEEP_RELEASE in $WORK/projects/typo.env is not a setting; did you mean KEEP_RELEASES?
+CHECK_ULR="http://127.0.0.1/"|CHECK_ULR in $WORK/projects/typo.env is not a setting; did you mean CHECK_URL?
+EOF
+grep -q "^Try: .*use a lower-case letter, like my_host" "$WORK/typo.err" || fail "no hint on how to keep a helper name"
+# A helper name with a lower-case letter, and env vars the shell already had, are fine.
+# shellcheck disable=SC2016 # Expanded by the engine when it reads the file.
+printf 'my_host=127.0.0.1\nDEPLOY_BASE="%s"\nCHECK_URL="http://$my_host/"\nPATH="$PATH"\n' "$WORK/typo/www" \
+    > "$WORK/projects/typo.env"
+deploy typo help > /dev/null || fail "a helper name in a project file failed"
+# Commands that only read leave a missing base folder missing, in production and in a slot.
+printf 'STAGING_SERVERS=1\n' >> "$WORK/projects/typo.env"
+deploy typo status > /dev/null || fail "status failed with no base folder"
+deploy typo log > /dev/null || fail "log failed with no base folder"
+! deploy typo diff > /dev/null 2>&1 || fail "diff passed with no base folder"
+! deploy typo path > /dev/null 2>&1 || fail "path passed with no base folder"
+deploy typo@s1 status > /dev/null || fail "a slot's status failed with no slot folder"
+! deploy typo@s1 check > /dev/null 2>&1 || fail "a slot's check passed with no slot folder"
+! deploy typo check > /dev/null 2> "$WORK/typo.err" || fail "check passed with no base folder"
+grep -q "no base folder: $WORK/typo/www$" "$WORK/typo.err" || fail "check does not report the missing base folder"
+[ ! -e "$WORK/typo" ] || fail "a command that only reads made the base folder"
+rm -f "$WORK/projects/typo.env" "$WORK"/projects/.typo*
+check "each mistake in a project file fails and names the setting; a helper name is fine; read-only commands make no base folder"
+
 step "init refuses a checkout with no deploy.conf"
 mkdir "$WORK/no-conf"
 if deploy fixture init "$WORK/no-conf" 2> "$WORK/no-conf.log"; then
@@ -3315,7 +3352,7 @@ usage_error "no good release older than 20260101-000000-abc1234" deploy lone rol
 MIN_FREE_MB=lots usage_error "MIN_FREE_MB must be a whole number of megabytes, not 'lots'" deploy fixture status
 usage_error "'sx' is not a staging slot; use fixture@s1, fixture@s2, ..." deploy fixture@sx status
 STAGING_URL='' CHECK_URL=localhost/app \
-    usage_error "cannot find the host in CHECK_URL; set STAGING_URL with {slot}" deploy fixture@s1 status
+    usage_error "CHECK_URL must start with http:// or https://, not 'localhost/app'" deploy fixture@s1 status
 usage_error "usage: deploy [project] log [count]" deploy fixture log ten
 usage_error "usage: deploy self log [count]" deploy self log ten
 usage_error "unknown command: deploy self bogus (try: deploy self, deploy self log [count])" deploy self bogus

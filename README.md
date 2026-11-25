@@ -1031,6 +1031,10 @@ every merge, use `deploy example --no-wait`, set `RELEASE_WAIT=0`, or add the no
 (see [How it works](#how-it-works)). `no release tag on abc1234; deploying without one` means the
 commit is over 5 minutes old, so the deploy did not wait.
 
+Three merges close together can leave the middle one without a tag. The release workflow runs one
+at a time and keeps only one run waiting, so the third merge's run cancels the second one's. Rerun
+the cancelled run in GitHub Actions: it tags the merge with the next free version.
+
 ### Nothing to clear
 
 ```

@@ -3912,39 +3912,73 @@ menu_has() {
     return 1
 }
 
-# Adds action $1 with label $2 to the action list.
-menu_add() {
-    A_KEY+=("$1")
-    A_LABEL+=("$2")
+# The group, letter key and hint of action $1 into A_G, A_L and A_H. Risky actions change the live
+# site or data. Letters skip j, k, b, q, r and i, which the lists use already.
+menu_action_meta() {
+    A_G=Look A_H=""
+
+    case "$1" in
+        deploy | redeploy) A_G=Ship A_L=d ;;
+        checkout) A_G=Ship A_L=t A_H="a branch or #N into this slot" ;;
+        diff) A_G=Ship A_L=f A_H="files the next deploy changes" ;;
+        status) A_L=s A_H="releases and pending commits" ;;
+        check) A_L=c A_H="a health check that changes nothing" ;;
+        log) A_L=l A_H="the last deploys and rollbacks" ;;
+        selflog) A_L=l A_H="the engine's last commits" ;;
+        cd) A_L=g A_H="opens a shell in the live release" ;;
+        cache) A_G=Upkeep A_L=x A_H="clears the live release's cache" ;;
+        prune) A_G=Upkeep A_L=p A_H="removes old releases" ;;
+        freeze) A_G=Upkeep A_L=z A_H="refuses deploys and rollbacks" ;;
+        unfreeze) A_G=Upkeep A_L=u A_H="allows deploys again" ;;
+        up) A_G=Upkeep A_L=w A_H="takes the maintenance page off" ;;
+        rollback) A_G=Risky A_L=o A_H="back to the previous good release" ;;
+        down) A_G=Risky A_L=w A_H="the site shows the maintenance page" ;;
+        copy) A_G=Risky A_L=y A_H="production's data over this slot's" ;;
+        free) A_G=Risky A_L=e A_H="back to the production branch" ;;
+        back) A_G="" A_L=b ;;
+    esac
 }
 
-# The action list of row $1 into A_KEY and A_LABEL. Only actions that fit the row's state show.
+# Adds action $1 with label $2 to the action list. $3, when given, is its state: in brackets after the
+# label in the numbered list, and its hint in the arrow-key list.
+menu_add() {
+    local A_G A_L A_H
+    menu_action_meta "$1"
+    A_KEY+=("$1")
+    A_LABEL+=("$2${3:+ ($3)}")
+    A_NAME+=("$2")
+    A_GROUP+=("$A_G")
+    A_LETTER+=("$A_L")
+    A_HINT+=("${3:-$A_H}")
+}
+
+# The action list of row $1 into A_KEY, A_LABEL, A_NAME, A_GROUP, A_LETTER and A_HINT. Only actions
+# that fit the row's state show.
 menu_actions() {
     local i="$1" target="${M_TARGET[$1]}" pending="${M_PENDING[$1]}" version="${M_VERSION[$1]}"
     [ "$pending" != - ] || pending=""
     [ "$version" != - ] || version=""
-    A_KEY=()
-    A_LABEL=()
+    A_KEY=() A_LABEL=() A_NAME=() A_GROUP=() A_LETTER=() A_HINT=()
 
     case "$target" in
         self)
             if [ "${M_SHIP[$i]}" -eq 1 ]; then
-                menu_add deploy "Update engine ($version)"
+                menu_add deploy "Update engine" "$version"
             else
-                menu_add deploy "Update engine${pending:+ ($pending)}"
+                menu_add deploy "Update engine" "$pending"
             fi
             menu_add selflog "Log"
             ;;
         *)
             if [ "$pending" = "up to date" ]; then
                 case "$target" in
-                    *@*) menu_add redeploy "Update (up to date)" ;;
-                    *) menu_add redeploy "Redeploy (up to date)" ;;
+                    *@*) menu_add redeploy Update "up to date" ;;
+                    *) menu_add redeploy Redeploy "up to date" ;;
                 esac
             else
                 case "$target" in
-                    *@*) menu_add deploy "Update${pending:+ ($pending)}" ;;
-                    *) menu_add deploy "Deploy new release${pending:+ ($pending)}" ;;
+                    *@*) menu_add deploy Update "$pending" ;;
+                    *) menu_add deploy "Deploy new release" "$pending" ;;
                 esac
             fi
 
@@ -4032,7 +4066,42 @@ menu_title() {
     fi
 }
 
-# Line $1 of the action list, with ❯ in front when $2 is 1. Back has no number and is dim.
+# The display order of the action list into A_ORDER: the actions of Ship, Look, Upkeep and Risky,
+# then Back.
+menu_action_order() {
+    local group i
+    A_ORDER=()
+
+    for group in Ship Look Upkeep Risky ""; do
+        for i in "${!A_KEY[@]}"; do
+            [ "${A_GROUP[$i]}" != "$group" ] || A_ORDER+=("$i")
+        done
+    done
+}
+
+# Line $1 of the arrow-key action list, with ❯ in front when $2 is 1: its letter, its label padded to
+# $3 columns, and its dim hint cut to fit M_WIDTH. Risky actions are red, Back is dim.
+menu_action_row() {
+    local mark="  " color="" hint="${A_HINT[$1]}"
+    [ "${A_GROUP[$1]}" != Risky ] || color="$C_RED"
+    [ "${A_KEY[$1]}" != back ] || color="$C_DIM"
+    if [ "${2:-0}" -eq 1 ]; then
+        mark="$C_GREEN❯$C_OFF "
+        color="$C_BOLD$color"
+    fi
+    [ "$hint" != - ] || hint=""
+
+    printf '%s%s%s  ' "$mark" "$color" "${A_LETTER[$1]}"
+    if [ -z "$hint" ]; then
+        printf '%s%s' "${A_NAME[$1]}" "$C_OFF"
+
+        return
+    fi
+    printf '%s%s  %s%s%s' "$(pad "${A_NAME[$1]}" "$3")" "$C_OFF" "$C_DIM" \
+        "$(cut_text "$hint" $((${M_WIDTH:-76} - $3 - 7)))" "$C_OFF"
+}
+
+# Line $1 of the numbered action list, with ❯ in front when $2 is 1. Back has no number and is dim.
 menu_action_line() {
     local mark="  " color="" num="$(($1 + 1))" last="$((${#A_KEY[@]} - 1))"
 
@@ -4049,33 +4118,59 @@ menu_action_line() {
     printf '%s%s%*s  %s%s' "$mark" "$color" "${#last}" "$num" "${A_LABEL[$1]}" "$C_OFF"
 }
 
-# Prints the action list on the rail, with ❯ at $1, then the key bar.
+# Prints the action list on the rail in group order, with ❯ at action $1: a dim label over each group
+# (a red one over Risky), a blank line over Back, then the key bar. Draws from the cursor line and
+# assumes nothing above it. Sets A_ORDER, and A_LINES to the lines above the blank line over the key
+# bar, for the redraw.
 menu_action_draw() {
-    local i prefix="  "
+    local i prefix="  " group="" width=4 label
     [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+    A_LINES=0
+    menu_action_order
 
-    for i in "${!A_KEY[@]}"; do
-        printf '\r\033[K%s%s\n' "$prefix" "$(menu_action_line "$i" $((i == $1)))"
+    for i in "${!A_NAME[@]}"; do
+        label="$(text_width "${A_NAME[$i]}")"
+        [ "$label" -le "$width" ] || width="$label"
     done
 
-    printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter run · b back · q quit%s\n' "${prefix%  }" \
-        "$prefix" "$C_DIM" $((${#A_KEY[@]} - 1)) "$C_OFF"
+    for i in "${A_ORDER[@]}"; do
+        if [ "${A_GROUP[$i]}" != "$group" ]; then
+            group="${A_GROUP[$i]}"
+            label="$C_DIM$group$C_OFF"
+            [ "$group" != Risky ] || label="$C_RED$group$C_OFF"
+            if [ -n "$group" ]; then
+                printf '\r\033[K%s%s\n' "$prefix" "$label"
+            else
+                printf '\r\033[K%s\n' "${prefix%  }"
+            fi
+            A_LINES=$((A_LINES + 1))
+        fi
+        printf '\r\033[K%s%s\n' "$prefix" "$(menu_action_row "$i" $((i == $1)) "$width")"
+        A_LINES=$((A_LINES + 1))
+    done
+
+    printf '\r\033[K%s\n\r\033[K%s%sletter or ↑↓ Enter · b back · q quit%s\n' "${prefix%  }" \
+        "$prefix" "$C_DIM" "$C_OFF"
 }
 
-# Lets the user pick an action like menu_keys, starting at A_CUR. Sets A_CUR, and A_DO to run, back
-# (b, ←, Esc) or quit (q).
+# Lets the user pick an action, starting at A_CUR: ↑↓ (j/k) move in display order, a number moves to
+# that action of the numbered list, Enter or the action's letter runs it. Sets A_CUR, and A_DO to run,
+# back (b, ←, Esc) or quit (q).
 menu_action_keys() {
-    local count="${#A_KEY[@]}"
+    local count="${#A_KEY[@]}" pos=0 i
     [ "$A_CUR" -lt "$count" ] || A_CUR=$((count - 1))
     menu_raw
     menu_action_draw "$A_CUR"
 
     while :; do
+        for i in "${!A_ORDER[@]}"; do
+            [ "${A_ORDER[$i]}" -ne "$A_CUR" ] || pos="$i"
+        done
         menu_key
 
         case "$M_KEY" in
-            up) [ "$A_CUR" -eq 0 ] || A_CUR=$((A_CUR - 1)) ;;
-            down) [ "$A_CUR" -eq $((count - 1)) ] || A_CUR=$((A_CUR + 1)) ;;
+            up) [ "$pos" -eq 0 ] || A_CUR="${A_ORDER[$((pos - 1))]}" ;;
+            down) [ "$pos" -eq $((count - 1)) ] || A_CUR="${A_ORDER[$((pos + 1))]}" ;;
             [1-9]) [ "$M_KEY" -ge "$count" ] || A_CUR=$((M_KEY - 1)) ;;
             enter)
                 A_DO=run
@@ -4089,9 +4184,20 @@ menu_action_keys() {
                 A_DO=quit
                 break
                 ;;
+            [a-z])
+                A_DO=""
+                for i in "${!A_KEY[@]}"; do
+                    [ "${A_LETTER[$i]}" != "$M_KEY" ] || { A_CUR="$i" A_DO=run; }
+                done
+                if [ -n "$A_DO" ]; then
+                    printf '\033[%sA' $((A_LINES + 2))
+                    menu_action_draw "$A_CUR"
+                    break
+                fi
+                ;;
         esac
 
-        printf '\033[%sA' $((count + 2))
+        printf '\033[%sA' $((A_LINES + 2))
         menu_action_draw "$A_CUR"
     done
 

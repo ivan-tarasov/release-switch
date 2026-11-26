@@ -526,7 +526,7 @@ Set in `projects/<project>.env` (plain `KEY=value` lines, read by bash) or as en
 | `PHP_RELOAD_CMD` | none | Run after each switch to reset OPcache, e.g. `touch ~/.lsphp_restart.txt` (see [OPcache](#opcache)). Stopped after 60 s with a warning |
 | `OPCACHE_RESET_DIR` | none | Web root inside a release, like `public`. Turns on the OPcache reset through the web after each switch (see [OPcache](#opcache)) |
 | `STEP_TIMEOUT` | `600` | Seconds a `deploy.conf` step (including `health()`, `down()`, `up()` and `cache()`) may run. A step that runs longer is stopped with all it started, and fails like any failed step. `0` for no limit |
-| `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On cPanel the account quota can differ from `df`, so set it yourself |
+| `DISK_LIMIT` | none | Largest size of the base folder, like `2G`, `500M`, `1.5G` or plain bytes. `check` fails when the folder is bigger; a deploy only warns, as prune may bring it back down. On shared hosting the account quota can differ from `df`, so set it yourself |
 | `MIN_FREE_MB` | `500` | Free space in MB the disk of the base folder must have. `check` fails under it, and `deploy` and `copy-from` stop before they write anything. `0` to turn it off |
 | `MIGRATIONS_DIR` | `database/migrations` | Migrations folder inside a release. Before a rollback switches, it warns when the target lacks files the live release has there, as data is not reverted. A hint only: it never stops the rollback. Empty to turn it off |
 | `DISPLAY_TZ` | UTC | Time zone for deploy times in `status` and `log`, e.g. `America/Toronto`. `status` says "today at" and "yesterday at" for recent deploys. Release names stay in UTC |
@@ -644,7 +644,7 @@ stops with both names, and `check` on production reports the clash before any sl
 
 To set up a slot:
 
-1. In cPanel, add the subdomain `s1.example.com` with the document root
+1. In your hosting panel, add the subdomain `s1.example.com` with the document root
    `domains/example.com/s1/current/public`.
 2. Make the slot's shared files: every `SHARED` path of `deploy.conf` must exist in
    `$HOME/domains/example.com/s1/shared/`, as for a first production deploy. Production's `.env`

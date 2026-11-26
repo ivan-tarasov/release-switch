@@ -354,7 +354,7 @@ engine_version() {
     fi
 }
 
-# Opens the rails: "┌  release-switch v2026.11.1 · tarasov · deploy".
+# Opens the rails: "┌  release-switch v2026.11.1 · example · deploy".
 intro() {
     [ "$RAILS" -eq 1 ] || return 0
     printf '%s┌%s  %srelease-switch%s %s%s%s%s\n%s│%s\n' "$C_DIM" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_DIM" \
@@ -410,7 +410,7 @@ list_projects() {
     done
 }
 
-# True when $1 names a project file, with or without a slot: tarasov or tarasov@s1.
+# True when $1 names a project file, with or without a slot: example or example@s1.
 is_project() {
     [ -f "$PROJECTS_DIR/${1%%@*}.env" ]
 }
@@ -5653,7 +5653,7 @@ Usage: deploy [project] [command]
 
 Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
 The project can be left out when there is only one. A staging slot is named <project>@sN
-(tarasov@s1) and takes the same commands, with its own folder, URL and branch.
+(example@s1) and takes the same commands, with its own folder, URL and branch.
 
 Options:
   --quiet, -q                Print only warnings and errors, so cron mails only problems.

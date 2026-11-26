@@ -3686,7 +3686,9 @@ menu_raw() {
 }
 
 # Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR; i
-# shows or hides the detail block. Sets M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). The terminal stays without echo after it.
+# shows or hides the detail block. Sets M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). Unless
+# it quits, sets MENU_UP to the lines drawn with the title, so the next view draws in their place. The
+# terminal stays without echo after it.
 menu_keys() {
     menu_raw
     menu_draw "$M_CUR"
@@ -3717,6 +3719,7 @@ menu_keys() {
         menu_draw "$M_CUR"
     done
 
+    [ "$M_DO" = quit ] || MENU_UP=$((M_LINES + 3))
     printf '\033[?25h'
 }
 
@@ -4119,9 +4122,9 @@ menu_action_line() {
 }
 
 # Prints the action list on the rail in group order, with ❯ at action $1: a dim label over each group
-# (a red one over Risky), a blank line over Back, then the key bar. Draws from the cursor line and
-# assumes nothing above it. Sets A_ORDER, and A_LINES to the lines above the blank line over the key
-# bar, for the redraw.
+# (a red one over Risky), a blank line over Back, then the key bar, and clears what is left under it.
+# Draws from the cursor line and assumes nothing above it. Sets A_ORDER, and A_LINES to the lines above
+# the blank line over the key bar, for the redraw.
 menu_action_draw() {
     local i prefix="  " group="" width=4 label
     [ "$RAILS" -eq 0 ] || prefix="${C_DIM}│${C_OFF}  "
@@ -4149,7 +4152,7 @@ menu_action_draw() {
         A_LINES=$((A_LINES + 1))
     done
 
-    printf '\r\033[K%s\n\r\033[K%s%sletter or ↑↓ Enter · b back · q quit%s\n' "${prefix%  }" \
+    printf '\r\033[K%s\n\r\033[K%s%sletter or ↑↓ Enter · b back · q quit%s\n\033[J' "${prefix%  }" \
         "$prefix" "$C_DIM" "$C_OFF"
 }
 
@@ -4394,6 +4397,15 @@ menu_act() {
     esac
 }
 
+# Moves the cursor up MENU_UP lines, to the title of the list drawn last, and clears that line, so the
+# next view draws in its place. Does nothing when MENU_UP is 0: after output, and without cursor
+# control.
+menu_swap() {
+    [ "$MENU_UP" -gt 0 ] || return 0
+    printf '\033[%sA\r\033[K' "$MENU_UP"
+    MENU_UP=0
+}
+
 # The action list of menu line $1, until Back. Sets M_RAN to 1 when an action ran. A free slot leaf
 # has no list: it asks for a branch or a pull request for the first free slot.
 menu_open() {
@@ -4404,6 +4416,7 @@ menu_open() {
 
     case "$target" in
         *:free)
+            menu_swap
             menu_title "Check out into ${M_NAME[$i]%%,*} of ${target%:free}"
             menu_checkout "${target%:free}"
 
@@ -4413,11 +4426,19 @@ menu_open() {
 
     while :; do
         menu_actions "$i"
-        menu_title "$(menu_heading "$i")"
 
         case "${TERM:-dumb}" in
-            dumb | unknown) menu_action_numbers ;;
-            *) menu_action_keys ;;
+            dumb | unknown)
+                menu_title "$(menu_heading "$i")"
+                menu_action_numbers
+                ;;
+            *)
+                # One line, so MENU_UP counts it right.
+                menu_swap
+                menu_title "$(cut_text "$(menu_heading "$i")" "$M_WIDTH")"
+                menu_action_keys
+                MENU_UP=$((A_LINES + 3))
+                ;;
         esac
 
         case "$A_DO" in
@@ -4427,6 +4448,8 @@ menu_open() {
 
         key="${A_KEY[$A_CUR]}"
         [ "$key" != back ] || return 0
+        # Output goes under the list, and the next list starts under it.
+        MENU_UP=0
         menu_act "$key" "$i"
         [ "$M_LEAVE" -eq 0 ] || return 0
         [ "$M_RAN" -eq 0 ] || menu_refresh "$i"
@@ -4434,10 +4457,12 @@ menu_open() {
 }
 
 # A bare `deploy` on a terminal: the menu rows, a pick, its action list, and back to the rows until q.
+# On a terminal each view draws in the place of the one before, unless output came between them.
 project_menu() {
     local i last="" reload=1
     M_CUR=0
     M_INFO=""
+    MENU_UP=0
 
     intro ""
     case "${TERM:-dumb}" in
@@ -4446,6 +4471,7 @@ project_menu() {
     esac
 
     while :; do
+        menu_swap
         if [ "$reload" -eq 1 ]; then
             menu_read
             [ "$M_CUR" -lt "$M_PICKS" ] || M_CUR=$((M_PICKS - 1))

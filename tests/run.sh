@@ -3143,7 +3143,7 @@ if command -v script > /dev/null; then
     grep -qF "1  Redeploy (up to date)" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the action list after the deploy has old facts"; }
     [ "$(grep -c "r to refresh, q to quit" "$WORK/menu.log")" -eq 2 ] \
         || { cat "$WORK/menu.log"; fail "b did not go back to the project list"; }
-    grep -qE "1  fixture +v2026\.11\.20000 +up to date" "$WORK/menu.log" \
+    grep -qE "1 ✓ fixture +v2026\.11\.20000 +up to date" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the list after the deploy has old rows"; }
 
     # A failed deploy keeps the menu; a frozen project shows Unfreeze, and it unfreezes.
@@ -3181,13 +3181,14 @@ if command -v script > /dev/null; then
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
-    grep -E "^ +(❯ )?[0-9 ] " "$WORK/menu.plain" > "$WORK/menu.rows"
-    grep -qE "^ +❯ 1  fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
-    [[ "$(sed -n 2p "$WORK/menu.rows")" =~ ^\ +2\ \ ├\ s1\ +feature/x\  ]] \
+    grep -E "^ +(❯ )?[0-9 ] " "$WORK/menu.plain" | grep -vE "^ +(NAME|↳) " > "$WORK/menu.rows"
+    grep -qE "^ +NAME +VERSION +PENDING +SITE$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the menu has no column labels"; }
+    grep -qE "^ +❯ 1 ✓ fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
+    [[ "$(sed -n 2p "$WORK/menu.rows")" =~ ^\ +2\ ✓\ ├\ s1\ +feature/x\  ]] \
         || { cat "$WORK/menu.rows"; fail "s1 is not under fixture"; }
-    [[ "$(sed -n 3p "$WORK/menu.rows")" =~ ^\ +3\ \ └\ s2,\ s3\ +free\ *$ ]] \
+    [[ "$(sed -n 3p "$WORK/menu.rows")" =~ ^\ +3\ ○\ └\ s2,\ s3\ +free\ *$ ]] \
         || { cat "$WORK/menu.rows"; fail "the free s2 and s3 are not one numbered leaf"; }
-    [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +4\ \ release-switch\  ]] \
+    [[ "$(sed -n 4p "$WORK/menu.rows")" =~ ^\ +4\ (●|✓|✗)\ release-switch\  ]] \
         || { cat "$WORK/menu.rows"; fail "the engine is not number 4"; }
     [[ "$(sed -n 5p "$WORK/menu.rows")" =~ ^\ +Recheck\ projects$ ]] \
         || { cat "$WORK/menu.rows"; fail "Recheck projects is not above Quit"; }
@@ -3199,6 +3200,41 @@ if command -v script > /dev/null; then
     grep -q "↑↓/1-2 pick · Enter run · b back · q quit" "$WORK/menu.plain" \
         || { cat "$WORK/menu.plain"; fail "the engine list shows no key bar"; }
     grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
+
+    # At 80 columns a 20-character name, a long branch and two frozen rows fit without a wrap: the
+    # widest column is cut with …, each problem is on a line of its own under its row, the title
+    # counts them, and the symbols stay without color. One redraw (j) moves up exactly the lines drawn.
+    cp "$WORK/fixture.env" "$WORK/projects/example-long-name-20.env"
+    printf 'feature/a-very-long-branch-name-for-the-menu-width-test\n' > "$SLOT/BRANCH"
+    deploy fixture freeze "menu width" > /dev/null
+    on_terminal_expect "$WORK/menu.log" "Pick a project" jq \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed at 80 columns"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    wide=""
+    while IFS= read -r line; do
+        width="$(LC_ALL=C; plain="${line//[$'\x80'-$'\xbf']/}"; printf '%s' "${#plain}")"
+        [ "$width" -lt 80 ] || wide="$line"
+    done < "$WORK/menu.plain"
+    [ -z "$wide" ] || { cat "$WORK/menu.plain"; fail "a menu line is 80 columns or more at 80: $wide"; }
+    grep -qE "^│ +NAME +VERSION +PENDING +SITE$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the menu has no column labels at 80 columns"; }
+    grep -qE "✗ example-long-name-20 +v" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the 20-character name was cut"; }
+    grep -qE "├ s1 +feature/a-very-long-[a-z-]*… +" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the long branch was not cut with …"; }
+    [ "$(grep -A1 -E "✗ (example-long-name-20|fixture) " "$WORK/menu.plain" | grep -cE "^│ +↳ frozen")" -ge 4 ] \
+        || { cat "$WORK/menu.plain"; fail "the two frozen rows have no problem line under them"; }
+    ! grep -qE "[a-z0-9]  +frozen$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "a problem is at the end of its row"; }
+    grep -qE "◆  Pick a project +([0-9]+ to ship · )?[2-9] problems$" "$WORK/menu.plain" \
+        || { cat "$WORK/menu.plain"; fail "the title does not count the problems"; }
+    grep -qE "^│ +[0-9] ○ └ s2, s3 +free *$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the free leaf has no ○"; }
+    grep -qE "^│ +[0-9] ✓ " "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "no row has ✓"; }
+    ! LC_ALL=C grep -q $'\033\\[3[0-9]m' "$WORK/menu.log" || { cat -v "$WORK/menu.log"; fail "NO_COLOR menu has colors"; }
+    up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '1{s/[^0-9]//g;p;}')"
+    drawn="$(awk '/NAME +VERSION/ { on = 1 } on { n++ } on && /pick · Enter open/ { print n; exit }' "$WORK/menu.plain")"
+    [ -n "$up" ] && [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the redraw moves up $up lines, not the $drawn drawn"; }
+    deploy fixture unfreeze > /dev/null
+    rm "$WORK/projects/example-long-name-20.env"
+    printf 'feature/x\n' > "$SLOT/BRANCH"
 
     # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
     on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'1\n' "[y/N]" $'n\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'6\n' "Press Enter to go back" $'\n' \
@@ -3277,7 +3313,7 @@ EOF
     [ ! -e "$WORK/s1.branch" ] || mv "$WORK/s1.branch" "$SLOT/BRANCH"
     [ ! -e "$WORK/s2.branch" ] || mv "$WORK/s2.branch" "$SLOT2/BRANCH"
     mv "$WORK/fixture.env" "$WORK/projects/fixture.env"
-    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing, Recheck projects read the rows again and arrows never showed as text; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; stray keys before the cache question were dropped; slots hang under fixture with free ones in one numbered leaf; the engine list ran its log; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout; Go to current folder showed on production and a live slot only, its shell started in the live release and the list came back after any exit, and current gone at the pick failed"
+    check "the menu row shows up to date, frozen, untagged and tagged commits; a pipe still needs a project; the key bar shows, r read the rows again on the same row, q and the Quit row did nothing, Recheck projects read the rows again and arrows never showed as text; the production list deployed fixture and came back with fresh facts, also after a failed deploy, and Unfreeze showed and ran on a frozen project; stray keys before the cache question were dropped; slots hang under fixture with free ones in one numbered leaf, with column labels and status symbols; the engine list ran its log; at 80 columns a 20-character name, a long branch and two frozen rows fit without a wrap, with … cuts, problem lines under their rows, counts on the title, symbols without color and a redraw of the lines drawn; the slot list names the slot, its up-to-date Update asked before --force, and Status ran; the free leaf asked for a branch and ran staging checkout; Go to current folder showed on production and a live slot only, its shell started in the live release and the list came back after any exit, and current gone at the pick failed"
 else
     check "skipped: no script command to make a terminal"
 fi

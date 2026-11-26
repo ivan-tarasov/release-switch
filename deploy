@@ -3191,11 +3191,11 @@ menu_cleanup() {
     menu_restore
 }
 
-# How many columns $1 takes: bytes, with each → (3 bytes) as one.
+# How many columns $1 takes: one per character, as each one the menu prints is one column wide.
 text_width() {
     local LC_ALL=C
-    local plain="${1//→/}"
-    printf '%s' $((${#plain} + (${#1} - ${#plain}) / 3))
+    local plain="${1//[$'\x80'-$'\xbf']/}"
+    printf '%s' "${#plain}"
 }
 
 # $1 padded with spaces to $2 columns.
@@ -3203,51 +3203,205 @@ pad() {
     printf '%s%*s' "$1" $(($2 - $(text_width "$1"))) ''
 }
 
-# Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1. Production names are bold; slots
-# hang under their project on dim tree lines. The Recheck and Quit rows are dim.
+# $1 cut to $2 columns, with … as the last one when it does not fit.
+cut_text() {
+    local LC_ALL=C
+    local text="$1" plain="${1//[$'\x80'-$'\xbf']/}"
+
+    if [ "${#plain}" -le "$2" ]; then
+        printf '%s' "$text"
+
+        return
+    fi
+    [ "$2" -gt 0 ] || return 0
+
+    while [ "${#plain}" -ge "$2" ]; do
+        text="${text%?}"
+        plain="${text//[$'\x80'-$'\xbf']/}"
+    done
+
+    # A character cut in the middle goes whole.
+    while [[ "$text" == *[$'\x80'-$'\xbf'] ]]; do
+        text="${text%?}"
+    done
+    [[ "$text" != *[$'\xc0'-$'\xff'] ]] || text="${text%?}"
+    printf '%s…' "$text"
+}
+
+# The state of row $1 into M_STATE: problem, free, ship or ok, and empty for Recheck projects and Quit.
+menu_state() {
+    M_STATE=ok
+
+    case "${M_TARGET[$1]}" in
+        quit | recheck) M_STATE="" ;;
+        *:free) M_STATE=free ;;
+        *)
+            if [ -n "${M_PROBLEMS[$1]}" ] && [ "${M_PROBLEMS[$1]}" != - ]; then
+                M_STATE=problem
+            elif [ "${M_SHIP[$1]}" = 1 ]; then
+                M_STATE=ship
+            fi
+            ;;
+    esac
+}
+
+# The column widths of the rows: what the longest text needs, cut to the terminal width (tput cols,
+# 80 when unknown) so no row wraps. The widest of name, version and pending loses a column first.
+menu_widths() {
+    local i width cols="" site over
+    W_NAME=4 W_VERSION=7 W_PENDING=7 W_SITE=4
+    W_GUTTER=$((${#M_NUMBERED} + 5))
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        case "${M_TARGET[$i]}" in
+            quit | recheck) continue ;;
+        esac
+        width="$(text_width "${M_NAME[$i]}")"
+        [ -z "${M_TREE[$i]}" ] || width=$((width + 2))
+        [ "$width" -le "$W_NAME" ] || W_NAME="$width"
+        width="$(text_width "${M_VERSION[$i]#-}")"
+        [ "$width" -le "$W_VERSION" ] || W_VERSION="$width"
+        width="$(text_width "${M_PENDING[$i]#-}")"
+        [ "$width" -le "$W_PENDING" ] || W_PENDING="$width"
+        site="${M_SITE[$i]#-}"
+        width="$(text_width "${site#site }")"
+        [ "$width" -le "$W_SITE" ] || W_SITE="$width"
+    done
+
+    if [ -n "${TERM:-}" ] && command -v tput > /dev/null; then
+        # stderr stays on the terminal: tput reads the size from it when stdout is not one.
+        cols="$(tput cols)" || cols=""
+    fi
+    case "$cols" in
+        "" | *[!0-9]* | 0) cols=80 ;;
+    esac
+    # The rail and its two spaces in front, and the last column left free.
+    M_WIDTH=$((cols - 4))
+
+    over=$((W_GUTTER + W_NAME + W_VERSION + W_PENDING + W_SITE + 6 - M_WIDTH))
+    while [ "$over" -gt 0 ]; do
+        if [ "$W_VERSION" -ge "$W_NAME" ] && [ "$W_VERSION" -ge "$W_PENDING" ] && [ "$W_VERSION" -gt 4 ]; then
+            W_VERSION=$((W_VERSION - 1))
+        elif [ "$W_NAME" -ge "$W_PENDING" ] && [ "$W_NAME" -gt 4 ]; then
+            W_NAME=$((W_NAME - 1))
+        elif [ "$W_PENDING" -gt 4 ]; then
+            W_PENDING=$((W_PENDING - 1))
+        else
+            break
+        fi
+        over=$((over - 1))
+    done
+    W_ROW=$((W_GUTTER + W_NAME + W_VERSION + W_PENDING + W_SITE + 6))
+}
+
+# Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1, then its status symbol: ✗ a
+# problem, ○ free slots, ● something to ship, ✓ up to date. Production names are bold; slots hang
+# under their project on dim tree lines. The Recheck and Quit rows are dim.
 menu_line() {
-    local i="$1" mark="  " color="" name version pending site problems
+    local i="$1" mark="  " color="" name version pending site symbol
     name="${M_NAME[$i]}"
     version="${M_VERSION[$i]}"
     pending="${M_PENDING[$i]}"
     site="${M_SITE[$i]}"
-    problems="${M_PROBLEMS[$i]}"
     [ "$version" != - ] || version=""
     [ "$pending" != - ] || pending=""
     [ "$site" != - ] || site=""
-    [ "$problems" != - ] || problems=""
+    site="${site#site }"
 
     [ "${M_SHIP[$i]}" -eq 1 ] || color="$C_DIM"
     if [ "${2:-0}" -eq 1 ]; then
-        mark="$C_GREEN❯$C_OFF "
+        mark="${C_GREEN}❯${C_OFF} "
         color="$C_BOLD"
     fi
 
     if [ "${M_TARGET[$i]}" = quit ] || [ "${M_TARGET[$i]}" = recheck ]; then
-        printf '%s%s%s  %s%s' "$mark" "$C_DIM" "$(pad "" ${#M_NUMBERED})" "$name" "$C_OFF"
+        printf '%s%s%s   %s%s' "$mark" "$C_DIM" "$(pad "" ${#M_NUMBERED})" "$name" "$C_OFF"
 
         return
     fi
 
+    menu_state "$i"
+    case "$M_STATE" in
+        problem) symbol="${C_OFF}${C_RED}✗${C_OFF}" ;;
+        free) symbol="${C_OFF}${C_DIM}○${C_OFF}" ;;
+        ship) symbol="${C_OFF}${C_YELLOW}●${C_OFF}" ;;
+        *) symbol="${C_OFF}${C_GREEN}✓${C_OFF}" ;;
+    esac
+
     if [ -n "${M_TREE[$i]}" ]; then
-        name="$C_DIM${M_TREE[$i]}$C_OFF$color $(pad "$name" $((W_NAME - 2)))"
+        name="${C_DIM}${M_TREE[$i]}${C_OFF}$color $(pad "$(cut_text "$name" $((W_NAME - 2)))" $((W_NAME - 2)))"
     else
-        name="$C_BOLD$(pad "$name" "$W_NAME")$C_OFF$color"
+        name="$C_BOLD$(pad "$(cut_text "$name" "$W_NAME")" "$W_NAME")$C_OFF$color"
     fi
 
-    printf '%s%s%s  %s  %s  %s  %s%s%s%s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_NUMBERED})" \
-        "$name" "$(pad "$version" "$W_VERSION")" "$(pad "$pending" "$W_PENDING")" \
-        "$(pad "$site" "$W_SITE")" "$C_OFF" "${problems:+  $C_RED}" "$problems" "${problems:+$C_OFF}"
+    printf '%s%s%s %s%s %s  %s  %s  %s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_NUMBERED})" \
+        "$symbol" "$color" "$name" "$(pad "$(cut_text "$version" "$W_VERSION")" "$W_VERSION")" \
+        "$(pad "$(cut_text "$pending" "$W_PENDING")" "$W_PENDING")" "$(cut_text "$site" "$W_SITE")" "$C_OFF"
 }
 
-# Prints the menu rows on the rail, with ❯ at pick $1, then the key bar.
+# The dim column labels above the rows.
+menu_labels() {
+    printf '%s%s%s  %s  %s  SITE%s' "$C_DIM" "$(pad "" "$W_GUTTER")" "$(pad NAME "$W_NAME")" \
+        "$(pad VERSION "$W_VERSION")" "$(pad PENDING "$W_PENDING")" "$C_OFF"
+}
+
+# The problems of row $1 on a line of their own under it, empty when it has none.
+menu_problem() {
+    menu_state "$1"
+    [ "$M_STATE" = problem ] || return 0
+    printf '%s%s↳ %s%s' "$(pad "" $((W_GUTTER + 2)))" "$C_RED" \
+        "$(cut_text "${M_PROBLEMS[$1]}" $((M_WIDTH - W_GUTTER - 4)))" "$C_OFF"
+}
+
+# The title above the rows: "Pick a project", with how many rows have something to ship and how many
+# have a problem on the right.
+menu_pick_title() {
+    local i ships=0 bad=0 counts="" plain="" word=problem gap
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        menu_state "$i"
+        case "$M_STATE" in
+            ship) ships=$((ships + 1)) ;;
+            problem) bad=$((bad + 1)) ;;
+        esac
+    done
+
+    if [ "$ships" -gt 0 ]; then
+        counts="${C_YELLOW}$ships to ship${C_OFF}"
+        plain="$ships to ship"
+    fi
+    if [ "$bad" -gt 0 ]; then
+        [ "$bad" -eq 1 ] || word=problems
+        counts+="${counts:+ · }${C_RED}$bad $word${C_OFF}"
+        plain+="${plain:+ · }$bad $word"
+    fi
+    if [ -z "$plain" ]; then
+        plain="all up to date"
+        counts="${C_DIM}$plain${C_OFF}"
+    fi
+
+    gap=$((W_ROW - 14 - $(text_width "$plain")))
+    [ "$gap" -ge 2 ] || gap=2
+    menu_title "Pick a project$(pad "" "$gap")$counts"
+}
+
+# Prints the labels and the menu rows on the rail, with ❯ at pick $1, then the key bar. Sets M_LINES
+# to the lines above the key bar, for the redraw.
 menu_draw() {
-    local i prefix="  " last="$M_NUMBERED"
-    [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+    local i prefix="  " last="$M_NUMBERED" problem
+    [ "$RAILS" -eq 0 ] || prefix="${C_DIM}│${C_OFF}  "
     [ "$last" -le 9 ] || last=9
+
+    printf '\r\033[K%s%s\n' "$prefix" "$(menu_labels)"
+    M_LINES=1
 
     for ((i = 0; i < M_COUNT; i++)); do
         printf '\r\033[K%s%s\n' "$prefix" "$(menu_line "$i" $((i == M_SEL[$1])))"
+        M_LINES=$((M_LINES + 1))
+        problem="$(menu_problem "$i")"
+        [ -n "$problem" ] || continue
+        printf '\r\033[K%s%s\n' "$prefix" "$problem"
+        M_LINES=$((M_LINES + 1))
     done
 
     printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter open · r refresh · q quit%s\n' "${prefix%  }" \
@@ -3330,7 +3484,7 @@ menu_keys() {
                 ;;
         esac
 
-        printf '\033[%sA' $((M_COUNT + 2))
+        printf '\033[%sA' $((M_LINES + 2))
         menu_draw "$M_CUR"
     done
 
@@ -3340,14 +3494,21 @@ menu_keys() {
 # Without cursor control: a numbered list and "Pick 1–N". Sets M_CUR and M_DO like menu_keys; q, an
 # empty answer and the end of input quit.
 menu_numbers() {
-    local i answer
+    local i answer problem
 
-    for ((i = 0; i < M_COUNT; i++)); do
-        case "${M_TARGET[$i]}" in
-            quit | recheck) ;;
-            *) printf '%s\n' "$(menu_line "$i")" ;;
-        esac
-    done | rail
+    {
+        printf '%s\n' "$(menu_labels)"
+        for ((i = 0; i < M_COUNT; i++)); do
+            case "${M_TARGET[$i]}" in
+                quit | recheck) ;;
+                *)
+                    printf '%s\n' "$(menu_line "$i")"
+                    problem="$(menu_problem "$i")"
+                    [ -z "$problem" ] || printf '%s\n' "$problem"
+                    ;;
+            esac
+        done
+    } | rail
 
     while :; do
         printf '%s' "$(say "Pick 1–$M_NUMBERED, r to refresh, q to quit: ")"
@@ -3382,7 +3543,7 @@ menu_numbers() {
 # Reads the menu rows: one per project, its slots in use as a tree under it, one leaf for its free
 # slots, the engine, read in parallel, then Recheck projects and Quit.
 menu_read() {
-    local targets=() groups=() subs=() frees=() pships=() gprojects=() project slot free group=-1 i row width
+    local targets=() groups=() subs=() frees=() pships=() gprojects=() project slot free group=-1 i row
     local rows="" ship target name version pending site problems engine sub
     M_NAME=() M_VERSION=() M_PENDING=() M_SITE=() M_PROBLEMS=() M_SHIP=() M_TARGET=() M_GROUP=() M_SUB=()
     M_TREE=() M_NUM=() M_SEL=()
@@ -3484,19 +3645,6 @@ menu_read() {
         esac
     done
     M_PICKS="${#M_SEL[@]}"
-
-    W_NAME=0 W_VERSION=0 W_PENDING=0 W_SITE=0
-    for ((i = 0; i < M_COUNT; i++)); do
-        width="$(text_width "${M_NAME[$i]}")"
-        [ -z "${M_TREE[$i]}" ] || width=$((width + 2))
-        [ "$width" -le "$W_NAME" ] || W_NAME="$width"
-        width="$(text_width "${M_VERSION[$i]#-}")"
-        [ "$width" -le "$W_VERSION" ] || W_VERSION="$width"
-        width="$(text_width "${M_PENDING[$i]#-}")"
-        [ "$width" -le "$W_PENDING" ] || W_PENDING="$width"
-        width="$(text_width "${M_SITE[$i]#-}")"
-        [ "$width" -le "$W_SITE" ] || W_SITE="$width"
-    done
 }
 
 # Reads row $1 again, after an action changed it.
@@ -3962,7 +4110,8 @@ project_menu() {
             done
         fi
 
-        menu_title "Pick a project"
+        menu_widths
+        menu_pick_title
 
         case "${TERM:-dumb}" in
             dumb | unknown) menu_numbers ;;

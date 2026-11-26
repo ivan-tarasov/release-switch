@@ -105,7 +105,7 @@ the engine at once, and lists what is waiting to ship (see [Project menu](#proje
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/menu-dark.svg">
-  <img alt="The project menu: example with v2026.11.5 → v2026.11.6 and 2 commits, its slots s1, s2 and a free s3, and the engine" src="docs/images/menu-light.svg">
+  <img alt="The project menu: example with v2026.11.5 → v2026.11.6 and 2 commits, its slots s1, s2 and a free s3, the engine, and the detail block of example with its waiting commits" src="docs/images/menu-light.svg">
 </picture>
 
 `check --setup` finds setup mistakes before the first deploy does: the repo, `deploy.conf`, the
@@ -468,7 +468,16 @@ under it as a tree:
 │        Recheck projects
 │        Quit
 │
-│  ↑↓/1-7 pick · Enter open · r refresh · q quit
+│  ── example · production ──────────────────────────────────────────────
+│  Live      v2026.11.4 · deployed 2 h ago
+│  Next      v2026.11.5 · 3 commits
+│            a1b2c3d Show prices in CAD
+│            d4e5f6a Cache the city list
+│            b7c8d9e Faster search page
+│  Site      ok · https://example.com/
+│  Releases  5 kept
+│
+│  ↑↓/1-7 pick · Enter open · i details · r refresh · q quit
 ```
 
 Enter opens the action list of the picked row:
@@ -500,6 +509,21 @@ no row wraps. Production names are bold. A slot row shows the branch it follows,
 something to ship come first, each with its slots right under it; up-to-date rows are dimmed. The dim
 `Recheck projects` and `Quit` rows are last.
 
+A detail block of 8 lines under the rows shows the facts of the row under the cursor and follows it:
+
+- Production: the live version and how long ago it went live, the next version and the number of
+  waiting commits, up to 3 of them, the site check and its URL, the number of releases kept, and
+  the problems.
+- Staging slot: the same, plus the branch it follows, or `PR #N`.
+- Free slot leaf: the free slots and what Enter does.
+- Engine: its version, when its commit was made, and what `deploy self` would bring.
+
+The block reads its facts in the same pass as the rows, so it adds no wait. It keeps its height as
+the cursor moves, and its lines are cut with `…` to fit the terminal width. `i` hides it and shows
+it again. It starts on when the terminal is tall enough (`tput lines`, 24 when unknown) for the
+title, the rows, their problem lines, the block and the key bar, and off when it is not; `i` still
+opens it then.
+
 Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its own action list:
 
 - Production: Deploy new release (or Redeploy when up to date), Status, Check site, Log, Rollback…,
@@ -529,7 +553,8 @@ terminal back to normal. `exit` returns to the menu with fresh facts, whatever t
 `b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
 action ran and puts the cursor back on the same row. `r` or the `Recheck projects` row reads the rows again. `q`, Ctrl-D, the
 `Quit` row or Esc in the project list quit with exit code 0. With `TERM=dumb` both lists are
-numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`.
+numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`. There
+the detail block never redraws: after a pick it shows once, as plain lines, above the action list.
 While the arrow-key menu is on screen, keys never echo as text, and keys pressed before a question
 (the menu's own or an action's) are dropped, so a stray arrow or Enter never answers it.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or

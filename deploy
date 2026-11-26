@@ -3167,6 +3167,92 @@ engine_menu_row() {
         "$(join_notes ${problems[@]+"${problems[@]}"})"
 }
 
+# The Unix time of UTC stamp $1 (YYYYmmddHHMMSS). BSD date first, then GNU date.
+stamp_epoch() {
+    date -u -j -f '%Y%m%d%H%M%S' "$1" +%s 2>/dev/null \
+        || date -u -d "${1:0:8} ${1:8:2}:${1:10:2}:${1:12:2}" +%s 2>/dev/null
+}
+
+# How long ago Unix time $1 was: "just now", "5 min ago", "2 h ago" or "3 days ago".
+menu_ago() {
+    local age=$(($(date +%s) - $1))
+
+    if [ "$age" -lt 60 ]; then
+        printf 'just now'
+    elif [ "$age" -lt 3600 ]; then
+        printf '%s min ago' $((age / 60))
+    elif [ "$age" -lt 86400 ]; then
+        printf '%s h ago' $((age / 3600))
+    elif [ "$age" -lt 172800 ]; then
+        printf '1 day ago'
+    else
+        printf '%s days ago' $((age / 86400))
+    fi
+}
+
+# The facts of the detail block for the row menu_row just printed, as one tab-separated line: the
+# live version, when it went live, the next version, the pending count, up to 3 pending commits
+# ("<sha> <subject>"), the release count, the site URL and the slot's branch. An empty field is "-".
+menu_facts() {
+    local live="-" since="-" next="-" count="-" commits=(- - -) releases="-" url="-" branch="-" n=0 line stamp epoch
+
+    if [ -n "$DEPLOY_BASE" ] && [ -d "$DEPLOY_BASE" ]; then
+        if [ -n "$ROW_LIVE" ]; then
+            live="$(release_version "$ROW_LIVE")"
+            stamp="${ROW_LIVE//-/}"
+            if epoch="$(stamp_epoch "${stamp:0:14}")"; then
+                since="$(menu_ago "$epoch")"
+            fi
+        fi
+
+        count="${PENDING_COUNT:--}"
+        [ -z "$PENDING_TIP" ] || next="${PENDING_TIP:0:7}"
+        # menu_row read the tag of the tip for a production row with pending commits.
+        if [ -z "$DEPLOY_SLOT" ] && [ "$count" != - ] && [ "$count" != 0 ] && [ -n "${TAG:-}" ]; then
+            next="$TAG"
+        fi
+
+        while IFS= read -r line; do
+            [ -n "$line" ] && [ "$n" -lt 3 ] || continue
+            commits[n]="${line//$'\t'/ }"
+            n=$((n + 1))
+        done <<< "$PENDING_LOG"
+
+        releases="$(list_releases | wc -l | tr -d ' ')"
+        [ -z "$DEPLOY_SLOT" ] || branch="$(branch_label)"
+    fi
+
+    if [ -n "$CHECK_URL" ]; then
+        url="$(redact "$CHECK_URL")"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$live" "$since" "$next" "$count" "${commits[@]}" \
+        "$releases" "$url" "$branch"
+}
+
+# The facts of the engine's detail block, in the format of menu_facts: its version, when its commit
+# was made, and what `deploy self` would bring. Runs after engine_menu_row, which fetched.
+engine_menu_facts() {
+    local since="-" next="-" count="-" commits=(- - -) n=0 line epoch
+
+    epoch="$(git -C "$ENGINE_DIR" log -1 --format=%ct 2>/dev/null)" || epoch=""
+    [ -z "$epoch" ] || since="$(menu_ago "$epoch")"
+
+    if count="$(git -C "$ENGINE_DIR" rev-list --count 'HEAD..@{upstream}' 2>/dev/null)"; then
+        [ "$count" -eq 0 ] || next="$(engine_version '@{upstream}')"
+
+        while IFS= read -r line; do
+            [ -n "$line" ] && [ "$n" -lt 3 ] || continue
+            commits[n]="${line//$'\t'/ }"
+            n=$((n + 1))
+        done <<< "$(git -C "$ENGINE_DIR" log -3 --format='%h %s' 'HEAD..@{upstream}' 2>/dev/null)"
+    else
+        count="-"
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t-\t-\t-\n' "$(engine_version)" "$since" "$next" "$count" "${commits[@]}"
+}
+
 # Gives the terminal back: its settings and the cursor.
 menu_restore() {
     [ -n "$MENU_STTY" ] || return 0
@@ -3385,10 +3471,139 @@ menu_pick_title() {
     menu_title "Pick a project$(pad "" "$gap")$counts"
 }
 
-# Prints the labels and the menu rows on the rail, with ❯ at pick $1, then the key bar. Sets M_LINES
-# to the lines above the key bar, for the redraw.
+# One line of the detail block: dim label $1 in a column of its own, then value $2 in color $3, cut
+# to fit the terminal.
+menu_fact() {
+    printf '%s%s%s%s%s%s' "$C_DIM" "$(pad "$1" 10)" "$C_OFF" "${3:-}" "$(cut_text "$2" $((M_WIDTH - 10)))" "$C_OFF"
+}
+
+# A pending commit ("<sha> <subject>") in the detail block, under the Next or Update line.
+menu_commit() {
+    local text
+    text="$(cut_text "$1" $((M_WIDTH - 10)))"
+    printf '%s%s%s%s %s' "$(pad "" 10)" "$C_DIM" "${text%% *}" "$C_OFF" "${text#* }"
+}
+
+# The detail block of row $1: a heading rule and up to 7 lines of facts. Commits past the first
+# give way to the other facts.
+menu_block() {
+    local i="$1" target="${M_TARGET[$1]}" live since next count c1 c2 c3 releases url branch
+    local head width fill rule="" commit line room trouble="${M_PROBLEMS[$1]}" site top=() bottom=() commits=()
+    IFS=$'\t' read -r live since next count c1 c2 c3 releases url branch <<< "${M_FACTS[$i]}"
+    [ "$trouble" != - ] || trouble=""
+    site="${M_SITE[$i]#site }"
+    for commit in "$c1" "$c2" "$c3"; do
+        [ "$commit" = - ] || commits+=("$commit")
+    done
+
+    case "$target" in
+        quit)
+            head="Quit"
+            top+=("$(menu_fact Enter "leave the menu")")
+            ;;
+        recheck)
+            head="Recheck projects"
+            top+=("$(menu_fact Enter "read every row again")")
+            ;;
+        *:free)
+            head="${target%:free} · free slots"
+            top+=("$(menu_fact Free "${M_NAME[$i]}")")
+            top+=("$(menu_fact Enter "check out a branch or a pull request into ${M_NAME[$i]%%,*}")")
+            ;;
+        self)
+            head="release-switch · engine"
+            if [ "$since" = - ]; then
+                top+=("$(menu_fact Version "$live")")
+            else
+                top+=("$(menu_fact Version "$live · committed $since")")
+            fi
+            case "$count" in
+                -) top+=("$(menu_fact Update "unknown")") ;;
+                0) top+=("$(menu_fact Update "nothing new")") ;;
+                1) top+=("$(menu_fact Update "$next · 1 commit · deploy self" "$C_YELLOW")") ;;
+                *) top+=("$(menu_fact Update "$next · $count commits · deploy self" "$C_YELLOW")") ;;
+            esac
+            ;;
+        *)
+            if [[ "$target" == *@* ]]; then
+                head="${target%@*} · ${target#*@} staging"
+                top+=("$(menu_fact Branch "$branch")")
+            else
+                head="$target · production"
+            fi
+
+            if [ "$live" = - ]; then
+                top+=("$(menu_fact Live "not deployed yet")")
+            elif [ "$since" = - ]; then
+                top+=("$(menu_fact Live "$live")")
+            else
+                top+=("$(menu_fact Live "$live · deployed $since")")
+            fi
+
+            case "$count" in
+                -) top+=("$(menu_fact Next "unknown")") ;;
+                0) top+=("$(menu_fact Next "nothing waiting")") ;;
+                1) top+=("$(menu_fact Next "$next · 1 commit" "$C_YELLOW")") ;;
+                *) top+=("$(menu_fact Next "$next · $count commits" "$C_YELLOW")") ;;
+            esac
+
+            [ "$url" = - ] || site+=" · $url"
+            [ -z "$site" ] || bottom+=("$(menu_fact Site "$site")")
+            [ "$releases" = - ] || bottom+=("$(menu_fact Releases "$releases kept")")
+            ;;
+    esac
+    [ -z "$trouble" ] || bottom+=("$(menu_fact Problems "$trouble" "$C_RED")")
+
+    width="$W_ROW"
+    [ "$width" -le "$M_WIDTH" ] || width="$M_WIDTH"
+    head="$(cut_text "$head" $((width - 5)))"
+    fill=$((width - 4 - $(text_width "$head")))
+    while [ "$fill" -gt 0 ]; do
+        rule+="─"
+        fill=$((fill - 1))
+    done
+    printf '%s── %s%s%s%s %s%s%s\n' "$C_DIM" "$C_OFF" "$C_BOLD" "$head" "$C_OFF" "$C_DIM" "$rule" "$C_OFF"
+
+    room=$((7 - ${#top[@]} - ${#bottom[@]}))
+    for line in ${top[@]+"${top[@]}"}; do
+        printf '%s\n' "$line"
+    done
+    for commit in ${commits[@]+"${commits[@]}"}; do
+        [ "$room" -gt 0 ] || break
+        printf '%s\n' "$(menu_commit "$commit")"
+        room=$((room - 1))
+    done
+    for line in ${bottom[@]+"${bottom[@]}"}; do
+        printf '%s\n' "$line"
+    done
+}
+
+# Turns the detail block on (M_INFO=1) when the terminal (tput lines, 24 when unknown) has room for
+# the title, the labels, the rows and their problem lines, the block and the key bar; else off.
+menu_info_default() {
+    local height="" i need=$((M_COUNT + 14))
+
+    if [ -n "${TERM:-}" ] && command -v tput > /dev/null; then
+        height="$(tput lines)" || height=""
+    fi
+    case "$height" in
+        "" | *[!0-9]* | 0) height=24 ;;
+    esac
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        menu_state "$i"
+        [ "$M_STATE" != problem ] || need=$((need + 1))
+    done
+
+    M_INFO=0
+    [ "$need" -gt "$height" ] || M_INFO=1
+}
+
+# Prints the labels and the menu rows on the rail, with ❯ at pick $1, the detail block of that row
+# when M_INFO is 1, then the key bar, and clears what is left under it. Sets M_LINES to the lines
+# above the blank line over the key bar, for the redraw.
 menu_draw() {
-    local i prefix="  " last="$M_NUMBERED" problem
+    local i prefix="  " last="$M_NUMBERED" problem line drawn=0
     [ "$RAILS" -eq 0 ] || prefix="${C_DIM}│${C_OFF}  "
     [ "$last" -le 9 ] || last=9
 
@@ -3404,8 +3619,21 @@ menu_draw() {
         M_LINES=$((M_LINES + 1))
     done
 
-    printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter open · r refresh · q quit%s\n' "${prefix%  }" \
-        "$prefix" "$C_DIM" "$last" "$C_OFF"
+    if [ "$M_INFO" -eq 1 ]; then
+        printf '\r\033[K%s\n' "${prefix%  }"
+        while IFS= read -r line; do
+            printf '\r\033[K%s%s\n' "$prefix" "$line"
+            drawn=$((drawn + 1))
+        done <<< "$(menu_block "${M_SEL[$1]}")"
+        # Blank lines fill it to 8, so it keeps its height as the cursor moves.
+        for ((; drawn < 8; drawn++)); do
+            printf '\r\033[K%s\n' "${prefix%  }"
+        done
+        M_LINES=$((M_LINES + 9))
+    fi
+
+    printf '\r\033[K%s\n\r\033[K%s%s↑↓/1-%s pick · Enter open · i details · r refresh · q quit%s\n\033[J' \
+        "${prefix%  }" "$prefix" "$C_DIM" "$last" "$C_OFF"
 }
 
 # Reads one key into M_KEY: up (↑, k), down (↓, j), left (←), enter, esc, q (also Ctrl-D and the end of
@@ -3457,8 +3685,8 @@ menu_raw() {
     printf '\033[?25l'
 }
 
-# Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR. Sets
-# M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). The terminal stays without echo after it.
+# Lets the user pick a row with the arrow keys, j/k, a number and enter, starting at pick M_CUR; i
+# shows or hides the detail block. Sets M_CUR, and M_DO to open, refresh (r) or quit (q, Esc). The terminal stays without echo after it.
 menu_keys() {
     menu_raw
     menu_draw "$M_CUR"
@@ -3470,6 +3698,7 @@ menu_keys() {
             up) [ "$M_CUR" -eq 0 ] || M_CUR=$((M_CUR - 1)) ;;
             down) [ "$M_CUR" -eq $((M_PICKS - 1)) ] || M_CUR=$((M_CUR + 1)) ;;
             [1-9]) [ "$M_KEY" -gt "$M_NUMBERED" ] || M_CUR=$((M_KEY - 1)) ;;
+            i | I) M_INFO=$((1 - M_INFO)) ;;
             enter)
                 M_DO=open
                 break
@@ -3544,9 +3773,10 @@ menu_numbers() {
 # slots, the engine, read in parallel, then Recheck projects and Quit.
 menu_read() {
     local targets=() groups=() subs=() frees=() pships=() gprojects=() project slot free group=-1 i row
-    local rows="" ship target name version pending site problems engine sub
+    local rows="" ship target name version pending site problems engine sub facts none
     M_NAME=() M_VERSION=() M_PENDING=() M_SITE=() M_PROBLEMS=() M_SHIP=() M_TARGET=() M_GROUP=() M_SUB=()
-    M_TREE=() M_NUM=() M_SEL=()
+    M_TREE=() M_NUM=() M_SEL=() M_FACTS=()
+    none="$(printf -- '-\t%.0s' 1 2 3 4 5 6 7 8 9)-"
 
     for project in $(list_projects); do
         group=$((group + 1))
@@ -3574,42 +3804,47 @@ menu_read() {
     MENU_TMP="$(mktemp -d)"
 
     for i in "${!targets[@]}"; do
-        (menu_load "${targets[$i]}" && menu_row) < /dev/null > "$MENU_TMP/$i" 2> /dev/null &
+        (menu_load "${targets[$i]}" && menu_row && menu_facts) < /dev/null > "$MENU_TMP/$i" 2> /dev/null &
         MENU_PIDS+=" $!"
     done
 
-    engine_menu_row < /dev/null > "$MENU_TMP/engine" 2> /dev/null &
+    { engine_menu_row && engine_menu_facts; } < /dev/null > "$MENU_TMP/engine" 2> /dev/null &
     MENU_PIDS+=" $!"
     wait
     MENU_PIDS=""
 
     # A project comes before its slots, so its ship flag is known when they are read.
     for i in "${!targets[@]}"; do
-        row="$(cat "$MENU_TMP/$i")"
+        row=""
+        facts=""
+        { IFS= read -r row && IFS= read -r facts; } < "$MENU_TMP/$i" || true
         name="${targets[$i]}"
         [ "${subs[$i]}" -eq 0 ] || name="s${subs[$i]}"
         [ -n "$row" ] || row="$(printf '0\t%s\t%s\t-\t-\t-\tcannot read' "${targets[$i]}" "$name")"
+        row+=$'\t'"${facts:-$none}"
         group="${groups[$i]}"
         [ "${subs[$i]}" -ne 0 ] || pships[group]="${row%%$'\t'*}"
         rows+="${pships[$group]}"$'\t'"$group"$'\t'"${subs[$i]}"$'\t'"$row"$'\n'
     done
 
     for group in "${!frees[@]}"; do
-        [ -z "${frees[$group]}" ] || rows+="${pships[$group]}"$'\t'"$group"$'\t'"9999"$'\t'"0"$'\t'"${gprojects[$group]}:free"$'\t'"${frees[$group]}"$'\tfree\t-\t-\t-\n'
+        [ -z "${frees[$group]}" ] || rows+="${pships[$group]}"$'\t'"$group"$'\t'"9999"$'\t'"0"$'\t'"${gprojects[$group]}:free"$'\t'"${frees[$group]}"$'\tfree\t-\t-\t-\t'"$none"$'\n'
     done
 
     # Projects with something to ship first, else in their order; slots under their project in slot
     # order, free ones last; the engine, Recheck projects and Quit last.
     rows="$(printf '%s' "$rows" | sort -t $'\t' -k1,1r -k2,2n -k3,3n)"
-    engine="$(cat "$MENU_TMP/engine")"
+    engine=""
+    facts=""
+    { IFS= read -r engine && IFS= read -r facts; } < "$MENU_TMP/engine" || true
     [ -n "$engine" ] || engine="$(printf '0\tself\trelease-switch\t%s\t-\t-\tcannot read' "$(engine_version)")"
-    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"$engine"
-    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\trecheck\tRecheck projects\t-\t-\t-\t-'
-    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\tquit\tQuit\t-\t-\t-\t-'
+    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"$engine"$'\t'"${facts:-$none}"
+    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\trecheck\tRecheck projects\t-\t-\t-\t-\t'"$none"
+    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\tquit\tQuit\t-\t-\t-\t-\t'"$none"
     rm -rf "$MENU_TMP"
     MENU_TMP=""
 
-    while IFS=$'\t' read -r _ group sub ship target name version pending site problems; do
+    while IFS=$'\t' read -r _ group sub ship target name version pending site problems facts; do
         M_GROUP+=("$group")
         M_SUB+=("$sub")
         M_SHIP+=("$ship")
@@ -3619,6 +3854,7 @@ menu_read() {
         M_PENDING+=("$pending")
         M_SITE+=("$site")
         M_PROBLEMS+=("$problems")
+        M_FACTS+=("$facts")
     done <<< "$rows"
 
     M_COUNT="${#M_NAME[@]}"
@@ -3652,11 +3888,12 @@ menu_refresh() {
     local target="${M_TARGET[$1]}" row ship version pending site problems
 
     if [ "$target" = self ]; then
-        row="$(engine_menu_row < /dev/null 2> /dev/null)" || row=""
+        row="$( { engine_menu_row && engine_menu_facts; } < /dev/null 2> /dev/null)" || row=""
     else
-        row="$( (menu_load "$target" && menu_row) < /dev/null 2> /dev/null)" || row=""
+        row="$( (menu_load "$target" && menu_row && menu_facts) < /dev/null 2> /dev/null)" || row=""
     fi
     [ -n "$row" ] || return 0
+    [[ "$row" != *$'\n'* ]] || M_FACTS[$1]="${row#*$'\n'}"
 
     IFS=$'\t' read -r ship _ _ version pending site problems <<< "$row"
     M_SHIP[$1]="$ship"
@@ -4094,6 +4331,7 @@ menu_open() {
 project_menu() {
     local i last="" reload=1
     M_CUR=0
+    M_INFO=""
 
     intro ""
     case "${TERM:-dumb}" in
@@ -4111,6 +4349,7 @@ project_menu() {
         fi
 
         menu_widths
+        [ -n "$M_INFO" ] || menu_info_default
         menu_pick_title
 
         case "${TERM:-dumb}" in
@@ -4133,6 +4372,10 @@ project_menu() {
                 reload=1
                 continue
                 ;;
+        esac
+        # Without cursor control the block never redraws: it shows once, for the pick.
+        case "${TERM:-dumb}" in
+            dumb | unknown) menu_block "${M_SEL[$M_CUR]}" | rail ;;
         esac
         menu_open "${M_SEL[$M_CUR]}"
         reload="$M_RAN"

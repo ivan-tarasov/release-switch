@@ -3089,7 +3089,7 @@ if command -v script > /dev/null; then
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed on q"; }
     grep -q "Pick a project" "$WORK/menu.log" || fail "a bare deploy on a terminal shows no menu"
-    grep -qE "↑↓/1-[0-9] pick · Enter open · r refresh · q quit" "$WORK/menu.log" \
+    grep -qE "↑↓/1-[0-9] pick · Enter open · i details · r refresh · q quit" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the menu shows no key bar"; }
     [ "$(grep -cE "Checking [0-9]+ projects" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "r did not read the rows again"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' | grep -E "❯ " > "$WORK/menu.rows" || true
@@ -3181,7 +3181,8 @@ if command -v script > /dev/null; then
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
-    grep -E "^ +(❯ )?[0-9 ] " "$WORK/menu.plain" | grep -vE "^ +(NAME|↳) " > "$WORK/menu.rows"
+    # The rows of the first draw: from the labels to the blank line under them.
+    awk '/^ +NAME +VERSION/ { on = 1; next } on && /^ *$/ { exit } on' "$WORK/menu.plain" | grep -vE "^ +↳ " > "$WORK/menu.rows"
     grep -qE "^ +NAME +VERSION +PENDING +SITE$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the menu has no column labels"; }
     grep -qE "^ +❯ 1 ✓ fixture " "$WORK/menu.rows" || { cat "$WORK/menu.rows"; fail "fixture is not the first row"; }
     [[ "$(sed -n 2p "$WORK/menu.rows")" =~ ^\ +2\ ✓\ ├\ s1\ +feature/x\  ]] \
@@ -3224,7 +3225,8 @@ if command -v script > /dev/null; then
     grep -qE "├ s2 +feature/a-very-long-[a-z-]*… +" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the long branch was not cut with …"; }
     [ "$(grep -A1 -E "✗ (example-long-name-20|fixture) " "$WORK/menu.plain" | grep -cE "^│ +↳ frozen")" -ge 4 ] \
         || { cat "$WORK/menu.plain"; fail "the two frozen rows have no problem line under them"; }
-    ! grep -qE "[a-z0-9]  +frozen$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "a problem is at the end of its row"; }
+    ! grep -vE "^│ +Problems +" "$WORK/menu.plain" | grep -qE "[a-z0-9]  +frozen$" \
+        || { cat "$WORK/menu.plain"; fail "a problem is at the end of its row"; }
     grep -qE "◆  Pick a project +([0-9]+ to ship · )?[2-9] problems$" "$WORK/menu.plain" \
         || { cat "$WORK/menu.plain"; fail "the title does not count the problems"; }
     grep -qE "^│ +[0-9] ○ └ s3 +free *$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the free leaf has no ○"; }
@@ -3233,6 +3235,77 @@ if command -v script > /dev/null; then
     up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '1{s/[^0-9]//g;p;}')"
     drawn="$(awk '/NAME +VERSION/ { on = 1 } on { n++ } on && /pick · Enter open/ { print n; exit }' "$WORK/menu.plain")"
     [ -n "$up" ] && [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the redraw moves up $up lines, not the $drawn drawn"; }
+
+    # The detail block under the rows follows the cursor (j), i hides it and shows it again, and each
+    # redraw moves up exactly the lines drawn, with the block on and off. Its lines fit 80 columns,
+    # the long problem of s2 cut with …. Rows: example-long-name-20, its free leaf, fixture, s1, s2.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" jiijjjq \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed with the detail block"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    rm -f "$WORK"/menu.draw.*
+    awk -v out="$WORK/menu.draw." '/NAME +VERSION/ { n++ } n && !done { print > (out n) } /pick · Enter open/ { if (n == 7) done = 1 }' \
+        "$WORK/menu.plain"
+    [ -f "$WORK/menu.draw.7" ] || { cat "$WORK/menu.plain"; fail "the menu did not redraw on each key"; }
+    grep -qE "^│  ── example-long-name-20 · production ─" "$WORK/menu.draw.1" \
+        || { cat "$WORK/menu.draw.1"; fail "the block does not show the first row"; }
+    for fact in "Live      " "Next      " "Site      ok · http://127.0.0.1:" "Releases  [0-9]+ kept" "Problems  frozen"; do
+        grep -qE "^│  $fact" "$WORK/menu.draw.1" || { cat "$WORK/menu.draw.1"; fail "the block has no $fact line"; }
+    done
+    grep -qE "^│  ── example-long-name-20 · free slots ─" "$WORK/menu.draw.2" \
+        || { cat "$WORK/menu.draw.2"; fail "the block did not follow j"; }
+    grep -qE "^│  Enter     check out a branch or a pull request into s1$" "$WORK/menu.draw.2" \
+        || { cat "$WORK/menu.draw.2"; fail "the free leaf block does not say what Enter does"; }
+    ! grep -q "── " "$WORK/menu.draw.3" || { cat "$WORK/menu.draw.3"; fail "i did not hide the block"; }
+    grep -qE "^│  ── example-long-name-20 · free slots ─" "$WORK/menu.draw.4" \
+        || { cat "$WORK/menu.draw.4"; fail "i did not show the block again"; }
+    grep -qE "^│  ── fixture · production ─" "$WORK/menu.draw.5" || { cat "$WORK/menu.draw.5"; fail "the block does not show fixture"; }
+    grep -qE "^│  Branch    feature/x$" "$WORK/menu.draw.6" || { cat "$WORK/menu.draw.6"; fail "the block does not show the branch of s1"; }
+    grep -qE "^│  ── fixture · s2 staging ─" "$WORK/menu.draw.7" || { cat "$WORK/menu.draw.7"; fail "the block does not show s2"; }
+    grep -qE "^│  Branch    feature/a-very-long-branch-name-for-the-menu-width-test$" "$WORK/menu.draw.7" \
+        || { cat "$WORK/menu.draw.7"; fail "the block does not show the whole branch of s2"; }
+    grep -qE "^│  Problems  cannot read feature/a-very-long-[a-z-]*…$" "$WORK/menu.draw.7" \
+        || { cat "$WORK/menu.draw.7"; fail "the long problem in the block was not cut with …"; }
+    ups="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | tr -dc '0-9\n' | tr '\n' ' ')"
+    lines=""
+    for i in 1 2 3 4 5 6; do
+        lines+="$(wc -l < "$WORK/menu.draw.$i" | tr -d ' ') "
+    done
+    [ "$ups" = "$lines" ] || { cat "$WORK/menu.plain"; fail "the redraws move up $ups lines, not the $lines drawn"; }
+    [ $(($(wc -l < "$WORK/menu.draw.2") - $(wc -l < "$WORK/menu.draw.3"))) -eq 9 ] \
+        || { cat "$WORK/menu.plain"; fail "the block is not 8 lines and a blank one"; }
+    [ "$(LC_ALL=C grep -o $'\033\\[J' "$WORK/menu.log" | wc -l | tr -d ' ')" -eq 7 ] \
+        || { cat -v "$WORK/menu.log"; fail "a draw does not clear what is left under it"; }
+    wide=""
+    while IFS= read -r line; do
+        width="$(LC_ALL=C; plain="${line//[$'\x80'-$'\xbf']/}"; printf '%s' "${#plain}")"
+        [ "$width" -lt 80 ] || wide="$line"
+    done < "$WORK/menu.plain"
+    [ -z "$wide" ] || { cat "$WORK/menu.plain"; fail "a block line is 80 columns or more at 80: $wide"; }
+
+    # A terminal of 20 rows has no room for the block: it starts off, and i opens it.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" iq \
+        -- bash -c 'stty cols 80 rows 20; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on a short terminal"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    [ "$(grep -c "── example-long-name-20 · production" "$WORK/menu.plain")" -eq 1 ] \
+        || { cat "$WORK/menu.plain"; fail "the block was on at the start on a short terminal, or i did not open it"; }
+    up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '1{s/[^0-9]//g;p;}')"
+    drawn="$(awk '/NAME +VERSION/ { on = 1 } on { n++ } on && /pick · Enter open/ { print n; exit }' "$WORK/menu.plain")"
+    [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the redraw on a short terminal moves up $up lines, not the $drawn drawn"; }
+
+    # TERM=dumb never redraws: the block of the pick shows once, as plain lines, above its list.
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the numbered menu failed with the block"; }
+    ! LC_ALL=C grep -qE $'\033\\[[0-9]*[AJ]' "$WORK/menu.log" || { cat -v "$WORK/menu.log"; fail "TERM=dumb moved the cursor"; }
+    [ "$(grep -c "── example-long-name-20 · production" "$WORK/menu.log")" -eq 1 ] \
+        || { cat "$WORK/menu.log"; fail "TERM=dumb did not show the block once"; }
+    sed -n '/── example-long-name-20 · production/,$p' "$WORK/menu.log" | grep -q "example-long-name-20 — production" \
+        || { cat "$WORK/menu.log"; fail "the block is not above the action list"; }
+    grep -qE "^│  Problems  frozen" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the plain block has no problems"; }
     deploy fixture unfreeze > /dev/null
     rm "$WORK/projects/example-long-name-20.env" "$SLOT2/BRANCH"
 

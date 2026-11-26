@@ -3201,11 +3201,12 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.plain"; fail "the engine list shows no key bar"; }
     grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
 
-    # At 80 columns a 20-character name, a long branch and two frozen rows fit without a wrap: the
-    # widest column is cut with …, each problem is on a line of its own under its row, the title
-    # counts them, and the symbols stay without color. One redraw (j) moves up exactly the lines drawn.
+    # At 80 columns a 20-character name, a long branch (s2) and two frozen rows fit without a wrap:
+    # the widest column is cut with …, each problem is on a line of its own under its row, the title
+    # counts them, and the symbols stay without color: ✗ frozen, ✓ the up-to-date s1, ○ the free s3.
+    # One redraw (j) moves up exactly the lines drawn.
     cp "$WORK/fixture.env" "$WORK/projects/example-long-name-20.env"
-    printf 'feature/a-very-long-branch-name-for-the-menu-width-test\n' > "$SLOT/BRANCH"
+    printf 'feature/a-very-long-branch-name-for-the-menu-width-test\n' > "$SLOT2/BRANCH"
     deploy fixture freeze "menu width" > /dev/null
     on_terminal_expect "$WORK/menu.log" "Pick a project" jq \
         -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
@@ -3220,21 +3221,20 @@ if command -v script > /dev/null; then
     [ -z "$wide" ] || { cat "$WORK/menu.plain"; fail "a menu line is 80 columns or more at 80: $wide"; }
     grep -qE "^│ +NAME +VERSION +PENDING +SITE$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the menu has no column labels at 80 columns"; }
     grep -qE "✗ example-long-name-20 +v" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the 20-character name was cut"; }
-    grep -qE "├ s1 +feature/a-very-long-[a-z-]*… +" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the long branch was not cut with …"; }
+    grep -qE "├ s2 +feature/a-very-long-[a-z-]*… +" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the long branch was not cut with …"; }
     [ "$(grep -A1 -E "✗ (example-long-name-20|fixture) " "$WORK/menu.plain" | grep -cE "^│ +↳ frozen")" -ge 4 ] \
         || { cat "$WORK/menu.plain"; fail "the two frozen rows have no problem line under them"; }
     ! grep -qE "[a-z0-9]  +frozen$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "a problem is at the end of its row"; }
     grep -qE "◆  Pick a project +([0-9]+ to ship · )?[2-9] problems$" "$WORK/menu.plain" \
         || { cat "$WORK/menu.plain"; fail "the title does not count the problems"; }
-    grep -qE "^│ +[0-9] ○ └ s2, s3 +free *$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the free leaf has no ○"; }
-    grep -qE "^│ +[0-9] ✓ " "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "no row has ✓"; }
+    grep -qE "^│ +[0-9] ○ └ s3 +free *$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the free leaf has no ○"; }
+    grep -qE "^│ +[0-9] ✓ ├ s1 +feature/x +up to date " "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the up-to-date s1 has no ✓"; }
     ! LC_ALL=C grep -q $'\033\\[3[0-9]m' "$WORK/menu.log" || { cat -v "$WORK/menu.log"; fail "NO_COLOR menu has colors"; }
     up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '1{s/[^0-9]//g;p;}')"
     drawn="$(awk '/NAME +VERSION/ { on = 1 } on { n++ } on && /pick · Enter open/ { print n; exit }' "$WORK/menu.plain")"
     [ -n "$up" ] && [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the redraw moves up $up lines, not the $drawn drawn"; }
     deploy fixture unfreeze > /dev/null
-    rm "$WORK/projects/example-long-name-20.env"
-    printf 'feature/x\n' > "$SLOT/BRANCH"
+    rm "$WORK/projects/example-long-name-20.env" "$SLOT2/BRANCH"
 
     # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
     on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'1\n' "[y/N]" $'n\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'6\n' "Press Enter to go back" $'\n' \

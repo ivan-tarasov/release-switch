@@ -129,16 +129,25 @@ CHECK_URL="http://127.0.0.1:$PORT/"
 REPO_URL="file://$REPO"
 CHECK_WAIT=999
 EOF
-cp "$ROOT/projects/example.env" "$WORK/projects/example.env"
+cp "$ROOT/projects/example.env.sample" "$WORK/projects/example.env.sample"
 
 step "Help, without a project file loaded"
 PROJECTS_DIR="$WORK/empty" "$ROOT/deploy" --help | grep "^Usage: deploy" > /dev/null || fail "--help shows no usage"
 if deploy fixture nope 2> /dev/null; then
     fail "an unknown command succeeded"
 fi
-deploy --help | grep "fixture" > /dev/null || fail "--help does not list the project"
+deploy --help | grep -x "Projects (in $WORK/projects): fixture" > /dev/null || fail "--help does not list only the project"
 deploy fixture help | grep "CHECK_WAIT .*(10)" > /dev/null || fail "an env var does not win over the project file"
-check "--help works, lists projects and shows env overrides; an unknown command fails"
+# A server with only the sample has no project; one named example is a project like any other.
+mkdir "$WORK/only"
+cp "$ROOT/projects/example.env.sample" "$WORK/only/"
+PROJECTS_DIR="$WORK/only" "$ROOT/deploy" --help | grep -x "Projects (in $WORK/only): none yet; copy example.env.sample" > /dev/null \
+    || fail "--help lists the sample as a project"
+cp "$ROOT/projects/example.env.sample" "$WORK/only/example.env"
+PROJECTS_DIR="$WORK/only" "$ROOT/deploy" --help | grep -x "Projects (in $WORK/only): example" > /dev/null \
+    || fail "--help does not list a project named example"
+rm -rf "$WORK/only"
+check "--help works, lists projects (example too, never the sample) and shows env overrides; an unknown command fails"
 
 step "Per-command help and typo hints"
 deploy rollback --help > "$WORK/help.log"
@@ -667,15 +676,17 @@ cat "$WORK/all.log"
 grep -qE "^fixture +$latest +.*200, matches live" "$WORK/all.log" || fail "status --all does not show the fixture row"
 # A second project with its own settings: no base folder yet.
 printf 'DEPLOY_BASE="%s"\nCHECK_URL="http://127.0.0.1:%s/"\n' "$WORK/other" "$PORT" > "$WORK/projects/other.env"
+printf 'DEPLOY_BASE="%s"\n' "$WORK/example" > "$WORK/projects/example.env"
 if deploy status --all > "$WORK/all.log"; then
     fail "status --all passed with a broken project"
 fi
 cat "$WORK/all.log"
 grep -qE "^other +none +.*no base folder" "$WORK/all.log" || fail "status --all does not show the second project"
+grep -qE "^example +none +.*no base folder" "$WORK/all.log" || fail "status --all does not show a project named example"
 grep -qE "^fixture +$latest " "$WORK/all.log" || fail "the second project changed the fixture row"
 [ ! -e "$WORK/other" ] || fail "status --all created a base folder"
-rm "$WORK/projects/other.env"
-check "status --all shows each project with its own settings, and fails when one is broken"
+rm "$WORK/projects/other.env" "$WORK/projects/example.env"
+check "status --all shows each project with its own settings (example too), and fails when one is broken"
 
 step "Deploy times: today, yesterday, older"
 # Two more projects with a live release from yesterday and from 3 days ago, at noon in Toronto.
@@ -1117,8 +1128,11 @@ if FIXTURE_UNHEALTHY=1 deploy fixture check > /dev/null 2> "$WORK/check-err.log"
     fail "check passed with a failing health()"
 fi
 grep -q "^FAIL  fixture: health: queue is stuck$" "$WORK/check-err.log" || fail "check does not report the health() problem"
+cp "$WORK/projects/fixture.env" "$WORK/projects/example.env"
 deploy check --all > "$WORK/check-all.log"
+rm "$WORK/projects/example.env"
 grep -q "^ok    fixture: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check the fixture"
+grep -q "^ok    example: site: 200, matches live$" "$WORK/check-all.log" || fail "check --all does not check a project named example"
 check "check passes on a healthy site; reports broken shared links, a bad site, a stuck deploy and a failing health() on stderr"
 # A bad sleep time fails health() half way; the rest of it would still print "queue is empty".
 if FIXTURE_HEALTH_SLEEP=x deploy check --all > /dev/null 2> "$WORK/check-all-err.log"; then
@@ -3062,9 +3076,12 @@ git -C "$REPO" tag v2026.11.20000 develop
 row="$(menu_row fixture)"
 [[ "$row" == $'1\tfixture\tfixture\t'*$' → v2026.11.20000\t1 commit\tsite ok\t-' ]] || fail "tagged menu row: $row"
 cp "$WORK/projects/fixture.env" "$WORK/projects/other.env"
-! deploy < /dev/null > /dev/null 2> "$WORK/menu.log" || fail "a bare deploy in a pipe with two projects succeeded"
-grep -q "name a project (fixture other)" "$WORK/menu.log" || fail "a bare deploy in a pipe does not ask for a project"
-rm "$WORK/projects/other.env"
+cp "$WORK/projects/fixture.env" "$WORK/projects/example.env"
+! deploy < /dev/null > /dev/null 2> "$WORK/menu.log" || fail "a bare deploy in a pipe with three projects succeeded"
+grep -q "name a project (example fixture other)" "$WORK/menu.log" || fail "a bare deploy in a pipe does not ask for a project"
+row="$(menu_row example)"
+[[ "$row" == $'1\texample\texample\t'*$' → v2026.11.20000\t1 commit\tsite ok\t-' ]] || fail "menu row of a project named example: $row"
+rm "$WORK/projects/other.env" "$WORK/projects/example.env"
 if command -v script > /dev/null; then
     live="$(live_release)"
     # j moves to the second row, r reads the rows again, q quits.

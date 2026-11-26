@@ -75,7 +75,7 @@ Once the server can read the project's repo (see [Adding a project](#adding-a-pr
    `deploy.conf` with at least a `build()` step to the project's repo (see [deploy.conf](#deployconf)).
 
    ```bash
-   cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
+   cp ~/release-switch/projects/example.env.sample ~/release-switch/projects/<project>.env
    ```
 
 3. Move the existing checkout in, check the setup, then deploy:
@@ -105,7 +105,7 @@ the engine at once, and lists what is waiting to ship (see [Project menu](#proje
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/menu-dark.svg">
-  <img alt="The project menu: example-app with v2026.11.5 → v2026.11.6 and 2 commits, its slots s1, s2 and a free s3, and the engine" src="docs/images/menu-light.svg">
+  <img alt="The project menu: example with v2026.11.5 → v2026.11.6 and 2 commits, its slots s1, s2 and a free s3, and the engine" src="docs/images/menu-light.svg">
 </picture>
 
 `check --setup` finds setup mistakes before the first deploy does: the repo, `deploy.conf`, the
@@ -554,7 +554,7 @@ own key, named `<repo>_deploy`, and its own host name in `~/.ssh/config` (see
 3. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
 
 To update the script: `deploy self-update` (or `git -C ~/release-switch pull`). Files in
-`projects/` other than `example.env` are not tracked, so a pull never touches them.
+`projects/` other than `example.env.sample` are not tracked, so a pull never touches them.
 
 ### Adding a project
 
@@ -583,7 +583,7 @@ To update the script: `deploy self-update` (or `git -C ~/release-switch pull`). 
 3. Write the project file:
 
    ```bash
-   cp ~/release-switch/projects/example.env ~/release-switch/projects/<project>.env
+   cp ~/release-switch/projects/example.env.sample ~/release-switch/projects/<project>.env
    ```
 
    Set `DEPLOY_BASE`, `CHECK_URL` and `REPO_URL` (`git@github-<repo>:owner/<repo>.git`), plus

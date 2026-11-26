@@ -164,12 +164,6 @@ printf 'Capturing slots\n'
 capture slots example slots
 
 printf 'Capturing the menu\n'
-# The menu leaves out a project named example, the name of the sample file, so it gets a name of
-# its own here. Its slots carry the project name in OWNER.
-mv "$WORK/release-switch/projects/example.env" "$WORK/release-switch/projects/example-app.env"
-for slot in s1 s2 s3; do
-    [ ! -f "$DOMAIN/$slot/OWNER" ] || printf 'example-app\n' > "$DOMAIN/$slot/OWNER"
-done
 commit develop "Show prices in CAD"
 commit develop "Cache the city list" v2026.11.6
 commit feature/search "Search by airport"

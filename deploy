@@ -405,8 +405,7 @@ list_projects() {
 
     for file in "$PROJECTS_DIR"/*.env; do
         [ -f "$file" ] || continue
-        file="$(basename "$file" .env)"
-        [ "$file" = example ] || printf '%s\n' "$file"
+        basename "$file" .env
     done
 }
 
@@ -3050,7 +3049,7 @@ status_all() {
         rows+="$row"$'\n'
     done
 
-    [ -n "$rows" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"
+    [ -n "$rows" ] || fail "no projects in $PROJECTS_DIR (copy example.env.sample)"
 
     # The first project's settings give the engine row its PHP and time zone.
     rows+="$(load_project "$(list_projects | head -n1)" && apply_defaults && engine_row)"$'\n'
@@ -4858,7 +4857,7 @@ check_all() {
         [ "$status" -eq 0 ] || failed=1
     done
 
-    [ -n "$(list_projects)" ] || fail "no projects in $PROJECTS_DIR (copy example.env)"
+    [ -n "$(list_projects)" ] || fail "no projects in $PROJECTS_DIR (copy example.env.sample)"
 
     return "$failed"
 }
@@ -5651,7 +5650,7 @@ usage() {
     cat <<EOF
 Usage: deploy [project] [command]
 
-Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env}
+Projects (in $PROJECTS_DIR): ${projects:-none yet; copy example.env.sample}
 The project can be left out when there is only one. A staging slot is named <project>@sN
 (example@s1) and takes the same commands, with its own folder, URL and branch.
 
@@ -5839,7 +5838,7 @@ main() {
     if [ -z "$PROJECT" ] && [ -z "$DEPLOY_BASE" ] && [ "${1:-deploy}" != help ] \
         && [ "${1:-}" != -h ] && [ "${1:-}" != --help ]; then
         projects="$(list_projects | paste -sd ' ' -)"
-        fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env})"
+        fail "name a project (${projects:-none yet; copy $PROJECTS_DIR/example.env.sample})"
     fi
 
     case "$command" in

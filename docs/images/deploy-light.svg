@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="556" height="616" viewBox="0 0 556 616">
+<rect x="0.5" y="0.5" width="555" height="615" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+<path d="M0.5 36V8.5a8 8 0 0 1 8-8H547.5a8 8 0 0 1 8 8V36Z" fill="#eaeef2" stroke="#d0d7de"/>
+<circle cx="18" cy="18" r="6" fill="#ff5f57"/><circle cx="38" cy="18" r="6" fill="#febc2e"/><circle cx="58" cy="18" r="6" fill="#28c840"/>
+<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="14" xml:space="preserve">
+<text x="20.0" y="68" fill="#6e7781">$</text><text x="36.9" y="68" fill="#1f2328">deploy</text><text x="95.9" y="68" fill="#1f2328">example</text>
+<text x="20.0" y="89" fill="#6e7781">┌</text><text x="45.3" y="89" fill="#1f2328" font-weight="700">release-switch</text><text x="171.7" y="89" fill="#6e7781">v2026.11.59</text><text x="272.9" y="89" fill="#1f2328">·</text><text x="289.8" y="89" fill="#1f2328">example</text><text x="357.2" y="89" fill="#1f2328">·</text><text x="374.1" y="89" fill="#1f2328">deploy</text>
+<text x="20.0" y="110" fill="#6e7781">│</text>
+<text x="20.0" y="131" fill="#1a7f37">◆</text><text x="45.3" y="131" fill="#1f2328">Cloning</text><text x="112.7" y="131" fill="#1f2328">develop</text>
+<text x="20.0" y="152" fill="#1a7f37">◇</text><text x="45.3" y="152" fill="#1f2328">Cloning</text><text x="112.7" y="152" fill="#1f2328">develop</text><text x="180.2" y="152" fill="#1f2328">(1s)</text>
+<text x="20.0" y="173" fill="#1a7f37">◇</text><text x="45.3" y="173" fill="#1f2328">Building</text><text x="121.2" y="173" fill="#1f2328">release</text><text x="188.6" y="173" fill="#1f2328">20261126-152310-v2026.11.5-82adae2</text>
+<text x="20.0" y="194" fill="#6e7781">│</text>
+<text x="20.0" y="215" fill="#6e7781">│</text><text x="45.3" y="215" fill="#1f2328">2</text><text x="62.1" y="215" fill="#1f2328">commit(s):</text>
+<text x="20.0" y="236" fill="#6e7781">│</text><text x="62.1" y="236" fill="#1f2328">82adae2</text><text x="129.6" y="236" fill="#1f2328">Faster</text><text x="188.6" y="236" fill="#1f2328">search</text><text x="247.6" y="236" fill="#1f2328">page</text>
+<text x="20.0" y="257" fill="#6e7781">│</text><text x="62.1" y="257" fill="#1f2328">a6059af</text><text x="129.6" y="257" fill="#1f2328">Add</text><text x="163.3" y="257" fill="#1f2328">the</text><text x="197.0" y="257" fill="#1f2328">price</text><text x="247.6" y="257" fill="#1f2328">filter</text>
+<text x="20.0" y="278" fill="#1a7f37">◇</text><text x="45.3" y="278" fill="#1f2328">Copying</text><text x="112.7" y="278" fill="#1f2328">cache</text><text x="163.3" y="278" fill="#1f2328">from</text><text x="205.5" y="278" fill="#1f2328">20261126-152306-v2026.11.4-5df18ee</text>
+<text x="20.0" y="299" fill="#1a7f37">◆</text><text x="45.3" y="299" fill="#1f2328">Running</text><text x="112.7" y="299" fill="#1f2328">preflight</text>
+<text x="20.0" y="320" fill="#1a7f37">◇</text><text x="45.3" y="320" fill="#1f2328">Running</text><text x="112.7" y="320" fill="#1f2328">preflight</text><text x="197.0" y="320" fill="#1f2328">(0s)</text>
+<text x="20.0" y="341" fill="#1a7f37">◆</text><text x="45.3" y="341" fill="#1f2328">Running</text><text x="112.7" y="341" fill="#1f2328">backup</text>
+<text x="20.0" y="362" fill="#1a7f37">◇</text><text x="45.3" y="362" fill="#1f2328">Running</text><text x="112.7" y="362" fill="#1f2328">backup</text><text x="171.7" y="362" fill="#1f2328">(0s)</text>
+<text x="20.0" y="383" fill="#1a7f37">◆</text><text x="45.3" y="383" fill="#1f2328">Running</text><text x="112.7" y="383" fill="#1f2328">build</text>
+<text x="20.0" y="404" fill="#1a7f37">◇</text><text x="45.3" y="404" fill="#1f2328">Running</text><text x="112.7" y="404" fill="#1f2328">build</text><text x="163.3" y="404" fill="#1f2328">(0s)</text>
+<text x="20.0" y="425" fill="#1a7f37">◆</text><text x="45.3" y="425" fill="#1f2328">Running</text><text x="112.7" y="425" fill="#1f2328">verify</text>
+<text x="20.0" y="446" fill="#1a7f37">◇</text><text x="45.3" y="446" fill="#1f2328">Running</text><text x="112.7" y="446" fill="#1f2328">verify</text><text x="171.7" y="446" fill="#1f2328">(0s)</text>
+<text x="20.0" y="467" fill="#1a7f37">◇</text><text x="45.3" y="467" fill="#1f2328">Switching</text><text x="129.6" y="467" fill="#1f2328">current</text><text x="197.0" y="467" fill="#1f2328">to</text><text x="222.3" y="467" fill="#1f2328">20261126-152310-v2026.11.5-82adae2</text>
+<text x="20.0" y="488" fill="#1a7f37">◆</text><text x="45.3" y="488" fill="#1f2328">Running</text><text x="112.7" y="488" fill="#1f2328">after_switch</text>
+<text x="20.0" y="509" fill="#1a7f37">◇</text><text x="45.3" y="509" fill="#1f2328">Running</text><text x="112.7" y="509" fill="#1f2328">after_switch</text><text x="222.3" y="509" fill="#1f2328">(0s)</text>
+<text x="20.0" y="530" fill="#1a7f37">◇</text><text x="45.3" y="530" fill="#1f2328">Checking</text><text x="121.2" y="530" fill="#1f2328">https://example.com/</text><text x="298.2" y="530" fill="#1f2328">(0s)</text>
+<text x="20.0" y="551" fill="#1a7f37">◇</text><text x="45.3" y="551" fill="#1f2328">Deployed</text><text x="121.2" y="551" fill="#1f2328">v2026.11.4</text><text x="213.9" y="551" fill="#1f2328">→</text><text x="230.8" y="551" fill="#1f2328">v2026.11.5</text>
+<text x="20.0" y="572" fill="#6e7781">│</text>
+<text x="20.0" y="593" fill="#6e7781">└</text><text x="45.3" y="593" fill="#1f2328">Done</text><text x="87.4" y="593" fill="#1f2328">in</text><text x="112.7" y="593" fill="#1f2328">2s</text>
+</g>
+</svg>

@@ -1,19 +1,73 @@
 # release-switch
 
-Zero-downtime deploys with release folders, for several PHP projects on one server.
+[![License: MIT](https://img.shields.io/github/license/ivan-tarasov/release-switch)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/ivan-tarasov/release-switch)](https://github.com/ivan-tarasov/release-switch/releases/latest)
+[![Bash 3.2+](https://img.shields.io/badge/bash-3.2%2B-4EAA25?logo=gnubash&logoColor=white)](deploy)
+
+**Zero-downtime deploys for several PHP projects on one server, shared hosting included: one bash
+script, a folder per release, a one-rename switch, and a switch back when the site does not come
+up.**
+
 One script (`deploy`) does the parts every project shares. Each project keeps its own steps in a
 `deploy.conf` file in its repo.
 
-If something fails, see [Troubleshooting](#troubleshooting).
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/deploy-dark.svg">
+  <img alt="deploy example: clones develop, runs preflight, backup, build and verify, switches current to the new release, checks the site and prints Deployed v2026.11.4 → v2026.11.5" src="docs/images/deploy-light.svg">
+</picture>
+
+- **Zero downtime.** Each deploy builds in a new release folder. `current` moves to it in one
+  rename, so the site never serves half a release.
+- **Switch back on failure.** After the switch, the site must answer with the new release in its
+  `X-App-Version` header. If it does not, `current` goes back and the bad release is set aside.
+- **One file per project.** `deploy.conf` holds the project's steps: `build`, `verify`, `backup`,
+  `health` and more. The engine stays the same for every project.
+- **Staging slots.** Each branch or pull request gets its own slot, folder and URL
+  (`deploy example stage feature/search`).
+- **Made for cron.** `--quiet` prints only problems, `check` watches the site, the disk and the
+  lock, and alerts go to a webhook or a command.
+- **A menu for people.** A bare `deploy` on a terminal shows every project and slot with what is
+  waiting to ship.
+
+> [!TIP]
+> If something fails, see [Troubleshooting](docs/troubleshooting.md).
+
+## How it works
+
+```mermaid
+flowchart LR
+    A["Clone the branch<br>into releases/"] --> B["preflight, backup,<br>build, verify"]
+    B -- fails --> C["Delete the new folder,<br>the old release stays live"]
+    B -- ok --> D["Switch current<br>to the new release"]
+    D --> E{"Does the site serve<br>the new release?"}
+    E -- yes --> F["Done, prune<br>old releases"]
+    E -- no --> G["Switch current back,<br>set the release aside"]
+```
+
+Each project has a base folder on the server. The web server serves `current/public`:
+
+```
+<base>/
+  releases/<UTC date>-<time>-<tag>-<short sha>/   one full copy of the code per deploy
+  shared/                                         files that live across releases (.env, uploads, a database file)
+  current -> releases/<name>                      the live release; the web server serves current/public
+```
+
+> [!WARNING]
+> A switch back or a rollback does not undo migrations or other data changes. Use a `backup()`
+> step (see [deploy.conf](#deployconf)) to undo a bad migration by hand.
+
+All the steps, the lock and the wait for a release tag are in
+[How a deploy runs](#how-a-deploy-runs).
 
 ## Quick start
 
-Once the server can read the project's repo (see [Setup on a server](#setup-on-a-server)):
+Once the server can read the project's repo (see [Adding a project](#adding-a-project)):
 
 1. Install the engine and add the `deploy` alias:
 
    ```bash
-   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
+   git clone https://github.com/ivan-tarasov/release-switch.git ~/release-switch
    echo 'alias deploy="$HOME/release-switch/deploy"' >> ~/.bashrc && source ~/.bashrc
    ```
 
@@ -44,7 +98,53 @@ problems:
 */10 * * * * $HOME/release-switch/deploy <project> --quiet
 ```
 
-## How it works
+## A closer look
+
+A bare `deploy` on a terminal opens the project menu. It reads every project, its staging slots and
+the engine at once, and lists what is waiting to ship (see [Project menu](#project-menu)):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/menu-dark.svg">
+  <img alt="The project menu: example-app with v2026.11.5 → v2026.11.6 and 2 commits, its slots s1, s2 and a free s3, and the engine" src="docs/images/menu-light.svg">
+</picture>
+
+`check --setup` finds setup mistakes before the first deploy does: the repo, `deploy.conf`, the
+shared files, PHP and Composer, the site and the alerts:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/setup-dark.svg">
+  <img alt="deploy example check --setup: six ok lines for repo, deploy.conf, shared, php, site and alerts" src="docs/images/setup-light.svg">
+</picture>
+
+`slots` shows each staging slot with its branch or pull request, live commit and URL (see
+[Staging](#staging)):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/slots-dark.svg">
+  <img alt="deploy example slots: s1 on feature/search, s2 on PR #51, s3 free, each with its URL" src="docs/images/slots-light.svg">
+</picture>
+
+The pictures come from real runs against a test project; `docs/screenshots/make.sh` makes them
+again.
+
+## Documentation
+
+This README is the full reference:
+
+- [How a deploy runs](#how-a-deploy-runs): every step, the lock, skipped commits and release tags
+- [Commands](#commands): every command and option, with [Project menu](#project-menu)
+- [Setup on a server](#setup-on-a-server) and [Adding a project](#adding-a-project)
+- [Settings](#settings), with [OPcache](#opcache) and [Alerts](#alerts)
+- [Staging](#staging): slots for branches and pull requests
+- [deploy.conf](#deployconf): the project's steps
+- [Output](#output): the rails on a terminal, plain lines in cron
+
+More in [`docs/`](docs):
+
+- [Troubleshooting](docs/troubleshooting.md): each error, what it means and what to do
+- [Contributing](docs/contributing.md): tests, pull requests and releases
+
+## How a deploy runs
 
 Each project has a base folder on the server:
 
@@ -317,7 +417,7 @@ question. Without a terminal (cron, pipes, `slots update`, `stage`) they never a
 problems. It works with any command, wherever it is on the line. A quiet run shows no `==>` lines,
 no rails, no step times and no `ok` lines from `check`; a skipped deploy (nothing new, or a commit
 that failed its check or was rolled back) prints nothing. The output of `deploy.conf` steps shows only when a step fails, and is kept in
-`<base>/deploy-failed.log` (see [A step failed or ran too long](#a-step-failed-or-ran-too-long)). A problem the run carries
+`<base>/deploy-failed.log` (see [A step failed or ran too long](docs/troubleshooting.md#a-step-failed-or-ran-too-long)). A problem the run carries
 on past (a failing `after_switch` or `PHP_RELOAD_CMD`), and the removal of a stale lock, become
 warnings. On a terminal, questions still show; without one it never asks. The bare `deploy` menu
 ignores `--quiet`.
@@ -342,7 +442,7 @@ held for 30 min or more, does not skip them.
 A commit whose site check failed, or that a plain `rollback` left, is not built again by the next
 cron run: the deploy that failed already sent its alert, and building it again would only break the
 site again. Cron deploys again once a new commit lands on the branch (see
-[A deploy says a commit failed its check](#a-deploy-says-a-commit-failed-its-check)). A build or
+[A deploy says a commit failed its check](docs/troubleshooting.md#a-deploy-says-a-commit-failed-its-check)). A build or
 `verify` failure does not count: the site never went down, so the next run tries again.
 
 ### Project menu
@@ -431,40 +531,18 @@ fails with `name a project (…)` when there are several.
 
 ## Setup on a server
 
-The repos are private. A GitHub deploy key works for one repo only, so each repo gets its own key,
-named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
+The engine's repo is public, so the server clones it over https and needs no key for it. Project
+repos are often private: a GitHub deploy key works for one repo only, so each project repo gets its
+own key, named `<repo>_deploy`, and its own host name in `~/.ssh/config` (see
+[Adding a project](#adding-a-project)).
 
-1. Make a key for this repo and print it:
-
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/release_switch_deploy -N "" -C "release-switch"
-   cat ~/.ssh/release_switch_deploy.pub
-   ```
-
-   Add it in GitHub under this repo's **Settings → Deploy keys**, with write access off.
-
-2. Give the key a host name, at the end of `~/.ssh/config`:
-
-   ```text
-   Host github-release-switch
-       HostName github.com
-       IdentityFile ~/.ssh/release_switch_deploy
-       IdentitiesOnly yes
-   ```
-
-   Check it:
+1. Install the script:
 
    ```bash
-   git ls-remote git@github-release-switch:ivan-tarasov/release-switch.git HEAD
+   git clone https://github.com/ivan-tarasov/release-switch.git ~/release-switch
    ```
 
-3. Install the script:
-
-   ```bash
-   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
-   ```
-
-4. Add the alias to `~/.bashrc`, then `source ~/.bashrc`:
+2. Add the alias to `~/.bashrc`, then `source ~/.bashrc`:
 
    ```bash
    alias deploy="$HOME/release-switch/deploy"
@@ -473,16 +551,33 @@ named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
    Keep the settings in the project files, not in the shell profile: an env var wins over every
    project file, so a `PHP_BIN` there would apply to all projects.
 
-5. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
+3. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
 
 To update the script: `deploy self-update` (or `git -C ~/release-switch pull`). Files in
 `projects/` other than `example.env` are not tracked, so a pull never touches them.
 
 ### Adding a project
 
-1. Give the server read access to the project's repo, as in steps 1 and 2 above: a key
-   `~/.ssh/<repo>_deploy`, added under that repo's **Deploy keys**, and a `Host github-<repo>`
-   entry. Check it with `git ls-remote git@github-<repo>:owner/<repo>.git HEAD`.
+1. Give the server read access to the project's repo, if it is private. Make a key for that repo
+   and print it:
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/<repo>_deploy -N "" -C "<repo>"
+   cat ~/.ssh/<repo>_deploy.pub
+   ```
+
+   Add it in GitHub under that repo's **Settings → Deploy keys**, with write access off. Then give
+   the key a host name, at the end of `~/.ssh/config`:
+
+   ```text
+   Host github-<repo>
+       HostName github.com
+       IdentityFile ~/.ssh/<repo>_deploy
+       IdentitiesOnly yes
+   ```
+
+   Check it with `git ls-remote git@github-<repo>:owner/<repo>.git HEAD`. A public repo needs none
+   of this: use its https URL as `REPO_URL`.
 2. Add a `deploy.conf` to the project's repo (see [deploy.conf](#deployconf)), and make the project
    send the `X-App-Version` header, or set `CHECK_VERSION=0` for now.
 3. Write the project file:
@@ -925,298 +1020,13 @@ output stays plain (`==> ...` lines, errors as `deploy: ...`), so scripts and ma
 
 ## Troubleshooting
 
-Errors print as `deploy: <message>` in a pipe or cron, or after `■` on a terminal. Many end with a
-`Try:` line that says what to do next. Warnings look the same, but the run goes on. Below,
-`example` is the project, and `<base>` its `DEPLOY_BASE`.
+Each error, what it means and what to do next is in
+[docs/troubleshooting.md](docs/troubleshooting.md).
 
-### Another deploy is running
+## Contributing
 
-```
-deploy: another deploy is running (PID 4242, deploy, 3 min); remove <base>/.deploy.lock if it is not
-Try: deploy example status, or wait for PID 4242
-```
-
-A project runs one deploy, rollback, `down`, `up` or `cache` at a time; the message names the
-other run. Wait for it to end. A lock whose process is gone is removed on its own, so remove
-`<base>/.deploy.lock` by hand only when that process is not running (`ps -p 4242`). `check` warns about a lock held for 30 min or more:
-`lock: held for 30 min (...); a deploy may be stuck`. With `--quiet` the refusal prints nothing,
-as cron would mail it every run; a lock with no owner still prints.
-
-If a run died while it removed a stale lock, you get
-`a stale lock removal stopped half way; remove <base>/.deploy.lock.break and <base>/.deploy.lock if no deploy is running`.
-Do what it says once no deploy runs.
-
-Two runs that start at the same moment can race for the lock. The one that loses says
-`lost the lock to another deploy while taking it` with `Try: deploy example status`. Check
-what the other run does, then run again.
-
-### Deploys are frozen
-
-```
-deploy: deploys are frozen since <time>: <reason>
-Try: deploy example unfreeze
-```
-
-Someone ran `deploy example freeze`. Deploys and rollbacks stop until `deploy example unfreeze`.
-Ask why first: the reason is in the message and in `status`. With `--quiet` the refusal prints
-nothing (the exit code stays 1), so cron stays quiet during a freeze.
-
-### The site is down for maintenance
-
-```
-deploy: not checking https://example.com/: the site is down for maintenance; check it with: deploy example up
-```
-
-A warning, not an error. Someone ran `deploy example down`, so the deploy or rollback cannot see
-the new version behind the maintenance page and does not check it. Run `deploy example up` when the
-work is done; it checks the site then. If `up` says
-`up ran, but the site does not serve <release>`, see
-[The check failed after the switch](#the-check-failed-after-the-switch).
-
-### No deploy.conf
-
-```
-deploy: develop has no deploy.conf
-Try: add one to the repo, see README.md#deployconf
-```
-
-The deployed branch has no `deploy.conf` in the repo root. Add one with at least a `build()` step
-(see [deploy.conf](#deployconf)); without that step the deploy stops with
-`deploy.conf has no build step`. `init` says
-`<checkout> has no deploy.conf; update it to a commit that has one`: pull the checkout first.
-
-### A step failed or ran too long
-
-```
-deploy: build failed; its output is in <base>/deploy-failed.log
-deploy: build ran past STEP_TIMEOUT (600 s); its output is in <base>/deploy-failed.log
-```
-
-A `deploy.conf` step (`preflight`, `backup`, `build`, `verify`) exited with an error, or ran
-longer than `STEP_TIMEOUT` and was stopped with all it started. The step's own output is above the
-error, and is also kept in `<base>/deploy-failed.log`, so the error of a cron run (a composer or
-migration error) can be read later. The file starts with the step, the release and the time (UTC).
-Each failed step overwrites it; it keeps the last 100 KB, and URLs in it hide their user and
-password. `status` shows `Failed: build at <time>; its output is in <base>/deploy-failed.log` until
-the next good deploy. A slot keeps its own file in its folder. The `failed` step never overwrites
-it. Nothing was switched: the new folder is deleted and the old release stays live. Fix the step,
-or raise `STEP_TIMEOUT` in `projects/example.env` if the step is slow but fine (`0` turns the limit
-off). `check` reports a slow `health()` step as `health: ran past STEP_TIMEOUT (600 s)`.
-
-### The check failed after the switch
-
-```
-deploy: the check failed; <old release> is live (data changes stay applied)
-Try: open https://example.com/: it answered 500 with version none, not v2026.11.4-abc1234
-```
-
-After the switch, `CHECK_URL` did not answer 200 with the new release in `X-App-Version` within
-`CHECK_WAIT` seconds. The deploy switched back to the old release on its own and set the new one
-aside as `releases/.failed-<name>`. Migrations that ran stay applied. Open the URL from the hint:
-
-- a 500 or no answer: read the app's log in the failed release;
-- a 200 with an old or no version: the app does not send `X-App-Version` from its `RELEASE` file
-  (set `CHECK_VERSION=0` until it does), or a cache serves an old page (see [OPcache](#opcache));
-- it is just slow to start: raise `CHECK_WAIT`.
-
-A rollback that cannot see its target says `<release> is linked, but the site does not serve it yet`
-with the same hint. The rollback stands; check the site.
-
-### A deploy says a commit failed its check
-
-```
-==> abc1234 failed its check; push a fix, or deploy example --force
-==> abc1234 was rolled back; push a fix, or deploy example --force
-```
-
-A plain `deploy` (no `--force`, no `--ref`) found that the newest commit of the branch broke the
-site before: its site check failed and the deploy switched back, or a plain `rollback` left it.
-It builds nothing and exits with 0, like "Nothing new", so cron does not break the site every run;
-with `--quiet` it prints nothing. `status` shows it on a `Skips:` line, and `status --all` and the
-menu note `tip abc1234 failed its check`. Push a fix: a new commit deploys as usual. To build the
-same commit again (say the cause was outside the code and is fixed), run
-`deploy example --force`, or `--ref <sha>`. A good deploy of the branch tip (plain or `--force`)
-clears the list. A good `--ref` deploy, say back to an older tag, leaves it, as the tip may still be
-broken. Failures
-before the switch (`build`, `verify`) are not remembered, so a flaky network only costs a retry.
-The list lives in `<base>/.skip-commits`, one line per commit (full sha, reason, release), newest
-first, up to 10; a staging slot has its own in its own base folder.
-
-### Cannot clone or fetch the repo
-
-```
-deploy: could not clone git@github-example:owner/example.git
-Try: git ls-remote git@github-example:owner/example.git, and check REPO_URL, the SSH key or host alias, and the network
-```
-
-The server cannot read the repo. Run the `git ls-remote` from the hint. If it fails, check
-`REPO_URL` in `projects/example.env`, the deploy key and the `Host` entry in `~/.ssh/config` (see
-[Adding a project](#adding-a-project)). A staging slot says
-`could not fetch PR #N from <repo>` for the same cause. A wrong name says
-`no branch <name> in the repo` or `no tag, branch or commit <ref> in the repo`.
-
-### Unknown release in rollback
-
-```
-deploy: no release matches 'abc1234'
-Try: deploy example status (it lists the releases)
-```
-
-No kept release has that text in its name. Pick one from `status`. A release that `KEEP_RELEASES`
-no longer keeps can come back with `deploy example --ref <tag or sha>`. Other rollback errors:
-
-- `'2026' matches 3 releases; use more of the name`: add more of the name, like the time or sha;
-- `no good release older than <release>`: there is no older release, or all are marked bad; name one;
-- `<release> is already live`: nothing to do.
-
-### deploy self cannot update
-
-```
-deploy: could not update <engine folder>; it has local changes
-Try: git -C <engine folder> status
-```
-
-```
-deploy: could not update <engine folder>; it has local commits the remote lacks
-Try: git -C <engine folder> log @{u}..
-```
-
-`deploy self` only does a fast-forward `git pull`. It stops when the engine folder has local
-changes or its branch has commits the remote lacks, and says which. Run the command from the
-hint, undo or move the changes or commits, and run `deploy self` again. Project files in
-`projects/` are not tracked, so they never block it. The last line of `deploy status --all`
-also says when the engine has local changes.
-
-### No release tag
-
-```
-deploy: no release tag on abc1234 after 90 s; deploying without one
-Try: deploy example --no-wait, or RELEASE_WAIT=0 if the repo does not tag every merge
-```
-
-A warning: the deploy goes on, and the release name has no tag. The release workflow did not tag
-the merge within `RELEASE_WAIT` seconds. Check the workflow run in GitHub. If the repo does not tag
-every merge, use `deploy example --no-wait`, set `RELEASE_WAIT=0`, or add the no-release marker job
-(see [How it works](#how-it-works)). `no release tag on abc1234; deploying without one` means the
-commit is over 5 minutes old, so the deploy did not wait.
-
-Three merges close together can leave the middle one without a tag. The release workflow runs one
-at a time and keeps only one run waiting, so the third merge's run cancels the second one's. Rerun
-the cancelled run in GitHub Actions: it tags the merge with the next free version.
-
-### Nothing to clear
-
-```
-deploy: nothing to clear: deploy.conf of <release> has no cache() step and OPCACHE_RESET_DIR is not set
-Try: define cache() in deploy.conf, or set OPCACHE_RESET_DIR in <engine folder>/projects/example.env
-```
-
-`cache` has nothing to run. Add a `cache()` step to `deploy.conf` (it runs in the live release
-after the next deploy), or set `OPCACHE_RESET_DIR` (see [OPcache](#opcache)).
-
-### Disk space
-
-```
-deploy: only 312.0M free on the disk of <base>, under MIN_FREE_MB (500M); free some space before deploying
-Try: deploy example prune (removes failed and old releases)
-deploy: disk: 2.3G used of 2.0G, 40.1G free, over DISK_LIMIT (2G); prune after the deploy may help
-```
-
-The first is an error: the deploy stops before it writes anything when free space is under
-`MIN_FREE_MB`. Run `deploy example prune --dry-run` to see what `prune` would free, then
-`deploy example prune` to remove failed releases, unfinished builds and releases past
-`KEEP_RELEASES` (`--keep 2` keeps the fewest). If that is
-not enough, free space elsewhere, or lower `MIN_FREE_MB` (`0` turns it off). The second is a warning: the
-base folder is bigger than `DISK_LIMIT`. The deploy goes on and deletes old releases at the end,
-which may bring it back down; if not, lower `KEEP_RELEASES` or clean `shared/`. `check` fails on
-both, as `disk: ...; over DISK_LIMIT (2G)` or `disk: ...; under MIN_FREE_MB (500M free)`.
-
-### The base folder cannot be written
-
-```
-deploy: cannot write to <base> (disk full, quota or permissions)
-Try: df -h <base>; ls -ld <base>
-```
-
-The lock folder could not be made, and no other run holds it. Free space, raise the quota, or give
-the deploy user write access to `<base>`.
-
-### An old release cannot be removed
-
-```
-deploy: could not remove <base>/releases/<release>; some files in it cannot be deleted, remove it by hand
-```
-
-A warning: the new release is live and the deploy is logged `ok`. A file in the old release
-belongs to another user (often the web server) or sits in a read-only folder. Remove the folder as
-a user who can, for example with the hosting panel's file manager.
-
-## Tests
-
-`tests/run.sh` deploys a tiny PHP project (`tests/fixture/`) from a throwaway bare repo into a temp
-folder and serves it with `php -S`. It covers:
-
-- Mistakes in a project file, `init` (also `--dry-run`) and `check --setup` before the first deploy.
-- Deploys, rollbacks (also to a named release, `rollback --dry-run` and past a new migration) and
-  bad releases; `backup()`, `failed()`, `after_rollback()`, `health()` and `cache()`; the kept
-  output of a failed step; copies from the live release; `CLEAR_PATHS` and `SHARED`, and that
-  shared files survive.
-- `status` and `status --all`, `diff`, `path`, `check`, the log and `self log`, the rails and
-  `--version`, `--quiet`, `--ref`, the wait for a release tag, the no-release marker and
-  `--no-wait`, skipped commits, `freeze`, `down` and `up`.
-- Help: the full help, per-command help (`<command> --help`, `-h`, `help <command>`), typo hints,
-  usage errors that show the help's usage line, and that the [Commands](#commands) block lists
-  every command and every form of `deploy help <command>`.
-- The lock: stale locks, locks with no owner and runs racing for a stale lock.
-- Alerts (also for 2000 commits), a token in `REPO_URL`, `PHP_RELOAD_CMD`, the web OPcache reset,
-  `STEP_TIMEOUT` and git timeouts, `DISK_LIMIT` and `MIN_FREE_MB`, signals and a closed output
-  pipe, a missing live folder and a read-only base folder.
-- Prune and `KEEP_RELEASES`, and the `prune` command.
-- Staging slots: branches, pull requests, folders, URLs, `slots`, `stage`, `free`, `slots update`
-  and `copy-from`, and the `staging` group in its own form and the old one.
-- On a terminal: the questions before risky commands and the project menu.
-- `deploy self`: update, log and the wait for its tag.
-
-It needs bash, PHP 8.1+, git and curl. The terminal tests also need `script`; without it they are
-skipped. A full run takes about 8 minutes on a recent Mac.
-
-```bash
-tests/run.sh
-```
-
-- `DEPLOY_TEST_PORT` sets the port of the test server (default `8098`). Give each run its own port
-  when two run at once.
-- `DEPLOY_TEST_KEEP=1` keeps the temp folder after the run, for a look after a failure.
-
-There is no CI for now: run it and `shellcheck deploy tests/run.sh` before a pull request.
-
-## Pull requests and releases
-
-Open pull requests into `main`, as drafts until they are ready.
-
-Every pull request needs:
-
-- **Title:** `Fix:`, `Update:`, `Feature:` or `Design:`, then `` `Component` – short phrase `` (en dash).
-  Example: ``Feature: `Deploy` – down and up for maintenance mode``.
-- **One release label:** `release:major`, `release:minor` (new functionality),
-  `release:patch` (fix or internal change; the default) or `no-release` (docs, CI, chores).
-- **An assignee.**
-- **Body:** `## Description`, `## Changes` and `## Release note` (1–3 sentences, or `None`).
-
-The PR rules workflow checks this once a pull request is ready. It is not a required check. To check
-by hand:
-
-```bash
-PR=<N> GITHUB_REPOSITORY=ivan-tarasov/release-switch node scripts/pr-check.mjs
-```
-
-When a pull request merges into `main`, the Release workflow tags the merge commit and makes a
-GitHub release with generated notes. A `no-release` pull request gets no tag, only a
-`refs/no-release/<merge sha>` marker (see above).
-The version is `vYEAR.MONTH.COUNT` from the merge date in UTC: the first release of November 2026
-is `v2026.11.1`, the next `v2026.11.2`. `deploy self` pulls the tags with the code, and
-`deploy --version` shows the one in use. Run right after a merge, `deploy self` waits for the
-merge's tag (or its no-release marker) the same way a deploy does, then shows the tag and its notes.
+How to run the tests, and the rules for pull requests and releases, are in
+[docs/contributing.md](docs/contributing.md).
 
 ## License
 

@@ -45,6 +45,9 @@ git -C "$WORK/engine.git" fetch --quiet --tags "$ROOT"
 git -C "$WORK/engine.git" update-ref refs/heads/main "$TAG^{commit}"
 git -C "$WORK/engine.git" symbolic-ref HEAD refs/heads/main
 git clone --quiet "$WORK/engine.git" "$WORK/release-switch"
+# This checkout's deploy over it, uncommitted, so the pictures show the code being changed under the
+# tag's version.
+cp "$ROOT/deploy" "$WORK/release-switch/deploy"
 
 mkdir -p "$FAKE_HOME/bin" "$WORK/release-switch/projects"
 printf '#!/bin/sh\necho "Composer version 2.8.0"\n' > "$FAKE_HOME/bin/composer"

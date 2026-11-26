@@ -455,16 +455,18 @@ under it as a tree:
 ┌  release-switch v2026.11.32
 │
 ◇  Checking 5 projects…
-◆  Pick a project
-│  ❯ 1  example         v2026.11.4 → v2026.11.5    3 commits       site ok
-│    2  ├ s1            develop                    up to date      site ok
-│    3  └ s2            PR #51                     2 commits       site ok
-│    4  other           v2026.11.2                 up to date      site ok
-│    5  ├ s1            feature/search             1 commit        site ok
-│    6  └ s2, s3        free
-│    7  release-switch  v2026.11.33 → v2026.11.34  run deploy self
-│       Recheck projects
-│       Quit
+◆  Pick a project                                   4 to ship · 1 problem
+│        NAME            VERSION                    PENDING          SITE
+│  ❯ 1 ● example         v2026.11.4 → v2026.11.5    3 commits        ok
+│    2 ✓ ├ s1            develop                    up to date       ok
+│    3 ● └ s2            PR #51                     2 commits        ok
+│    4 ✗ other           v2026.11.2                 up to date       ok
+│          ↳ frozen
+│    5 ● ├ s1            feature/search             1 commit         ok
+│    6 ○ └ s2, s3        free
+│    7 ● release-switch  v2026.11.33 → v2026.11.34  run deploy self
+│        Recheck projects
+│        Quit
 │
 │  ↑↓/1-7 pick · Enter open · r refresh · q quit
 ```
@@ -488,9 +490,13 @@ Enter opens the action list of the picked row:
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
-none, and the deploy waits for the tag as usual. Problems (frozen, down, lock held, failed releases,
-a site that does not serve the live release) show in red at the end of the row. Production names are
-bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf. Projects with
+none, and the deploy waits for the tag as usual. A symbol in front of each row shows its state: `●`
+something to ship, `✓` up to date, `✗` a problem, `○` free slots. The symbols stay with `NO_COLOR`
+and with `TERM=dumb`. Dim labels name the columns, and the title counts the rows to ship and the
+rows with a problem. Problems (frozen, down, lock held, failed releases, a site that does not serve
+the live release) show in red on a line of their own under the row. The columns fit the terminal
+width (`tput cols`, 80 when unknown): when a row is too long, the widest column is cut with `…`, so
+no row wraps. Production names are bold. A slot row shows the branch it follows, or `PR #N`. Free slots share one dim leaf. Projects with
 something to ship come first, each with its slots right under it; up-to-date rows are dimmed. The dim
 `Recheck projects` and `Quit` rows are last.
 

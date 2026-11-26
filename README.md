@@ -1217,3 +1217,7 @@ The version is `vYEAR.MONTH.COUNT` from the merge date in UTC: the first release
 is `v2026.11.1`, the next `v2026.11.2`. `deploy self` pulls the tags with the code, and
 `deploy --version` shows the one in use. Run right after a merge, `deploy self` waits for the
 merge's tag (or its no-release marker) the same way a deploy does, then shows the tag and its notes.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -37,9 +37,14 @@ if curl --silent --output /dev/null "http://127.0.0.1:$PORT/"; then
     exit 1
 fi
 
-# The engine, cloned at its newest commit, so the menu shows a clean engine with its real version.
-git clone --quiet "$ROOT" "$WORK/release-switch"
-git -C "$WORK/release-switch" fetch --quiet --tags "$ROOT"
+# The engine at its newest release tag, cloned from a repo whose main is that tag, so the pictures
+# show a clean version like v2026.11.59 and an engine with nothing newer to pull.
+TAG="$(git -C "$ROOT" describe --tags --abbrev=0 --match 'v*')"
+git clone --quiet --bare "$ROOT" "$WORK/engine.git"
+git -C "$WORK/engine.git" fetch --quiet --tags "$ROOT"
+git -C "$WORK/engine.git" update-ref refs/heads/main "$TAG^{commit}"
+git -C "$WORK/engine.git" symbolic-ref HEAD refs/heads/main
+git clone --quiet "$WORK/engine.git" "$WORK/release-switch"
 
 mkdir -p "$FAKE_HOME/bin" "$WORK/release-switch/projects"
 printf '#!/bin/sh\necho "Composer version 2.8.0"\n' > "$FAKE_HOME/bin/composer"
@@ -126,8 +131,9 @@ cat > "$WORK/router.php" <<EOF
 if (preg_match('/^(s[0-9]+)\\./', \$_SERVER['HTTP_HOST'] ?? '', \$m)) {
     \$base = '$DOMAIN/' . \$m[1];
 }
+// Before the first release, like a hosting placeholder page.
 if (!is_dir("\$base/current/public")) {
-    http_response_code(404);
+    echo 'coming soon';
     return;
 }
 chdir("\$base/current/public");

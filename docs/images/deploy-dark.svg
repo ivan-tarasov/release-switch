@@ -4,16 +4,16 @@
 <circle cx="18" cy="18" r="6" fill="#ff5f57"/><circle cx="38" cy="18" r="6" fill="#febc2e"/><circle cx="58" cy="18" r="6" fill="#28c840"/>
 <g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace" font-size="14" xml:space="preserve">
 <text x="20.0" y="68" fill="#8b949e">$</text><text x="36.9" y="68" fill="#e6edf3">deploy</text><text x="95.9" y="68" fill="#e6edf3">example</text>
-<text x="20.0" y="89" fill="#8b949e">┌</text><text x="45.3" y="89" fill="#e6edf3" font-weight="700">release-switch</text><text x="171.7" y="89" fill="#8b949e">v2026.11.59+5</text><text x="289.8" y="89" fill="#e6edf3">·</text><text x="306.6" y="89" fill="#e6edf3">example</text><text x="374.1" y="89" fill="#e6edf3">·</text><text x="390.9" y="89" fill="#e6edf3">deploy</text>
+<text x="20.0" y="89" fill="#8b949e">┌</text><text x="45.3" y="89" fill="#e6edf3" font-weight="700">release-switch</text><text x="171.7" y="89" fill="#8b949e">v2026.11.59</text><text x="272.9" y="89" fill="#e6edf3">·</text><text x="289.8" y="89" fill="#e6edf3">example</text><text x="357.2" y="89" fill="#e6edf3">·</text><text x="374.1" y="89" fill="#e6edf3">deploy</text>
 <text x="20.0" y="110" fill="#8b949e">│</text>
 <text x="20.0" y="131" fill="#3fb950">◆</text><text x="45.3" y="131" fill="#e6edf3">Cloning</text><text x="112.7" y="131" fill="#e6edf3">develop</text>
-<text x="20.0" y="152" fill="#3fb950">◇</text><text x="45.3" y="152" fill="#e6edf3">Cloning</text><text x="112.7" y="152" fill="#e6edf3">develop</text><text x="180.2" y="152" fill="#e6edf3">(0s)</text>
-<text x="20.0" y="173" fill="#3fb950">◇</text><text x="45.3" y="173" fill="#e6edf3">Building</text><text x="121.2" y="173" fill="#e6edf3">release</text><text x="188.6" y="173" fill="#e6edf3">20261126-150531-v2026.11.5-7239983</text>
+<text x="20.0" y="152" fill="#3fb950">◇</text><text x="45.3" y="152" fill="#e6edf3">Cloning</text><text x="112.7" y="152" fill="#e6edf3">develop</text><text x="180.2" y="152" fill="#e6edf3">(1s)</text>
+<text x="20.0" y="173" fill="#3fb950">◇</text><text x="45.3" y="173" fill="#e6edf3">Building</text><text x="121.2" y="173" fill="#e6edf3">release</text><text x="188.6" y="173" fill="#e6edf3">20261126-152310-v2026.11.5-82adae2</text>
 <text x="20.0" y="194" fill="#8b949e">│</text>
 <text x="20.0" y="215" fill="#8b949e">│</text><text x="45.3" y="215" fill="#e6edf3">2</text><text x="62.1" y="215" fill="#e6edf3">commit(s):</text>
-<text x="20.0" y="236" fill="#8b949e">│</text><text x="62.1" y="236" fill="#e6edf3">7239983</text><text x="129.6" y="236" fill="#e6edf3">Faster</text><text x="188.6" y="236" fill="#e6edf3">search</text><text x="247.6" y="236" fill="#e6edf3">page</text>
-<text x="20.0" y="257" fill="#8b949e">│</text><text x="62.1" y="257" fill="#e6edf3">c3e9713</text><text x="129.6" y="257" fill="#e6edf3">Add</text><text x="163.3" y="257" fill="#e6edf3">the</text><text x="197.0" y="257" fill="#e6edf3">price</text><text x="247.6" y="257" fill="#e6edf3">filter</text>
-<text x="20.0" y="278" fill="#3fb950">◇</text><text x="45.3" y="278" fill="#e6edf3">Copying</text><text x="112.7" y="278" fill="#e6edf3">cache</text><text x="163.3" y="278" fill="#e6edf3">from</text><text x="205.5" y="278" fill="#e6edf3">20261126-150525-v2026.11.4-5a1582a</text>
+<text x="20.0" y="236" fill="#8b949e">│</text><text x="62.1" y="236" fill="#e6edf3">82adae2</text><text x="129.6" y="236" fill="#e6edf3">Faster</text><text x="188.6" y="236" fill="#e6edf3">search</text><text x="247.6" y="236" fill="#e6edf3">page</text>
+<text x="20.0" y="257" fill="#8b949e">│</text><text x="62.1" y="257" fill="#e6edf3">a6059af</text><text x="129.6" y="257" fill="#e6edf3">Add</text><text x="163.3" y="257" fill="#e6edf3">the</text><text x="197.0" y="257" fill="#e6edf3">price</text><text x="247.6" y="257" fill="#e6edf3">filter</text>
+<text x="20.0" y="278" fill="#3fb950">◇</text><text x="45.3" y="278" fill="#e6edf3">Copying</text><text x="112.7" y="278" fill="#e6edf3">cache</text><text x="163.3" y="278" fill="#e6edf3">from</text><text x="205.5" y="278" fill="#e6edf3">20261126-152306-v2026.11.4-5df18ee</text>
 <text x="20.0" y="299" fill="#3fb950">◆</text><text x="45.3" y="299" fill="#e6edf3">Running</text><text x="112.7" y="299" fill="#e6edf3">preflight</text>
 <text x="20.0" y="320" fill="#3fb950">◇</text><text x="45.3" y="320" fill="#e6edf3">Running</text><text x="112.7" y="320" fill="#e6edf3">preflight</text><text x="197.0" y="320" fill="#e6edf3">(0s)</text>
 <text x="20.0" y="341" fill="#3fb950">◆</text><text x="45.3" y="341" fill="#e6edf3">Running</text><text x="112.7" y="341" fill="#e6edf3">backup</text>
@@ -22,7 +22,7 @@
 <text x="20.0" y="404" fill="#3fb950">◇</text><text x="45.3" y="404" fill="#e6edf3">Running</text><text x="112.7" y="404" fill="#e6edf3">build</text><text x="163.3" y="404" fill="#e6edf3">(0s)</text>
 <text x="20.0" y="425" fill="#3fb950">◆</text><text x="45.3" y="425" fill="#e6edf3">Running</text><text x="112.7" y="425" fill="#e6edf3">verify</text>
 <text x="20.0" y="446" fill="#3fb950">◇</text><text x="45.3" y="446" fill="#e6edf3">Running</text><text x="112.7" y="446" fill="#e6edf3">verify</text><text x="171.7" y="446" fill="#e6edf3">(0s)</text>
-<text x="20.0" y="467" fill="#3fb950">◇</text><text x="45.3" y="467" fill="#e6edf3">Switching</text><text x="129.6" y="467" fill="#e6edf3">current</text><text x="197.0" y="467" fill="#e6edf3">to</text><text x="222.3" y="467" fill="#e6edf3">20261126-150531-v2026.11.5-7239983</text>
+<text x="20.0" y="467" fill="#3fb950">◇</text><text x="45.3" y="467" fill="#e6edf3">Switching</text><text x="129.6" y="467" fill="#e6edf3">current</text><text x="197.0" y="467" fill="#e6edf3">to</text><text x="222.3" y="467" fill="#e6edf3">20261126-152310-v2026.11.5-82adae2</text>
 <text x="20.0" y="488" fill="#3fb950">◆</text><text x="45.3" y="488" fill="#e6edf3">Running</text><text x="112.7" y="488" fill="#e6edf3">after_switch</text>
 <text x="20.0" y="509" fill="#3fb950">◇</text><text x="45.3" y="509" fill="#e6edf3">Running</text><text x="112.7" y="509" fill="#e6edf3">after_switch</text><text x="222.3" y="509" fill="#e6edf3">(0s)</text>
 <text x="20.0" y="530" fill="#3fb950">◇</text><text x="45.3" y="530" fill="#e6edf3">Checking</text><text x="121.2" y="530" fill="#e6edf3">https://example.com/</text><text x="298.2" y="530" fill="#e6edf3">(0s)</text>

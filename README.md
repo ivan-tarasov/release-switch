@@ -284,12 +284,12 @@ Commands:
                     it is N commits past it
 ```
 
-`project` is the name of a file in `projects/` (`projects/tarasov.env` is `tarasov`).
-It can be left out when there is only one. A staging slot is `<project>@sN`, like `tarasov@s1`,
-and takes the same commands: `deploy tarasov@s1 status`, `deploy path tarasov@s1`.
+`project` is the name of a file in `projects/` (`projects/example.env` is `example`).
+It can be left out when there is only one. A staging slot is `<project>@sN`, like `example@s1`,
+and takes the same commands: `deploy example@s1 status`, `deploy path example@s1`.
 
 `deploy <command> --help`, `deploy <command> -h` and `deploy help <command>` show the help of one
-command: its usage, options and examples. A project in front works too: `deploy tarasov rollback --help`.
+command: its usage, options and examples. A project in front works too: `deploy example rollback --help`.
 A mistyped command prints one line with the closest command, like
 `Unknown command: rolback. Did you mean rollback?`, and exits with 2. The same goes for the
 `staging` subcommands: `deploy staging checkout --help`, and
@@ -356,7 +356,7 @@ under it as a tree:
 │
 ◇  Checking 5 projects…
 ◆  Pick a project
-│  ❯ 1  tarasov.ca      v2026.11.4 → v2026.11.5    3 commits       site ok
+│  ❯ 1  example         v2026.11.4 → v2026.11.5    3 commits       site ok
 │    2  ├ s1            develop                    up to date      site ok
 │    3  └ s2            PR #51                     2 commits       site ok
 │    4  other           v2026.11.2                 up to date      site ok
@@ -372,7 +372,7 @@ under it as a tree:
 Enter opens the action list of the picked row:
 
 ```
-◆  tarasov.ca — production · v2026.11.4 → v2026.11.5
+◆  example — production · v2026.11.4 → v2026.11.5
 │  ❯ 1  Deploy new release (3 commits)
 │    2  Status
 │    3  Check site
@@ -905,7 +905,7 @@ request still leaves time to retry.
 In a terminal, each command runs on rails, like this:
 
 ```
-┌  release-switch v2026.11.1 · tarasov · deploy
+┌  release-switch v2026.11.1 · example · deploy
 │
 ◆  Cloning develop
 ◇  Cloning develop (2s)

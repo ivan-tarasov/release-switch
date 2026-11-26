@@ -62,12 +62,12 @@ All the steps, the lock and the wait for a release tag are in
 
 ## Quick start
 
-Once the server can read the project's repo (see [Setup on a server](#setup-on-a-server)):
+Once the server can read the project's repo (see [Adding a project](#adding-a-project)):
 
 1. Install the engine and add the `deploy` alias:
 
    ```bash
-   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
+   git clone https://github.com/ivan-tarasov/release-switch.git ~/release-switch
    echo 'alias deploy="$HOME/release-switch/deploy"' >> ~/.bashrc && source ~/.bashrc
    ```
 
@@ -531,40 +531,18 @@ fails with `name a project (…)` when there are several.
 
 ## Setup on a server
 
-The repos are private. A GitHub deploy key works for one repo only, so each repo gets its own key,
-named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
+The engine's repo is public, so the server clones it over https and needs no key for it. Project
+repos are often private: a GitHub deploy key works for one repo only, so each project repo gets its
+own key, named `<repo>_deploy`, and its own host name in `~/.ssh/config` (see
+[Adding a project](#adding-a-project)).
 
-1. Make a key for this repo and print it:
-
-   ```bash
-   ssh-keygen -t ed25519 -f ~/.ssh/release_switch_deploy -N "" -C "release-switch"
-   cat ~/.ssh/release_switch_deploy.pub
-   ```
-
-   Add it in GitHub under this repo's **Settings → Deploy keys**, with write access off.
-
-2. Give the key a host name, at the end of `~/.ssh/config`:
-
-   ```text
-   Host github-release-switch
-       HostName github.com
-       IdentityFile ~/.ssh/release_switch_deploy
-       IdentitiesOnly yes
-   ```
-
-   Check it:
+1. Install the script:
 
    ```bash
-   git ls-remote git@github-release-switch:ivan-tarasov/release-switch.git HEAD
+   git clone https://github.com/ivan-tarasov/release-switch.git ~/release-switch
    ```
 
-3. Install the script:
-
-   ```bash
-   git clone git@github-release-switch:ivan-tarasov/release-switch.git ~/release-switch
-   ```
-
-4. Add the alias to `~/.bashrc`, then `source ~/.bashrc`:
+2. Add the alias to `~/.bashrc`, then `source ~/.bashrc`:
 
    ```bash
    alias deploy="$HOME/release-switch/deploy"
@@ -573,16 +551,33 @@ named `<repo>_deploy`, and its own host name in `~/.ssh/config`.
    Keep the settings in the project files, not in the shell profile: an env var wins over every
    project file, so a `PHP_BIN` there would apply to all projects.
 
-5. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
+3. Add each project (see below), then check with `deploy --help` and `deploy <project> status`.
 
 To update the script: `deploy self-update` (or `git -C ~/release-switch pull`). Files in
 `projects/` other than `example.env` are not tracked, so a pull never touches them.
 
 ### Adding a project
 
-1. Give the server read access to the project's repo, as in steps 1 and 2 above: a key
-   `~/.ssh/<repo>_deploy`, added under that repo's **Deploy keys**, and a `Host github-<repo>`
-   entry. Check it with `git ls-remote git@github-<repo>:owner/<repo>.git HEAD`.
+1. Give the server read access to the project's repo, if it is private. Make a key for that repo
+   and print it:
+
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/<repo>_deploy -N "" -C "<repo>"
+   cat ~/.ssh/<repo>_deploy.pub
+   ```
+
+   Add it in GitHub under that repo's **Settings → Deploy keys**, with write access off. Then give
+   the key a host name, at the end of `~/.ssh/config`:
+
+   ```text
+   Host github-<repo>
+       HostName github.com
+       IdentityFile ~/.ssh/<repo>_deploy
+       IdentitiesOnly yes
+   ```
+
+   Check it with `git ls-remote git@github-<repo>:owner/<repo>.git HEAD`. A public repo needs none
+   of this: use its https URL as `REPO_URL`.
 2. Add a `deploy.conf` to the project's repo (see [deploy.conf](#deployconf)), and make the project
    send the `X-App-Version` header, or set `CHECK_VERSION=0` for now.
 3. Write the project file:

@@ -483,19 +483,26 @@ under it as a tree:
 Enter opens the action list of the picked row:
 
 ```
-◆  example — production · v2026.11.4 → v2026.11.5
-│  ❯ 1  Deploy new release (3 commits)
-│    2  Status
-│    3  Check site
-│    4  Log
-│    5  Rollback…
-│    6  Clear cache
-│    7  Prune releases
-│    8  Freeze…
-│    9  Down…
-│       Back
+◆  example — production · v2026.11.5 → v2026.11.6
+│  Ship
+│  ❯ d  Deploy new release    2 commits
+│    f  Changed files         files the next deploy changes
+│  Look
+│    s  Status                releases and pending commits
+│    c  Check site            a health check that changes nothing
+│    l  Log                   the last deploys and rollbacks
+│    g  Go to current folder  opens a shell in the live release
+│  Upkeep
+│    x  Clear cache           clears the live release's cache
+│    p  Prune releases        removes old releases
+│    z  Freeze…               refuses deploys and rollbacks
+│  Risky
+│    o  Rollback…             back to the previous good release
+│    w  Down…                 the site shows the maintenance page
 │
-│  ↑↓/1-9 pick · Enter run · b back · q quit
+│    b  Back
+│
+│  letter or ↑↓ Enter · b back · q quit
 ```
 
 `live → new` means the branch tip has a newer release tag; `N commits, no tag yet` means it has
@@ -535,6 +542,36 @@ Pick with the arrow keys, `j`/`k` or a number, then Enter. Each row opens its ow
   `deploy staging <project> checkout …`, which uses the first free slot.
 - Engine: Update engine (`deploy self`), Log (`deploy self log`).
 
+The actions sit in four groups under dim labels you cannot pick: Ship, Look, Upkeep and Risky. Risky
+actions change the live site or its data (Rollback…, Down…, Copy data from production…, Free slot):
+they and their label are red. A dim hint after each action says what it does, or the state it acts
+on (the pending commits of a deploy), cut with `…` to fit the terminal width. Each action has its
+own letter, shown in front of it, and the letter runs it at once, like Enter on it:
+
+| Letter | Action | Group |
+| --- | --- | --- |
+| `d` | Deploy new release, Update, Redeploy, Update engine | Ship |
+| `t` | Checkout branch or PR… | Ship |
+| `f` | Changed files | Ship |
+| `s` | Status | Look |
+| `c` | Check site | Look |
+| `l` | Log | Look |
+| `g` | Go to current folder | Look |
+| `x` | Clear cache | Upkeep |
+| `p` | Prune releases | Upkeep |
+| `z` | Freeze… | Upkeep |
+| `u` | Unfreeze | Upkeep |
+| `w` | Down… (Risky), or Up (Upkeep) when the site is down | Risky, Upkeep |
+| `o` | Rollback… | Risky |
+| `y` | Copy data from production… | Risky |
+| `e` | Free slot | Risky |
+| `b` | Back | |
+
+Letters skip `j`, `k`, `b`, `q`, `r` and `i`, which the lists use already; other letters do nothing.
+The arrow keys and `j`/`k` move in the order shown, and Enter runs the action under the cursor. A
+number from 1 to 9 moves to that action of the numbered list (see `TERM=dumb` below), the same
+action as before the groups. An action that asks before it runs still asks.
+
 Unfreeze shows only on a frozen project, Up only on a site that is down. Deploy and Update show the
 pending commits and ask `Deploy <project> (production) <live> → <new>? [y/N]` first. Rollback… shows
 `rollback --dry-run`, then asks. Freeze… and Down… ask for an optional reason. Each action runs the
@@ -553,8 +590,9 @@ terminal back to normal. `exit` returns to the menu with fresh facts, whatever t
 `b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
 action ran and puts the cursor back on the same row. `r` or the `Recheck projects` row reads the rows again. `q`, Ctrl-D, the
 `Quit` row or Esc in the project list quit with exit code 0. With `TERM=dumb` both lists are
-numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`. There
-the detail block never redraws: after a pick it shows once, as plain lines, above the action list.
+numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`. The
+numbered action list keeps its order, without groups, letters or hints, and the pending commits stay
+in brackets after the label, like `1  Deploy new release (3 commits)`. There the detail block never redraws: after a pick it shows once, as plain lines, above the action list.
 While the arrow-key menu is on screen, keys never echo as text, and keys pressed before a question
 (the menu's own or an action's) are dropped, so a stray arrow or Enter never answers it.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or

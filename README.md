@@ -36,12 +36,12 @@ One script (`deploy`) does the parts every project shares. Each project keeps it
 
 ```mermaid
 flowchart LR
-    clone["Clone the branch<br>into releases/"] --> build["preflight, backup,<br>build, verify"]
-    build -- fails --> drop["Delete the new folder;<br>the old release stays live"]
-    build -- ok --> switch["Switch current<br>to the new release"]
-    switch --> check{"Does the site serve<br>the new release?"}
-    check -- yes --> prune["Done; prune<br>old releases"]
-    check -- no --> back["Switch current back;<br>set the release aside"]
+    A["Clone the branch<br>into releases/"] --> B["preflight, backup,<br>build, verify"]
+    B -- fails --> C["Delete the new folder,<br>the old release stays live"]
+    B -- ok --> D["Switch current<br>to the new release"]
+    D --> E{"Does the site serve<br>the new release?"}
+    E -- yes --> F["Done, prune<br>old releases"]
+    E -- no --> G["Switch current back,<br>set the release aside"]
 ```
 
 Each project has a base folder on the server. The web server serves `current/public`:

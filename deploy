@@ -4086,7 +4086,7 @@ menu_action_row() {
     [ "${A_GROUP[$1]}" != Risky ] || color="$C_RED"
     [ "${A_KEY[$1]}" != back ] || color="$C_DIM"
     if [ "${2:-0}" -eq 1 ]; then
-        mark="$C_GREEN❯$C_OFF "
+        mark="${C_GREEN}❯${C_OFF} "
         color="$C_BOLD$color"
     fi
     [ "$hint" != - ] || hint=""
@@ -4106,7 +4106,7 @@ menu_action_line() {
     local mark="  " color="" num="$(($1 + 1))" last="$((${#A_KEY[@]} - 1))"
 
     if [ "${2:-0}" -eq 1 ]; then
-        mark="$C_GREEN❯$C_OFF "
+        mark="${C_GREEN}❯${C_OFF} "
         color="$C_BOLD"
     fi
     if [ "${A_KEY[$1]}" = back ]; then
@@ -4124,7 +4124,7 @@ menu_action_line() {
 # bar, for the redraw.
 menu_action_draw() {
     local i prefix="  " group="" width=4 label
-    [ "$RAILS" -eq 0 ] || prefix="$C_DIM│$C_OFF  "
+    [ "$RAILS" -eq 0 ] || prefix="${C_DIM}│${C_OFF}  "
     A_LINES=0
     menu_action_order
 

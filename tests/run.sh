@@ -3223,6 +3223,19 @@ if command -v script > /dev/null; then
     [ -n "$up" ] && [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the action list redraw moves up $up lines, not the $drawn drawn"; }
     [ "$(live_release)" = "$live" ] || fail "the rollback ran on n"
 
+    # Under a UTF-8 locale, as in a real terminal, bash 3.2 reads $NAME│ as one name, so the engine
+    # braces every variable right before a non-ASCII character. The menu and an action list open,
+    # in color.
+    bad="$(LC_ALL=C grep -nE $'\\$[A-Za-z_][A-Za-z0-9_]*[^\t -~]' "$ROOT/deploy" || true)"
+    [ -z "$bad" ] || fail "an unbraced variable sits right before a non-ASCII character in deploy: $bad"
+    utf8=en_US.UTF-8
+    locale -a 2> /dev/null | grep -qx "$utf8" || utf8=C.UTF-8
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "letter or ↑↓" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm LC_ALL="$utf8" "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed under $utf8"; }
+    ! grep -q "unbound variable" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu hit an unbound variable under $utf8"; }
+    grep -q "letter or ↑↓ Enter · b back · q quit" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the action list did not open under $utf8"; }
 
     # s1 follows feature/x; s2 and the new s3 are free.
     cp "$WORK/projects/fixture.env" "$WORK/fixture.env"

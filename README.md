@@ -573,15 +573,44 @@ The arrow keys and `j`/`k` move in the order shown, and Enter runs the action un
 number from 1 to 9 moves to that action of the numbered list (see `TERM=dumb` below), the same
 action as before the groups. An action that asks before it runs still asks.
 
-Unfreeze shows only on a frozen project, Up only on a site that is down. Deploy and Update show the
-pending commits and ask `Deploy <project> (production) <live> → <new>? [y/N]` first. Rollback… shows
-`rollback --dry-run`, then asks. Freeze… and Down… ask for an optional reason. Each action runs the
-matching command (`deploy <project> status`, `deploy <project>@sN cache`, …) as a child process, with
-its own questions. Its output prints under the action list and stays there. When it ends, the menu
-shows whether it worked or failed and waits for Enter, then shows the same action list with fresh
-facts under the output; the menu never draws over output. A failed run keeps the menu open. Ctrl-C during a run
-stops that run and comes back to the menu; Ctrl-C in a list quits. After `deploy self` the new engine
-opens its own menu.
+Unfreeze shows only on a frozen project, Up only on a site that is down. Risky actions show what
+changes before they ask:
+
+- Deploy and Update show the pending commits and ask
+  `Deploy <project> (production) <live> → <new>? [y/N]`.
+- Rollback… shows `rollback --dry-run` (the live release and the one it goes back to), then asks.
+- Down… asks for an optional reason, then shows what the site will show and asks.
+- Free slot shows the branch the slot follows now and asks.
+
+Freeze… asks for an optional reason. Every `[y/N]` question defaults to No: Enter, or any answer but
+`y`, does nothing and keeps the action list. Each action runs the matching command
+(`deploy <project> status`, `deploy <project>@sN cache`, …) as a child process, with its own
+questions. Its output prints under the action list and stays there; the menu never draws over
+output.
+
+When the action works, the project list draws fresh under the output at once, with no Enter to
+press. A result line sits over it, with the versions when the live one changed. The cursor stays on
+the same row, and that row ends with a green `updated` when the action changed it (Status, Changed
+files, Check site and Log change nothing):
+
+```
+◇  ✓ deploy example finished · v2026.11.5 → v2026.11.6
+◆  Pick a project                                   3 to ship · 1 problem
+│        NAME            VERSION                    PENDING          SITE
+│  ❯ 1 ✓ example         v2026.11.6                 up to date       ok  updated
+```
+
+When it fails, one red line under the output says what to do next: the hint the command printed
+(its `Try:` line), else `deploy <project> log`. The menu then waits for Enter before the project
+list comes back:
+
+```
+■  deploy example --force failed (exit 1) · next: deploy example unfreeze
+◇  Press Enter to go back
+```
+
+Ctrl-C during a run stops that run and comes back to the project list; Ctrl-C in a list quits.
+After `deploy self` the new engine opens its own menu.
 
 Go to current folder shows only when `current` is a link to a live release. A script cannot change
 the folder of the shell that started it (see `deploy path`), so this row opens a new shell instead:
@@ -596,7 +625,19 @@ reads the rows again when an action ran. The free slot leaf and the engine list 
 numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`. The
 numbered action list keeps its order, without groups, letters or hints, and the pending commits stay
 in brackets after the label, like `1  Deploy new release (3 commits)`. There the detail block never redraws: after a pick it shows once, as plain lines, above the action list.
-Nothing is drawn in place there: each list prints under the one before.
+Nothing is drawn in place there: each list prints under the one before. An action that works goes
+back to the numbered project list without Enter too; a failed one still waits for it.
+
+With no projects yet the menu still opens. It shows the engine row and, in place of the detail
+block, how to add the first project:
+
+```
+│  ── No projects yet ──────────────────────────────
+│  Add one from the sample in the engine folder, then check it:
+│    cp projects/example.env.sample projects/example.env
+│    deploy example check --setup
+```
+
 While the arrow-key menu is on screen, keys never echo as text, and keys pressed before a question
 (the menu's own or an action's) are dropped, so a stray arrow or Enter never answers it.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or

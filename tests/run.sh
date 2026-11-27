@@ -3161,65 +3161,80 @@ if command -v script > /dev/null; then
     grep -qE "❯ +Recheck projects$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the cursor did not reach Recheck projects"; }
     ! grep -qF "[B" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "arrow keys showed as text"; }
 
-    # The production list: a deploy that works, Enter goes back to the list with fresh facts, b to
-    # the project list with fresh rows.
+    # The production list: a deploy that works goes back to the project list at once, without Enter,
+    # with a result line, fresh rows and an "updated" mark on its row.
     next_second
-    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "[y/N]" $'y\n' "Press Enter to go back" $'\n' \
-        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "[y/N]" $'y\n' \
+        "r to refresh, q to quit" $'q\n' \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" CHECK_WAIT=10 RELEASE_WAIT=0 TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the numbered menu failed"; }
     grep -q "r to refresh, q to quit" "$WORK/menu.log" || fail "TERM=dumb shows no numbered list"
     grep -q "fixture — production · .* → v2026.11.20000" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the production list has no title"; }
-    for label in "1  Deploy new release (1 commit)" "2  Status" "3  Check site" "4  Log" "5  Rollback…" \
-        "6  Clear cache" "7  Prune releases" "8  Freeze…" "9  Down…"; do
+    for label in "1  Deploy new release (1 commit)" "2  Status" "3  Check site" "4  Changed files" "5  Log" "6  Rollback…" \
+        "7  Clear cache" "8  Prune releases" "9  Freeze…" "10  Down…"; do
         grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the production list has no $label"; }
     done
     grep -q "fixture menu" "$WORK/menu.log" || fail "the menu does not show the pending commits"
     grep -q "Deploy fixture (production) .* → v2026.11.20000? \[y/N\]" "$WORK/menu.log" \
         || fail "the menu does not ask before the deploy"
     [[ "$(live_release)" == *-v2026.11.20000-* ]] || { cat "$WORK/menu.log"; fail "the menu did not deploy on y"; }
-    grep -q "deploy fixture finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu does not show the deploy ended"; }
-    grep -q "Press Enter to go back" "$WORK/menu.log" || fail "the menu does not wait for Enter after the deploy"
-    [ "$(grep -c "b to go back, q to quit" "$WORK/menu.log")" -eq 2 ] \
-        || { cat "$WORK/menu.log"; fail "the action list did not come back after the deploy"; }
-    grep -qF "1  Redeploy (up to date)" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the action list after the deploy has old facts"; }
+    grep -qE "◇  ✓ deploy fixture finished · [^ ]+ → v2026\.11\.20000" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the menu shows no result line with the versions after the deploy"; }
+    ! grep -q "Press Enter to go back" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "TERM=dumb waits for Enter after a deploy that worked"; }
+    [ "$(grep -c "b to go back, q to quit" "$WORK/menu.log")" -eq 1 ] \
+        || { cat "$WORK/menu.log"; fail "the action list came back after the deploy, not the project list"; }
+    grep -qE "1 ✓ fixture +v2026\.11\.20000 +up to date +ok +updated" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the deployed row has no updated mark"; }
     ! grep -qE "letter or|^│  (Ship|Look|Upkeep|Risky)$|^│ +[a-z]  [A-Z]" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the numbered list shows groups or letters"; }
     [ "$(grep -c "r to refresh, q to quit" "$WORK/menu.log")" -eq 2 ] \
-        || { cat "$WORK/menu.log"; fail "b did not go back to the project list"; }
+        || { cat "$WORK/menu.log"; fail "the deploy did not go back to the project list"; }
     grep -qE "1 ✓ fixture +v2026\.11\.20000 +up to date" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the list after the deploy has old rows"; }
 
-    # A failed deploy keeps the menu; a frozen project shows Unfreeze, and it unfreezes.
+    # A failed deploy keeps the menu: it says the next step in a red line and waits for Enter. A
+    # frozen project shows Unfreeze, and it unfreezes.
     deploy fixture freeze "menu fail" > /dev/null
-    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'8\n' "Press Enter to go back" $'\n' \
-        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'1\n' "Press Enter to go back" $'\n' \
+        "r to refresh, q to quit" $'1\n' "b to go back, q to quit" $'8\n' "r to refresh, q to quit" $'q\n' \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed after a failed deploy"; }
-    grep -q "deploy fixture --force failed with exit code 1" "$WORK/menu.log" \
-        || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed"; }
+    grep -qF "deploy fixture --force failed (exit 1) · next: deploy fixture unfreeze" "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the menu does not show the deploy failed with the next step"; }
+    [ "$(grep -c "Press Enter to go back" "$WORK/menu.log")" -eq 1 ] \
+        || { cat "$WORK/menu.log"; fail "the menu did not wait for Enter once, after the failed deploy only"; }
     grep -qF "8  Unfreeze" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a frozen project shows no Unfreeze"; }
-    grep -q "deploy fixture unfreeze finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Unfreeze did not run"; }
+    grep -q "✓ deploy fixture unfreeze finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Unfreeze did not run"; }
     [ ! -e "$BASE/.frozen" ] || fail "Unfreeze in the menu left the project frozen"
-    [ "$(grep -cF "8  Freeze…" "$WORK/menu.log")" -eq 1 ] || { cat "$WORK/menu.log"; fail "the list after Unfreeze shows no Freeze"; }
+    [ "$(grep -cE "↳ frozen" "$WORK/menu.log")" -eq 2 ] || { cat "$WORK/menu.log"; fail "the rows after Unfreeze still show it frozen"; }
     deploy fixture unfreeze > /dev/null 2>&1 || true
 
     # Keys pressed between a pick and its question are dropped, so they do not answer it: Clear
-    # cache with a stray ↓↓ and Enter still asks and runs on y.
+    # cache with a stray ↓↓ and Enter still asks and runs on y. It worked, so the project list comes
+    # back under its output without Enter: the result line right over the title, the cursor on the
+    # same row with an "updated" mark, and its detail block.
     on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "fixture — production" $'6\n\033[B\033[B\n' \
-        "[y/N]" $'y\n' "Press Enter to go back" $'\n' "fixture — production" q \
+        "[y/N]" $'y\n' "Pick a project" q \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed on Clear cache"; }
     grep -q "deploy fixture cache finished" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Clear cache did not run"; }
     ! grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "a stray key answered the cache question"; }
+    ! grep -q "Press Enter to go back" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu waits for Enter after an action that worked"; }
+    menu_screen "$WORK/menu.log" > "$WORK/menu.screen"
+    grep -B1 "◆  Pick a project" "$WORK/menu.screen" | sed -n 1p | grep -qx "◇  ✓ deploy fixture cache finished" \
+        || { cat "$WORK/menu.screen"; fail "the result line is not right over the project list"; }
+    grep -qE "^│  ❯ 1 ✓ fixture .* updated$" "$WORK/menu.screen" \
+        || { cat "$WORK/menu.screen"; fail "the cursor is not on the cleared row, or it has no updated mark"; }
+    [ "$(grep -c "updated$" "$WORK/menu.screen")" -eq 1 ] || { cat "$WORK/menu.screen"; fail "more than one row is marked updated"; }
+    grep -q "^│  ── fixture · production" "$WORK/menu.screen" || { cat "$WORK/menu.screen"; fail "the project list came back without its detail block"; }
 
     live="$(live_release)"
     # The arrow-key list in color at 80 columns: dim group labels, a red Risky label and red risky
     # actions, a dim hint after each action, and the letter key bar. An unknown letter (v) does
     # nothing, s runs Status at once, o runs Rollback… and still asks, and the redraw moves up the
     # lines drawn.
-    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "fixture — production" vs "Press Enter to go back" $'\n' \
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "fixture — production" vs "Pick a project" $'1\n' \
         "fixture — production" o "[y/N]" $'n\n' "fixture — production" q \
         -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
         "$ROOT/deploy" \
@@ -3250,7 +3265,7 @@ if command -v script > /dev/null; then
         [ "$width" -lt 80 ] || wide="$line"
     done < "$WORK/menu.rows"
     [ -z "$wide" ] || { cat "$WORK/menu.rows"; fail "an action line is 80 columns or more at 80: $wide"; }
-    [ "$(grep -cE "deploy fixture [a-z -]+ (finished|failed with exit code)" "$WORK/menu.plain")" -eq 1 ] \
+    [ "$(grep -cE "deploy fixture [a-z -]+ (finished|failed \(exit)" "$WORK/menu.plain")" -eq 1 ] \
         || { cat "$WORK/menu.plain"; fail "v ran an action, or s or o did not run once"; }
     grep -q "deploy fixture status finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "s did not run Status"; }
     grep -q "Roll back fixture (production)? \[y/N\]" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "o did not ask before the rollback"; }
@@ -3273,6 +3288,62 @@ if command -v script > /dev/null; then
     ! grep -q "unbound variable" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu hit an unbound variable under $utf8"; }
     grep -q "letter or ↑↓ Enter · b back · q quit" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the action list did not open under $utf8"; }
+
+    # A failed action under UTF-8, in color: its output stays, then one red line with the next step
+    # (the hint the command printed), and the menu waits for Enter before the project list comes back.
+    deploy fixture freeze "menu fail" > /dev/null
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "letter or ↑↓" d "Press Enter to go back" $'\n' "Pick a project" q \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        LC_ALL="$utf8" "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on a failed action"; }
+    deploy fixture unfreeze > /dev/null
+    LC_ALL=C grep -qF $'\033[31mdeploy fixture --force failed (exit 1) · next: deploy fixture unfreeze\033[0m' "$WORK/menu.log" \
+        || { cat -v "$WORK/menu.log"; fail "a failed action shows no red line with the next step"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    rows="$(sed -nE 's/^■  Deploys are frozen.*|^■  deploys are frozen.*/output/p; s/.*failed \(exit 1\) · next: .*/next/p;
+        s/.*Press Enter to go back.*/wait/p; s/^◆  Pick a project.*/menu/p' "$WORK/menu.plain" | tr '\n' ' ')"
+    [ "$rows" = "menu output next wait menu " ] || { cat "$WORK/menu.plain"; fail "a failed action does not show its output, the next step, then wait: $rows"; }
+    ! grep -q "updated$" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "a failed action marked its row updated"; }
+
+    # No is the default of a risky question: Enter on the rollback question (asked by the menu) and on
+    # the down question (asked by the command) does nothing, shows no result and keeps the list.
+    live="$(live_release)"
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'1\n' "letter or ↑↓" o "[y/N]" $'\n' "letter or ↑↓" w \
+        "Reason (optional)" $'\n' "[y/N]" $'\n' "letter or ↑↓" q \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 LC_ALL="$utf8" "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on a default No"; }
+    tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
+    { grep -q "Roll back fixture (production)? \[y/N\]" "$WORK/menu.plain" && grep -q "Take the site down? \[y/N\]" "$WORK/menu.plain"; } \
+        || { cat "$WORK/menu.plain"; fail "the rollback or the down did not ask"; }
+    grep -q "Taking fixture down" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "the down question shows no preview"; }
+    [ "$(grep -c "Nothing done" "$WORK/menu.plain")" -eq 2 ] || { cat "$WORK/menu.plain"; fail "Enter on a risky question did something"; }
+    [ "$(live_release)" = "$live" ] && [ ! -e "$BASE/.down" ] || fail "Enter on a risky question rolled back or took the site down"
+    ! grep -qE "✓ deploy|Press Enter|Pick a project.*$" <(sed '1,/letter or ↑↓/d' "$WORK/menu.plain") \
+        || { cat "$WORK/menu.plain"; fail "a No showed a result, waited for Enter or left the action list"; }
+    [ "$(awk '/Nothing done/ { n++ } n && /letter or ↑↓/ { seen[n] = 1 } END { print seen[1] + seen[2] }' "$WORK/menu.plain")" -eq 2 ] \
+        || { cat "$WORK/menu.plain"; fail "the action list did not come back after each No"; }
+
+    # With no projects the menu still opens: the engine row and a guide with the two setup commands,
+    # on a terminal and as plain lines.
+    mkdir -p "$WORK/no-projects"
+    on_terminal_expect "$WORK/menu.log" "Pick a project" q \
+        -- bash -c 'stty cols 80 rows 30; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/no-projects" TERM=xterm \
+        NO_COLOR=1 LC_ALL="$utf8" "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed with no projects"; }
+    on_terminal_expect "$WORK/menu.dumb.log" "r to refresh, q to quit" $'q\n' \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/no-projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.dumb.log"; fail "the numbered menu failed with no projects"; }
+    menu_screen "$WORK/menu.log" > "$WORK/menu.screen"
+    tr -d '\r' < "$WORK/menu.dumb.log" > "$WORK/menu.plain"
+    for screen in "$WORK/menu.screen" "$WORK/menu.plain"; do
+        grep -qE "^│ +(❯ )?1 (✓|●|✗) release-switch " "$screen" || { cat "$screen"; fail "no engine row with no projects"; }
+        grep -qE "^│  ── No projects yet ─" "$screen" || { cat "$screen"; fail "no guide with no projects"; }
+        grep -qE "^│    cp projects/example.env.sample /" "$screen" \
+            || { cat "$screen"; fail "the guide does not show the copy"; }
+        grep -qE "^│    deploy example check --setup$" "$screen" || { cat "$screen"; fail "the guide does not show check --setup"; }
+    done
+    ! LC_ALL=C grep -qE $'\033\\[[0-9]*[AJ]' "$WORK/menu.dumb.log" || { cat -v "$WORK/menu.dumb.log"; fail "TERM=dumb moved the cursor with no projects"; }
 
     # Enter swaps the project list for the action list in its place, and Back swaps it back: each
     # swap moves up to the title of the view before (the lines drawn), no line of it is left, and
@@ -3324,20 +3395,22 @@ if command -v script > /dev/null; then
             || { cat "$WORK/menu.screen.$((i - 1))"; fail "swap $i moves up ${swaps[$((i - 1))]} lines, not the $drawn drawn"; }
     done
 
-    # An action prints its output under the list; the list comes back under the output, and Back
-    # swaps only that one.
-    on_terminal_expect "$WORK/menu.log" "Pick a project" $'6\n' "letter or ↑↓" s "Press Enter to go back" $'\n' \
+    # An action prints its output under the list, and the project list comes back under the output,
+    # with no mark for an action that changes nothing. Enter on it swaps only that one.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'6\n' "letter or ↑↓" s "Pick a project" $'\n' \
         "letter or ↑↓" b "Pick a project" q \
         -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
         NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the menu failed on an action and Back"; }
     menu_screen "$WORK/menu.log" > "$WORK/menu.screen"
-    rows="$(sed -nE 's/^◆  fixture — production.*/list/p; s/.*deploy fixture status finished$/output/p; s/^◆  Pick a project.*/menu/p' \
+    rows="$(sed -nE 's/^◆  fixture — production.*/list/p; s/^│  Pending: .*/output/p; s/^◆  Pick a project.*/menu/p' \
         "$WORK/menu.screen" | tr '\n' ' ')"
     [ "$rows" = "list output menu " ] \
         || { cat "$WORK/menu.screen"; fail "the output is not between the action list and the project list: $rows"; }
     [ "$(grep -c "letter or ↑↓" "$WORK/menu.screen")" -eq 1 ] \
-        || { cat "$WORK/menu.screen"; fail "Back did not swap the action list under the output"; }
+        || { cat "$WORK/menu.screen"; fail "Enter and Back did not swap the lists under the output"; }
+    ! grep -q "updated$" "$WORK/menu.screen" || { cat "$WORK/menu.screen"; fail "Status marked its row updated"; }
+    ! grep -q "Press Enter to go back" "$WORK/menu.screen" || { cat "$WORK/menu.screen"; fail "Status waited for Enter"; }
     rm "$WORK"/projects/example-[a-e].env
 
     # s1 follows feature/x; s2 and the new s3 are free.
@@ -3347,8 +3420,7 @@ if command -v script > /dev/null; then
     [ ! -e "$SLOT2/BRANCH" ] || mv "$SLOT2/BRANCH" "$WORK/s2.branch"
     printf 'feature/x\n' > "$SLOT/BRANCH"
     # The engine list: 2 runs its log, then q quits.
-    on_terminal_expect "$WORK/menu.log" "Pick a project" $'4\n' "release-switch — engine" $'2\n' "Press Enter to go back" $'\n' \
-        "release-switch — engine" q \
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'4\n' "release-switch — engine" $'2\n' "Pick a project" q \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 DEPLOY_RAILS=0 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the tree menu failed"; }
     tr -d '\r' < "$WORK/menu.log" | sed $'s/\033\\[[0-9?;]*[A-Za-z]//g' > "$WORK/menu.plain"
@@ -3510,9 +3582,10 @@ if command -v script > /dev/null; then
     deploy fixture unfreeze > /dev/null
     rm "$WORK/projects/example-long-name-20.env" "$SLOT2/BRANCH"
 
-    # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing; Status runs.
-    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'1\n' "[y/N]" $'n\n' "Press Enter to go back" $'\n' "b to go back, q to quit" $'6\n' "Press Enter to go back" $'\n' \
-        "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
+    # The slot list: an up-to-date Update is a --force deploy that asks, n does nothing and keeps the
+    # list, with no Enter to wait for; Status runs.
+    on_terminal_expect "$WORK/menu.log" "r to refresh, q to quit" $'2\n' "b to go back, q to quit" $'1\n' "[y/N]" $'n\n' \
+        "b to go back, q to quit" $'6\n' "r to refresh, q to quit" $'q\n' \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
     ! LC_ALL=C grep -qE $'\033\\[[0-9]*[AJ]' "$WORK/menu.log" || { cat -v "$WORK/menu.log"; fail "TERM=dumb moved the cursor on b"; }
@@ -3522,9 +3595,9 @@ if command -v script > /dev/null; then
         grep -qF "$label" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no $label"; }
     done
     grep -q "Build it? \[y/N\]" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not ask"; }
-    grep -q "deploy fixture@s1 --force finished" "$WORK/menu.log" \
-        || { cat "$WORK/menu.log"; fail "Update on an up-to-date slot did not run deploy --force"; }
-    grep -qE "deploy fixture@s1 status (finished|failed)" "$WORK/menu.log" \
+    { grep -q "Nothing done" "$WORK/menu.log" && ! grep -q "deploy fixture@s1 --force finished" "$WORK/menu.log"; } \
+        || { cat "$WORK/menu.log"; fail "n to Update on an up-to-date slot did something, or showed a result"; }
+    grep -qE "deploy fixture@s1 status finished" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "Status in the slot list did not run"; }
 
     # The free leaf asks for a branch: empty does nothing, a name runs staging checkout.
@@ -3535,8 +3608,8 @@ if command -v script > /dev/null; then
     grep -q "Check out into s2 of fixture" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf has no title"; }
     grep -q "Branch, or #N for a pull request:" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the free leaf does not ask for a branch"; }
     grep -q "Nothing done" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "an empty branch did something"; }
-    grep -q "deploy staging fixture checkout no-such-branch failed" "$WORK/menu.log" \
-        || { cat "$WORK/menu.log"; fail "the free leaf did not run staging checkout"; }
+    grep -q "deploy staging fixture checkout no-such-branch failed (exit 1) · next: " "$WORK/menu.log" \
+        || { cat "$WORK/menu.log"; fail "the free leaf did not run staging checkout, or showed no next step"; }
     # Go to current folder: a shell (a fake SHELL that saves its folder) starts in the live release,
     # and any exit comes back to the menu. Production uses the arrow-key list, the slot exits non-zero.
     cat > "$WORK/shell.sh" <<'EOF'

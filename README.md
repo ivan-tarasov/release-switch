@@ -1,3 +1,5 @@
+[![Release Switch: zero-downtime deploys for PHP projects, shared hosting included](docs/images/banner.webp)](https://tarasov.ca/en/portfolio/release-switch)
+
 # release-switch
 
 [![License: MIT](https://img.shields.io/github/license/ivan-tarasov/release-switch)](LICENSE)
@@ -1141,6 +1143,8 @@ Each error, what it means and what to do next is in
 
 How to run the tests, and the rules for pull requests and releases, are in
 [docs/contributing.md](docs/contributing.md).
+
+The story of how it was built: [case study on tarasov.ca](https://tarasov.ca/en/portfolio/release-switch).
 
 ## License
 

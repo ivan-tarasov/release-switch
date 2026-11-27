@@ -2945,6 +2945,43 @@ on_terminal_expect() {
         expect_feed "$log" ${pairs[@]+"${pairs[@]}"} | script -q /dev/null "$@" >> "$log" 2>&1
     fi
 }
+# The screen that terminal log $1 leaves, one line per row, as a terminal draws it: \r, \n, clear to
+# the end of the line (ESC [K) and of the screen (ESC [J), and cursor up (ESC [nA). With $2, stops
+# before cursor up number $2 + 1.
+menu_screen() {
+    LC_ALL=C awk -v stop="${2:-0}" '
+        BEGIN { cur = 0; col = 0; max = 0; ups = 0 }
+        {
+            line = $0
+            while (line != "") {
+                if (match(line, /^\033\[[0-9]*A/)) {
+                    ups++
+                    if (stop && ups > stop) exit
+                    cur -= substr(line, 3, RLENGTH - 3) + 0
+                    if (cur < 0) cur = 0
+                } else if (match(line, /^\033\[K/)) {
+                    row[cur] = substr(row[cur], 1, col)
+                } else if (match(line, /^\033\[J/)) {
+                    row[cur] = substr(row[cur], 1, col)
+                    for (r = cur + 1; r <= max; r++) row[r] = ""
+                    max = cur
+                } else if (match(line, /^\033\[[0-9?;]*[A-Za-z]/)) {
+                } else if (match(line, /^\r/)) {
+                    col = 0
+                } else {
+                    match(line, /^[^\033\r]+/)
+                    row[cur] = substr(row[cur], 1, col) substr(line, 1, RLENGTH)
+                    col += RLENGTH
+                }
+                line = substr(line, RLENGTH + 1)
+            }
+            cur++
+            col = 0
+            if (cur > max) max = cur
+        }
+        END { for (r = 0; r <= max; r++) print row[r] }
+    ' "$1"
+}
 if command -v script > /dev/null; then
     on_terminal_expect "$WORK/copy.log" "[y/N]" $'n\n' \
         -- env PROJECTS_DIR="$WORK/projects" DEPLOY_RAILS=0 "$ROOT/deploy" fixture@s1 copy-from fixture
@@ -3218,7 +3255,7 @@ if command -v script > /dev/null; then
     grep -q "deploy fixture status finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "s did not run Status"; }
     grep -q "Roll back fixture (production)? \[y/N\]" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "o did not ask before the rollback"; }
     grep -q "Nothing done" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "n to the rollback did something"; }
-    up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '2{s/[^0-9]//g;p;}')"
+    up="$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | sed -n '3{s/[^0-9]//g;p;}')"
     drawn="$(awk '/^│  Ship$/ { on = 1 } on { n++ } on && /letter or ↑↓/ { print n; exit }' "$WORK/menu.plain")"
     [ -n "$up" ] && [ "$up" = "$drawn" ] || { cat "$WORK/menu.plain"; fail "the action list redraw moves up $up lines, not the $drawn drawn"; }
     [ "$(live_release)" = "$live" ] || fail "the rollback ran on n"
@@ -3236,6 +3273,72 @@ if command -v script > /dev/null; then
     ! grep -q "unbound variable" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the menu hit an unbound variable under $utf8"; }
     grep -q "letter or ↑↓ Enter · b back · q quit" "$WORK/menu.log" \
         || { cat "$WORK/menu.log"; fail "the action list did not open under $utf8"; }
+
+    # Enter swaps the project list for the action list in its place, and Back swaps it back: each
+    # swap moves up to the title of the view before (the lines drawn), no line of it is left, and
+    # after Back the screen is the same as before Enter, cursor row and detail block too. Five more
+    # projects make the project list taller than the action list with the block on, and shorter
+    # with it off. Rows: example-a to example-e, fixture, the engine.
+    # Without slots, so each is one row.
+    for name in example-a example-b example-c example-d example-e; do
+        sed '/^STAGING_/d' "$WORK/projects/fixture.env" > "$WORK/projects/$name.env"
+    done
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'j\n' "letter or ↑↓" b "Pick a project" $'i\n' \
+        "letter or ↑↓" b "Pick a project" q \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on Enter and Back"; }
+    # Cursor ups: 1 j, 2 Enter, 3 Back, 4 i, 5 Enter, 6 Back.
+    # Each screen up to its first key bar: the last one goes on with the lines q prints.
+    for i in 0 1 2 3 4 5 6; do
+        menu_screen "$WORK/menu.log" "$i" | sed -E '/pick · Enter open|letter or ↑↓/q' > "$WORK/menu.screen.$i"
+    done
+    title="$(grep -n "◆  Pick a project" "$WORK/menu.screen.0" | cut -d: -f1)"
+    [ -n "$title" ] || { cat "$WORK/menu.screen.0"; fail "the menu has no title"; }
+    for i in 2 5; do
+        ! grep -qE "Pick a project|NAME +VERSION|pick · Enter open|── " "$WORK/menu.screen.$i" \
+            || { cat "$WORK/menu.screen.$i"; fail "Enter left a line of the project list (up $i)"; }
+        [ "$(grep -n "◆  " "$WORK/menu.screen.$i" | cut -d: -f1)" = "$title" ] \
+            || { cat "$WORK/menu.screen.$i"; fail "the action list title is not where the project list title was (up $i)"; }
+        grep -qE "^│    b  Back$" "$WORK/menu.screen.$i" || { cat "$WORK/menu.screen.$i"; fail "Enter did not draw the action list (up $i)"; }
+        [ "$(grep -c "letter or ↑↓" "$WORK/menu.screen.$i")" -eq 1 ] \
+            || { cat "$WORK/menu.screen.$i"; fail "the action list is not drawn once (up $i)"; }
+    done
+    cmp -s "$WORK/menu.screen.1" "$WORK/menu.screen.3" \
+        || { diff "$WORK/menu.screen.1" "$WORK/menu.screen.3"; fail "Back did not bring back the project list as it was, block on"; }
+    cmp -s "$WORK/menu.screen.4" "$WORK/menu.screen.6" \
+        || { diff "$WORK/menu.screen.4" "$WORK/menu.screen.6"; fail "Back did not bring back the project list as it was, block off"; }
+    grep -qE "^│  ❯ 2 " "$WORK/menu.screen.3" || { cat "$WORK/menu.screen.3"; fail "the cursor left row 2 after Back"; }
+    grep -q "── " "$WORK/menu.screen.3" || { cat "$WORK/menu.screen.3"; fail "the block is gone after Back"; }
+    ! grep -q "── " "$WORK/menu.screen.6" || { cat "$WORK/menu.screen.6"; fail "the hidden block is back after Back"; }
+    ! grep -qE "letter or ↑↓|^│  (Ship|Look|Upkeep|Risky)$" "$WORK/menu.screen.3" "$WORK/menu.screen.6" \
+        || { cat "$WORK/menu.screen.3" "$WORK/menu.screen.6"; fail "Back left a line of the action list"; }
+    act="$(wc -l < "$WORK/menu.screen.2")"
+    [ "$(wc -l < "$WORK/menu.screen.1")" -gt "$act" ] && [ "$(wc -l < "$WORK/menu.screen.4")" -lt "$act" ] \
+        || { cat "$WORK/menu.screen.1" "$WORK/menu.screen.2" "$WORK/menu.screen.4"; fail "the lists are not taller and shorter than the action list"; }
+    # Each swap moves up the lines of the view before it, from its title to its key bar.
+    read -ra swaps <<< "$(LC_ALL=C grep -o $'\033\\[[0-9]*A' "$WORK/menu.log" | tr -dc '0-9\n' | tr '\n' ' ')"
+    for i in 2 3 5 6; do
+        drawn=$(($(wc -l < "$WORK/menu.screen.$((i - 1))") - title + 1))
+        [ "${swaps[$((i - 1))]}" = "$drawn" ] \
+            || { cat "$WORK/menu.screen.$((i - 1))"; fail "swap $i moves up ${swaps[$((i - 1))]} lines, not the $drawn drawn"; }
+    done
+
+    # An action prints its output under the list; the list comes back under the output, and Back
+    # swaps only that one.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'6\n' "letter or ↑↓" s "Press Enter to go back" $'\n' \
+        "letter or ↑↓" b "Pick a project" q \
+        -- bash -c 'stty cols 80 rows 50; exec "$@"' bash env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm \
+        NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the menu failed on an action and Back"; }
+    menu_screen "$WORK/menu.log" > "$WORK/menu.screen"
+    rows="$(sed -nE 's/^◆  fixture — production.*/list/p; s/.*deploy fixture status finished$/output/p; s/^◆  Pick a project.*/menu/p' \
+        "$WORK/menu.screen" | tr '\n' ' ')"
+    [ "$rows" = "list output menu " ] \
+        || { cat "$WORK/menu.screen"; fail "the output is not between the action list and the project list: $rows"; }
+    [ "$(grep -c "letter or ↑↓" "$WORK/menu.screen")" -eq 1 ] \
+        || { cat "$WORK/menu.screen"; fail "Back did not swap the action list under the output"; }
+    rm "$WORK"/projects/example-[a-e].env
 
     # s1 follows feature/x; s2 and the new s3 are free.
     cp "$WORK/projects/fixture.env" "$WORK/fixture.env"
@@ -3269,6 +3372,11 @@ if command -v script > /dev/null; then
     grep -q "letter or ↑↓ Enter · b back · q quit" "$WORK/menu.plain" \
         || { cat "$WORK/menu.plain"; fail "the engine list shows no key bar"; }
     grep -q "deploy self log finished" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "Log in the engine list did not run"; }
+    # The engine list swaps in place too. Cursor ups: 1 the key 4, 2 Enter.
+    menu_screen "$WORK/menu.log" 2 > "$WORK/menu.screen"
+    grep -q "==> release-switch — engine" "$WORK/menu.screen" || { cat "$WORK/menu.screen"; fail "the engine list is not on the screen"; }
+    ! grep -qE "Pick a project|NAME +VERSION" "$WORK/menu.screen" \
+        || { cat "$WORK/menu.screen"; fail "the engine list did not swap in place of the project list"; }
     # The slot list has 11 or more actions; e runs Free slot, past the first 9, and it still asks.
     on_terminal_expect "$WORK/menu.log" "Pick a project" $'2\n' "fixture s1 — staging" e "[y/N]" $'n\n' \
         "fixture s1 — staging" q \
@@ -3283,6 +3391,17 @@ if command -v script > /dev/null; then
         || { cat "$WORK/menu.plain"; fail "e did not run Free slot, or it did not ask"; }
     grep -q "Nothing done" "$WORK/menu.plain" || { cat "$WORK/menu.plain"; fail "n to Free slot did something"; }
     [ "$(cat "$SLOT/BRANCH")" = feature/x ] || fail "n to Free slot freed s1"
+    # The free leaf swaps in place too: its title and question take the place of the project list.
+    on_terminal_expect "$WORK/menu.log" "Pick a project" $'3\n' "Branch, or #N" $'\n' "Pick a project" q \
+        -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=xterm NO_COLOR=1 "$ROOT/deploy" \
+        || { cat "$WORK/menu.log"; fail "the free leaf failed on a terminal"; }
+    title="$(menu_screen "$WORK/menu.log" 1 | grep -n "◆  Pick a project" | cut -d: -f1)"
+    menu_screen "$WORK/menu.log" > "$WORK/menu.screen"
+    [ -n "$title" ] && [ "$(grep -n "◆  Check out into s2 of fixture" "$WORK/menu.screen" | cut -d: -f1)" = "$title" ] \
+        || { cat "$WORK/menu.screen"; fail "the free leaf title is not where the project list title was"; }
+    rows="$(sed -nE 's/^◆  Check out into.*/title/p; s/.*Nothing done$/output/p; s/^◆  Pick a project.*/menu/p' \
+        "$WORK/menu.screen" | tr '\n' ' ')"
+    [ "$rows" = "title output menu " ] || { cat "$WORK/menu.screen"; fail "the project list after the free leaf is not under it: $rows"; }
 
     # At 80 columns a 20-character name, a long branch (s2) and two frozen rows fit without a wrap:
     # the widest column is cut with …, each problem is on a line of its own under its row, the title
@@ -3396,6 +3515,7 @@ if command -v script > /dev/null; then
         "b to go back, q to quit" $'b\n' "r to refresh, q to quit" $'q\n' \
         -- env GIT_PAGER=cat PROJECTS_DIR="$WORK/projects" TERM=dumb NO_COLOR=1 "$ROOT/deploy" \
         || { cat "$WORK/menu.log"; fail "the numbered slot list failed"; }
+    ! LC_ALL=C grep -qE $'\033\\[[0-9]*[AJ]' "$WORK/menu.log" || { cat -v "$WORK/menu.log"; fail "TERM=dumb moved the cursor on b"; }
     grep -q "fixture s1 — staging · feature/x" "$WORK/menu.log" || { cat "$WORK/menu.log"; fail "the slot list has no title"; }
     for label in "1  Update (up to date)" "2  Checkout branch or PR…" "3  Clear cache" "4  Prune releases" \
         "5  Copy data from production…" "6  Status" "7  Log" "8  Rollback…" "9  Down…" "10  Go to current folder" "11  Free slot"; do

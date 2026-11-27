@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Renders terminal output with ANSI escapes to two SVG pictures of a terminal window, one for a
-// light and one for a dark page. Knows what ./deploy prints: colors, bold and dim, \r, \033[K and
-// cursor-up. No packages needed.
+// light and one for a dark page. Knows what ./deploy prints: colors, bold and dim, \r, \033[K,
+// \033[J and cursor-up. No packages needed.
 //
 //   node docs/screenshots/render.mjs <input.ansi> <output prefix>
 //
@@ -48,6 +48,9 @@ function parse(input) {
                 }
             } else if (command === 'K') {
                 lines[row].length = Math.min(lines[row].length, col);
+            } else if (command === 'J') {
+                lines[row].length = Math.min(lines[row].length, col);
+                lines.length = row + 1;
             } else if (command === 'A') {
                 row = Math.max(0, row - n);
             }

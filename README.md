@@ -480,7 +480,8 @@ under it as a tree:
 │  ↑↓/1-7 pick · Enter open · i details · r refresh · q quit
 ```
 
-Enter opens the action list of the picked row:
+Enter opens the action list of the picked row. On a terminal it takes the place of the project
+list: the title, rows, detail block and key bar go, and the list draws where they were:
 
 ```
 ◆  example — production · v2026.11.5 → v2026.11.6
@@ -576,8 +577,9 @@ Unfreeze shows only on a frozen project, Up only on a site that is down. Deploy 
 pending commits and ask `Deploy <project> (production) <live> → <new>? [y/N]` first. Rollback… shows
 `rollback --dry-run`, then asks. Freeze… and Down… ask for an optional reason. Each action runs the
 matching command (`deploy <project> status`, `deploy <project>@sN cache`, …) as a child process, with
-its own questions. When it ends, the menu shows whether it worked or failed and waits for Enter, then
-shows the same action list with fresh facts. A failed run keeps the menu open. Ctrl-C during a run
+its own questions. Its output prints under the action list and stays there. When it ends, the menu
+shows whether it worked or failed and waits for Enter, then shows the same action list with fresh
+facts under the output; the menu never draws over output. A failed run keeps the menu open. Ctrl-C during a run
 stops that run and comes back to the menu; Ctrl-C in a list quits. After `deploy self` the new engine
 opens its own menu.
 
@@ -587,12 +589,14 @@ it prints the folder, then starts `$SHELL` (else `/bin/sh`) in the live release 
 terminal back to normal. `exit` returns to the menu with fresh facts, whatever the exit code. When
 `current` is gone by the time of the pick, it says so and stays in the menu.
 
-`b`, ←, Esc or the dim `Back` row go back to the project list, which reads the rows again when an
-action ran and puts the cursor back on the same row. `r` or the `Recheck projects` row reads the rows again. `q`, Ctrl-D, the
+`b`, ←, Esc or the dim `Back` row go back to the project list. It takes the place of the action
+list the same way, with the cursor on the same row and the detail block on or off as it was. It
+reads the rows again when an action ran. The free slot leaf and the engine list swap the same way. `r` or the `Recheck projects` row reads the rows again, in the same place. `q`, Ctrl-D, the
 `Quit` row or Esc in the project list quit with exit code 0. With `TERM=dumb` both lists are
 numbered: `Pick 1–N, r to refresh, q to quit:` and `Pick 1–N, b to go back, q to quit:`. The
 numbered action list keeps its order, without groups, letters or hints, and the pending commits stay
 in brackets after the label, like `1  Deploy new release (3 commits)`. There the detail block never redraws: after a pick it shows once, as plain lines, above the action list.
+Nothing is drawn in place there: each list prints under the one before.
 While the arrow-key menu is on screen, keys never echo as text, and keys pressed before a question
 (the menu's own or an action's) are dropped, so a stray arrow or Enter never answers it.
 Without a terminal (cron, pipes) a bare `deploy` works as before: it deploys the only project, or

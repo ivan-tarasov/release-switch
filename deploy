@@ -252,6 +252,9 @@ error_line() {
 }
 
 hint_line() {
+    # The menu shows the last hint again under the output (menu_done).
+    [ -z "${DEPLOY_MENU_DIR:-}" ] || printf '%s\n' "$1" > "$DEPLOY_MENU_DIR/hint" 2> /dev/null || true
+
     if [ "$RAILS" -eq 1 ]; then
         printf '%s│%s  Try: %s\n' "$C_DIM" "$C_OFF" "$1" >&2 2> /dev/null || output_gone 2
     else
@@ -307,6 +310,12 @@ after_answer() {
     stty -echo -icanon min 1 time 0 2>/dev/null || true
 }
 
+# Says $1 after a no to a question, and tells the menu nothing changed, so it shows no result line.
+nothing_done() {
+    say "$1"
+    [ -z "${DEPLOY_MENU_DIR:-}" ] || : > "$DEPLOY_MENU_DIR/nothing" 2> /dev/null || true
+}
+
 # Before a risky change: on a terminal and without --yes, shows the lines after $1, asks $1 and
 # stops with 0 on no. Without a terminal (cron, pipes) it goes on, silent.
 confirm() {
@@ -323,7 +332,7 @@ confirm() {
 
     ask_yes "$question" && return 0
 
-    say "Nothing done"
+    nothing_done "Nothing done"
     exit 0
 }
 
@@ -3382,9 +3391,10 @@ menu_widths() {
 
 # Line $1 of the menu (0 is the first), with ❯ in front when $2 is 1, then its status symbol: ✗ a
 # problem, ○ free slots, ● something to ship, ✓ up to date. Production names are bold; slots hang
-# under their project on dim tree lines. The Recheck and Quit rows are dim.
+# under their project on dim tree lines. The Recheck and Quit rows are dim. The row a command just
+# changed (M_MARK) ends with a green "updated" when it fits.
 menu_line() {
-    local i="$1" mark="  " color="" name version pending site symbol
+    local i="$1" mark="  " color="" name version pending site symbol updated=""
     name="${M_NAME[$i]}"
     version="${M_VERSION[$i]}"
     pending="${M_PENDING[$i]}"
@@ -3420,9 +3430,13 @@ menu_line() {
         name="$C_BOLD$(pad "$(cut_text "$name" "$W_NAME")" "$W_NAME")$C_OFF$color"
     fi
 
-    printf '%s%s%s %s%s %s  %s  %s  %s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_NUMBERED})" \
+    if [ -n "${M_MARK:-}" ] && [ "${M_TARGET[$i]}" = "$M_MARK" ] && [ $((W_ROW + 9)) -le "$M_WIDTH" ]; then
+        updated="$(pad "" $((W_SITE + 2 - $(text_width "$(cut_text "$site" "$W_SITE")"))))${C_GREEN}updated${C_OFF}"
+    fi
+
+    printf '%s%s%s %s%s %s  %s  %s  %s%s%s' "$mark" "$color" "$(pad "${M_NUM[$i]}" ${#M_NUMBERED})" \
         "$symbol" "$color" "$name" "$(pad "$(cut_text "$version" "$W_VERSION")" "$W_VERSION")" \
-        "$(pad "$(cut_text "$pending" "$W_PENDING")" "$W_PENDING")" "$(cut_text "$site" "$W_SITE")" "$C_OFF"
+        "$(pad "$(cut_text "$pending" "$W_PENDING")" "$W_PENDING")" "$(cut_text "$site" "$W_SITE")" "$C_OFF" "$updated"
 }
 
 # The dim column labels above the rows.
@@ -3578,6 +3592,29 @@ menu_block() {
     done
 }
 
+# With no projects (M_EMPTY): how to add the first one, as plain lines under a heading rule.
+menu_guide() {
+    local to="projects/example.env" width rule="" fill
+    if [ "$PROJECTS_DIR" != "$ENGINE_DIR/projects" ]; then
+        to="$PROJECTS_DIR/example.env"
+        case "$to" in
+            "$HOME"/*) to='~'"${to#"$HOME"}" ;;
+        esac
+    fi
+
+    width="$W_ROW"
+    [ "$width" -le "$M_WIDTH" ] || width="$M_WIDTH"
+    fill=$((width - 19))
+    while [ "$fill" -gt 0 ]; do
+        rule+="─"
+        fill=$((fill - 1))
+    done
+    printf '%s── %s%sNo projects yet%s %s%s%s\n' "$C_DIM" "$C_OFF" "$C_BOLD" "$C_OFF" "$C_DIM" "$rule" "$C_OFF"
+    printf '%s\n' "$(cut_text "Add one from the sample in the engine folder, then check it:" "$M_WIDTH")"
+    printf '  %s\n' "$(cut_text "cp projects/example.env.sample $to" $((M_WIDTH - 2)))"
+    printf '  %s\n' "deploy example check --setup"
+}
+
 # Turns the detail block on (M_INFO=1) when the terminal (tput lines, 24 when unknown) has room for
 # the title, the labels, the rows and their problem lines, the block and the key bar; else off.
 menu_info_default() {
@@ -3619,7 +3656,13 @@ menu_draw() {
         M_LINES=$((M_LINES + 1))
     done
 
-    if [ "$M_INFO" -eq 1 ]; then
+    if [ "$M_EMPTY" -eq 1 ]; then
+        printf '\r\033[K%s\n' "${prefix%  }"
+        while IFS= read -r line; do
+            printf '\r\033[K%s%s\n' "$prefix" "$line"
+        done <<< "$(menu_guide)"
+        M_LINES=$((M_LINES + 5))
+    elif [ "$M_INFO" -eq 1 ]; then
         printf '\r\033[K%s\n' "${prefix%  }"
         while IFS= read -r line; do
             printf '\r\033[K%s%s\n' "$prefix" "$line"
@@ -3740,6 +3783,7 @@ menu_numbers() {
                     ;;
             esac
         done
+        [ "$M_EMPTY" -eq 0 ] || printf '\n%s\n' "$(menu_guide)"
     } | rail
 
     while :; do
@@ -3803,6 +3847,8 @@ menu_read() {
         frees+=("$free")
     done
 
+    M_EMPTY=0
+    [ "${#targets[@]}" -gt 0 ] || M_EMPTY=1
     say "Checking ${#targets[@]} projects…"
     MENU_TMP="$(mktemp -d)"
 
@@ -3841,7 +3887,7 @@ menu_read() {
     facts=""
     { IFS= read -r engine && IFS= read -r facts; } < "$MENU_TMP/engine" || true
     [ -n "$engine" ] || engine="$(printf '0\tself\trelease-switch\t%s\t-\t-\tcannot read' "$(engine_version)")"
-    rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"$engine"$'\t'"${facts:-$none}"
+    rows+="${rows:+$'\n'}-"$'\t'"-"$'\t'"-"$'\t'"$engine"$'\t'"${facts:-$none}"
     rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\trecheck\tRecheck projects\t-\t-\t-\t-\t'"$none"
     rows+=$'\n'"-"$'\t'"-"$'\t'"-"$'\t'"0"$'\tquit\tQuit\t-\t-\t-\t-\t'"$none"
     rm -rf "$MENU_TMP"
@@ -4254,35 +4300,55 @@ menu_ask() {
     after_answer
 }
 
-# Runs `deploy $@` as a child process, so a failed run keeps the menu. Sets M_STATUS, and M_RAN to 1.
+# Runs `deploy $@` as a child process, so a failed run keeps the menu. Sets M_STATUS, M_RAN to 1,
+# M_HINT to the last hint the child printed, and M_NOTHING to 1 when it said no to its own question.
 menu_child() {
     local tty
     M_STATUS=0
     M_RAN=1
+    M_HINT=""
+    M_NOTHING=0
     [ "$RAILS" -eq 0 ] || printf '%s└%s\n' "$C_DIM" "$C_OFF"
     tty="$(stty -g 2>/dev/null)" || tty=""
+    MENU_TMP="$(mktemp -d)"
     # A trap that does nothing, not '', so the child still stops on Ctrl-C and the menu stays.
     trap ':' INT
-    "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$@" || M_STATUS=$?
+    DEPLOY_MENU_DIR="$MENU_TMP" "$BASH" "$ENGINE_DIR/$(basename "${BASH_SOURCE[0]}")" "$@" || M_STATUS=$?
     trap 'exit 130' INT
+    [ ! -s "$MENU_TMP/hint" ] || M_HINT="$(sed -n '$p' "$MENU_TMP/hint")"
+    [ ! -e "$MENU_TMP/nothing" ] || M_NOTHING=1
+    rm -rf "$MENU_TMP"
+    MENU_TMP=""
     [ -z "$tty" ] || stty "$tty" 2>/dev/null || true
     printf '\033[?25h'
     intro ""
 }
 
-# Says how `deploy $*` ended, then waits for Enter.
+# Says how `deploy $*` ended. After a success the menu goes back to the project list at once, with
+# the result in M_NOTE over it. After a failure it says the next step in red (the hint the command
+# printed, else its log) and waits for Enter. Sets M_BACK to 1 unless the command changed nothing.
 menu_done() {
-    local answer
+    local answer who="$1"
+    M_BACK=1
+    [ "$who" != staging ] || who="${2:-}"
 
     case "$M_STATUS" in
-        0) say "deploy $* finished" ;;
+        0)
+            if [ "$M_NOTHING" -eq 1 ]; then
+                M_BACK=0
+            else
+                M_NOTE="deploy $* finished"
+            fi
+            ;;
         130) warn "deploy $* stopped" ;;
-        *) warn "deploy $* failed with exit code $M_STATUS" ;;
+        *)
+            error_line "${C_RED}deploy $* failed (exit $M_STATUS) · next: ${M_HINT:-deploy $who log}${C_OFF}"
+            printf '%s' "$(say "Press Enter to go back ")"
+            before_answer
+            read -r answer || exit 0
+            after_answer
+            ;;
     esac
-    printf '%s' "$(say "Press Enter to go back ")"
-    before_answer
-    read -r answer || exit 0
-    after_answer
 }
 
 # Opens $SHELL (else /bin/sh) in the live release folder of row $1, with the terminal back to
@@ -4337,7 +4403,7 @@ menu_checkout() {
 
 # Runs action $1 of row $2. Sets M_LEAVE to 1 when the row is gone after it (a freed slot).
 menu_act() {
-    local target="${M_TARGET[$2]}" version="${M_VERSION[$2]}"
+    local target="${M_TARGET[$2]}" version="${M_VERSION[$2]}" branch=""
     [ "$version" != - ] || version=""
 
     case "$1" in
@@ -4389,12 +4455,31 @@ menu_act() {
         cd) menu_shell "$2" ;;
         copy) menu_run "$target" copy-from "${target%@*}" ;;
         free)
+            IFS=$'\t' read -r _ _ _ _ _ _ _ _ _ branch <<< "${M_FACTS[$2]:-}"
+            printf 'Now:   %s\nAfter: the production branch, deployed again\n' "${branch:--}" | rail
             ask_yes "Free $(menu_name "$2") and deploy the production branch to it?" \
                 || { say "Nothing done"; return 0; }
             menu_run "$target" free
             M_LEAVE=1
             ;;
     esac
+}
+
+# The result line over the project list after a command worked: M_NOTE, with the version change of
+# its row when the live version moved. Prints it once; fails when there is none.
+menu_note() {
+    local i live=""
+    [ -n "$M_NOTE" ] || return 1
+
+    for ((i = 0; i < M_COUNT; i++)); do
+        [ "${M_TARGET[$i]}" != "$M_DONE" ] || live="${M_FACTS[$i]%%$'\t'*}"
+    done
+    if [ -n "$live" ] && [ "$live" != - ] && [ "$M_WAS" != - ] && [ "$live" != "$M_WAS" ]; then
+        M_NOTE+=" · $M_WAS → $live"
+    fi
+
+    say "${C_GREEN}✓${C_OFF} $M_NOTE"
+    M_NOTE=""
 }
 
 # Moves the cursor up MENU_UP lines, to the title of the list drawn last, and clears that line, so the
@@ -4406,13 +4491,18 @@ menu_swap() {
     MENU_UP=0
 }
 
-# The action list of menu line $1, until Back. Sets M_RAN to 1 when an action ran. A free slot leaf
-# has no list: it asks for a branch or a pull request for the first free slot.
+# The action list of menu line $1, until Back or a command ran. Sets M_RAN to 1 when an action ran,
+# and after a command M_DONE to its row and M_WAS to that row's live version before it. A command
+# that changed the row and worked marks it (M_MARK). A free slot leaf has no list: it asks for a
+# branch or a pull request for the first free slot.
 menu_open() {
     local i="$1" target="${M_TARGET[$1]}" key
     M_RAN=0
     M_LEAVE=0
+    M_BACK=0
     A_CUR=0
+    M_DONE="$target"
+    M_WAS="${M_FACTS[$1]%%$'\t'*}"
 
     case "$target" in
         *:free)
@@ -4451,6 +4541,18 @@ menu_open() {
         # Output goes under the list, and the next list starts under it.
         MENU_UP=0
         menu_act "$key" "$i"
+
+        if [ "$M_BACK" -eq 1 ]; then
+            M_MARK=""
+            if [ "$M_STATUS" -eq 0 ]; then
+                case "$key" in
+                    status | diff | check | log | selflog) ;;
+                    *) M_MARK="$target" ;;
+                esac
+            fi
+
+            return 0
+        fi
         [ "$M_LEAVE" -eq 0 ] || return 0
         [ "$M_RAN" -eq 0 ] || menu_refresh "$i"
     done
@@ -4459,10 +4561,14 @@ menu_open() {
 # A bare `deploy` on a terminal: the menu rows, a pick, its action list, and back to the rows until q.
 # On a terminal each view draws in the place of the one before, unless output came between them.
 project_menu() {
-    local i last="" reload=1
+    local i last="" reload=1 note
     M_CUR=0
     M_INFO=""
     MENU_UP=0
+    M_NOTE=""
+    M_MARK=""
+    M_DONE=""
+    M_WAS=-
 
     intro ""
     case "${TERM:-dumb}" in
@@ -4482,17 +4588,24 @@ project_menu() {
 
         menu_widths
         [ -n "$M_INFO" ] || menu_info_default
+        note=0
+        ! menu_note || note=1
         menu_pick_title
 
         case "${TERM:-dumb}" in
             dumb | unknown) menu_numbers ;;
-            *) menu_keys ;;
+            *)
+                menu_keys
+                # The next view draws over the result line too.
+                [ "$MENU_UP" -eq 0 ] || MENU_UP=$((MENU_UP + note))
+                ;;
         esac
 
         case "$M_DO" in
             quit) exit 0 ;;
             refresh)
                 reload=1
+                M_MARK=""
                 continue
                 ;;
         esac
@@ -4502,6 +4615,7 @@ project_menu() {
             quit) exit 0 ;;
             recheck)
                 reload=1
+                M_MARK=""
                 continue
                 ;;
         esac
@@ -5236,7 +5350,7 @@ copy_from() {
         is_terminal || fail "not a terminal, so copy-from cannot ask; add --yes to copy"
 
         if ! ask_yes "Copy these into $PROJECT? Its files are replaced"; then
-            say "Nothing copied"
+            nothing_done "Nothing copied"
 
             return
         fi
@@ -6327,7 +6441,8 @@ main() {
 
     # A bare deploy on a terminal picks the project from a menu.
     # It ignores --quiet: the menu is for a person at the terminal.
-    if [ $# -eq 0 ] && is_terminal && [ -n "$(list_projects)" ]; then
+    # With no projects it shows how to add one.
+    if [ $# -eq 0 ] && is_terminal; then
         QUIET=0
         RAILS="$rails"
         project_menu
